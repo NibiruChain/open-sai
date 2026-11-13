@@ -16,7 +16,7 @@
 fixtures do not prove a live trade. `just check` passed Ruff and ty.
 Margin tests cover exact integer rounding, stale position detection, balance
 checks, and network mismatch. A read-only mainnet LCD contract balance query
-also succeeded; margin and leverage mutations have not been tested on mainnet.
+also succeeded.
 
 ## Mainnet Verification
 
@@ -26,3 +26,13 @@ the remainder. Keeper's indexed trade history showed matching open,
 size-decrease, and close events. The final position query showed no open
 positions for the test account. This validates those observed actions, not all
 order types or all market conditions.
+
+Further authorized mainnet checks opened a $4 position at 2x leverage, changed
+leverage to 3x, and added $1 of margin. An immediate margin removal was rejected
+as stale before an intent was submitted; the cause was not established. The
+position was closed.
+
+A second $4 position at 2x leverage successfully added $1 of margin. After a
+12-second wait, removing $0.50 of margin and closing the position also
+succeeded. The final position query showed no open positions for the test
+account.
