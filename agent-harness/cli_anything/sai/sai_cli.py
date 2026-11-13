@@ -288,17 +288,34 @@ def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
             if (
                 row.get("intentKey") == key
                 and str(row.get("evmAddress") or "").lower() == address.lower()
-                and row.get("execActor") == "server"
             ):
-                if step in (
-                    "exec_pass",
+                if row.get("execActor") == "server" and step in (
                     "exec_fail",
                     "exec_req_fail",
-                    "exec_finality_observed",
                 ):
                     storage.set_status(key, ctx.obj["endpoint"], address, "terminal")
-                elif step in ("jwt_pass", "exec_req_pass"):
+                elif row.get("execActor") == "server" and step in (
+                    "jwt_pass",
+                    "exec_req_pass",
+                    "exec_pass",
+                ):
                     storage.set_status(key, ctx.obj["endpoint"], address, "accepted")
+                if (
+                    step == "exec_pass" and row.get("execActor") == "server"
+                ) or step == "exec_finality_observed":
+                    history_data = keeper.request(
+                        ctx.obj["endpoint"], keeper.HISTORY, {"trader": address}
+                    )
+                    matches = [
+                        item
+                        for item in history_data["perp"]["tradeHistory"]
+                        if item.get("intentKey") == key and item.get("trade")
+                    ]
+                    data["matchedTradeHistory"] = matches
+                    if matches:
+                        storage.set_status(
+                            key, ctx.obj["endpoint"], address, "terminal"
+                        )
         emit(ctx, data)
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -339,7 +356,8 @@ def submit(ctx: click.Context, payload: dict[str, Any], dry_run: bool) -> None:
 @click.option("--amount", required=True, help="USDC amount in USD.")
 @click.option("--leverage", required=True)
 @click.option(
-    "--price", required=True, help="Current price for market, trigger for limit/stop."
+    "--price",
+    help="Required trigger for limit/stop; optional dry-run reference for market orders. Live market orders use a refreshed price.",
 )
 @click.option("--slippage", required=True, help="Maximum slippage percentage.")
 @click.option("--take-profit")
@@ -353,7 +371,7 @@ def trade_open(
     order_type: str,
     amount: str,
     leverage: str,
-    price: str,
+    price: str | None,
     slippage: str,
     take_profit: str | None,
     stop_loss: str | None,
@@ -372,8 +390,18 @@ def trade_open(
             take_profit,
             stop_loss,
         )
-        if order_type == "market" and not dry_run:
+        if order_type == "market" and dry_run:
+            emit(
+                ctx,
+                {"dryRun": True, "requiresMarketPriceRefresh": True, "intent": payload},
+            )
+        elif order_type == "market":
             active = session(ctx)
+            if price is not None:
+                click.echo(
+                    "Market orders use the refreshed Keeper price; --price is a dry-run reference.",
+                    err=True,
+                )
             markets = keeper.request(ctx.obj["endpoint"], keeper.MARKETS)["perp"][
                 "borrowings"
             ]
@@ -389,7 +417,9 @@ def trade_open(
             current_price = format(Decimal(str(candidates[0]["price"])), "f")
             intents.positive(current_price, "Current price")
             payload["body"]["intentPrice"] = current_price
-            emit(ctx, intents.submit(ctx.obj["endpoint"], active, payload))
+            result = intents.submit(ctx.obj["endpoint"], active, payload)
+            result["referencePrice"] = current_price
+            emit(ctx, result)
         else:
             submit(ctx, payload, dry_run)
     except (ValueError, KeyError, keeper.KeeperError) as exc:

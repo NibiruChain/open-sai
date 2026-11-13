@@ -240,3 +240,88 @@ def test_wallet_signing_omits_only_empty_undeclared_domain_fields(monkeypatch, s
         keeper.wallet_session(keeper.MAINNET_HTTP, session["evmAddress"], "wallet")
         == session
     )
+
+
+def test_market_dry_run_needs_no_price_and_marks_refresh():
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "trade",
+            "open",
+            "--market",
+            "0",
+            "--side",
+            "long",
+            "--type",
+            "market",
+            "--amount",
+            "2",
+            "--leverage",
+            "2",
+            "--slippage",
+            "1",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert '"requiresMarketPriceRefresh": true' in result.output
+    assert "intentPrice" not in result.output
+    result = CliRunner().invoke(
+        main,
+        [
+            "trade",
+            "open",
+            "--market",
+            "0",
+            "--side",
+            "long",
+            "--type",
+            "limit",
+            "--amount",
+            "2",
+            "--leverage",
+            "2",
+            "--slippage",
+            "1",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "trigger price is required" in result.output
+
+
+def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
+    key = "example"
+    address = session["evmAddress"]
+    storage.pending(key, keeper.MAINNET_HTTP, address, "CLOSE_POSITION", "1")
+    matched = False
+
+    def query(endpoint, query, variables=None, token=None):
+        if query == keeper.INTENTS:
+            return {
+                "userIntents": [
+                    {
+                        "intentKey": key,
+                        "evmAddress": address,
+                        "execActor": "server",
+                        "lifecycleStep": "exec_pass",
+                    }
+                ]
+            }
+        return {
+            "perp": {
+                "tradeHistory": [{"intentKey": key, "trade": {"id": 1}}]
+                if matched
+                else []
+            }
+        }
+
+    monkeypatch.setattr(keeper, "request", query)
+    result = CliRunner().invoke(main, ["intent", "status", address, "--key", key])
+    assert result.exit_code == 0, result.output
+    assert storage.list_pending(keeper.MAINNET_HTTP, address)[0]["status"] == "accepted"
+    matched = True
+    result = CliRunner().invoke(main, ["intent", "status", address, "--key", key])
+    assert result.exit_code == 0, result.output
+    assert storage.list_pending(keeper.MAINNET_HTTP, address)[0]["status"] == "terminal"

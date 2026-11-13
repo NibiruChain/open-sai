@@ -33,15 +33,19 @@ def open_intent(
     order_type: str,
     amount: str,
     leverage: str,
-    price: str,
+    price: str | None,
     slippage: str,
     tp: str | None,
     sl: str | None,
 ) -> dict[str, Any]:
     if market < 0:
         raise ValueError("Market index must not be negative")
-    for value, name in ((amount, "Amount"), (leverage, "Leverage"), (price, "Price")):
+    for value, name in ((amount, "Amount"), (leverage, "Leverage")):
         positive(value, name)
+    if price is not None:
+        positive(price, "Price")
+    elif order_type != "market":
+        raise ValueError("A trigger price is required for limit and stop orders")
     if Decimal(amount) * 1_000_000 != (Decimal(amount) * 1_000_000).to_integral_value():
         raise ValueError("Amount must have at most six decimal places")
     if slippage != "0" and (
@@ -56,9 +60,10 @@ def open_intent(
         "orderType": order_type,
         "amountUsd": amount,
         "leverage": leverage,
-        "intentPrice": price,
         "maxSlippagePct": slippage,
     }
+    if price is not None:
+        body["intentPrice"] = price
     for key, value in (("takeProfit", tp), ("stopLoss", sl)):
         if value is not None:
             positive(value, key)

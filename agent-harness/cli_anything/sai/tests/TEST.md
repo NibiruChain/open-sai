@@ -11,6 +11,6 @@
 
 ## Local Results
 
-`CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 13 tests on
+`CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 15 tests on
 2026-11-13, including installed-command HTTP and WebSocket fixtures. These
 fixtures do not prove a live trade. `just check` passed Ruff and ty.
