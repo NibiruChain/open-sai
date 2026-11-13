@@ -11,9 +11,12 @@
 
 ## Local Results
 
-`CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 15 tests on
+`CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 24 tests on
 2026-11-13, including installed-command HTTP and WebSocket fixtures. These
 fixtures do not prove a live trade. `just check` passed Ruff and ty.
+Margin tests cover exact integer rounding, stale position detection, balance
+checks, and network mismatch. A read-only mainnet LCD contract balance query
+also succeeded; margin and leverage mutations have not been tested on mainnet.
 
 ## Mainnet Verification
 

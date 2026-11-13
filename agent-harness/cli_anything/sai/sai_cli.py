@@ -17,7 +17,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect
 from websockets.typing import Subprotocol
 
-from .core import intents, keeper, storage
+from .core import intents, keeper, margin, storage
 from .utils.repl_skin import ReplSkin
 
 
@@ -472,6 +472,88 @@ def trade_tpsl(
             dry_run,
         )
     except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@trade.command("leverage")
+@click.argument("trade_id", type=int)
+@click.option("--leverage", required=True, help="Target leverage as a decimal.")
+@click.option("--dry-run", is_flag=True)
+@click.pass_context
+def trade_leverage(
+    ctx: click.Context, trade_id: int, leverage: str, dry_run: bool
+) -> None:
+    """Set target leverage without changing TP or SL."""
+    try:
+        submit(ctx, intents.leverage_intent(trade_id, leverage), dry_run)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@trade.command("margin")
+@click.argument("trade_id", type=int)
+@click.option("--direction", type=click.Choice(["add", "remove"]), required=True)
+@click.option(
+    "--amount",
+    required=True,
+    help="USDC amount for a leverage quote, not an execution cap.",
+)
+@click.option(
+    "--lcd-endpoint",
+    default=margin.MAINNET_LCD,
+    show_default=True,
+    help="Nibiru REST endpoint for exact contract state.",
+)
+@click.option("--dry-run", is_flag=True)
+@click.pass_context
+def trade_margin(
+    ctx: click.Context,
+    trade_id: int,
+    direction: str,
+    amount: str,
+    lcd_endpoint: str,
+    dry_run: bool,
+) -> None:
+    """Add or remove margin through a target-leverage intent.
+
+    The amount is a quote, not a cap: collateral can change before execution.
+    """
+    try:
+        active = session(ctx)
+        raw, funds, market = margin.snapshot(
+            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+        )
+        quoted = margin.margin_quote(raw, funds, market, direction, amount)
+        payload = intents.leverage_intent(trade_id, quoted["requestedLeverage"])
+        warning = "The request authorizes target leverage, not an amount cap; the actual margin change may differ if the position changes before execution."
+        if dry_run:
+            emit(
+                ctx,
+                {
+                    "dryRun": True,
+                    "quote": quoted,
+                    "intent": payload,
+                    "warning": warning,
+                },
+            )
+            return
+        fresh_raw, fresh_funds, fresh_market = margin.snapshot(
+            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+        )
+        fresh_quote = margin.margin_quote(
+            fresh_raw, fresh_funds, fresh_market, direction, amount
+        )
+        if (
+            fresh_raw["collateral_amount"] != raw["collateral_amount"]
+            or fresh_raw["leverage"] != raw["leverage"]
+            or fresh_quote != quoted
+        ):
+            raise ValueError("Position changed; review the margin change again")
+        result = intents.submit(ctx.obj["endpoint"], active, payload)
+        result["quote"] = quoted
+        result["warning"] = warning
+        emit(ctx, result)
+    except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

@@ -25,6 +25,15 @@ requiring refresh and may include an optional supplied reference. A partial clos
 position before submission. Market schedule and other Keeper admission checks
 remain authoritative.
 
+`trade leverage TRADE_ID --leverage VALUE` sets a target leverage.
+`trade margin TRADE_ID --direction add|remove --amount USDC` reads the exact
+position and exchange balance from the Perp contract, then quotes a target
+leverage. The margin amount is a quote, not a cap: Keeper executes a leverage
+change, and the actual margin delta may differ if the position changes after
+the final check. `--dry-run` reads live state and prints the quote without
+submitting an intent. Use `--lcd-endpoint` to select the matching network's
+Nibiru REST service; the CLI checks that its chain matches Keeper.
+
 The CLI persists non-secret request identities under `$SAI_HOME/trader` or
 `~/.sai/trader`. A network error after submission leaves the outcome unknown.
 Reconcile the original intent before trying another action. Keeper admission

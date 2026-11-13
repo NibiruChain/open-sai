@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from cli_anything.sai.core import intents, keeper, storage
+from cli_anything.sai.core import intents, keeper, margin, storage
 from cli_anything.sai.sai_cli import main
 from click.testing import CliRunner
 
@@ -325,3 +325,210 @@ def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
     result = CliRunner().invoke(main, ["intent", "status", address, "--key", key])
     assert result.exit_code == 0, result.output
     assert storage.list_pending(keeper.MAINNET_HTTP, address)[0]["status"] == "terminal"
+
+
+def test_margin_quote_uses_exact_contract_integer_math():
+    raw = {"collateral_amount": "10000000", "leverage": "10"}
+    funds = {"available_to_trade": "20000000"}
+    market = {"minLeverage": 1, "maxLeverage": 100}
+    assert (
+        margin.margin_quote(raw, funds, market, "add", "10")["requestedLeverage"] == "5"
+    )
+    assert (
+        margin.margin_quote(raw, funds, market, "remove", "5")["requestedLeverage"]
+        == "20"
+    )
+    with pytest.raises(ValueError, match="six decimal"):
+        margin.margin_quote(raw, funds, market, "add", "0.0000001")
+    with pytest.raises(ValueError, match="Insufficient"):
+        margin.margin_quote(raw, {"available_to_trade": "1"}, market, "add", "1")
+    with pytest.raises(ValueError, match="Keep some margin"):
+        margin.margin_quote(raw, funds, market, "remove", "10")
+
+
+@pytest.mark.parametrize(
+    ("collateral", "leverage", "direction", "amount", "result", "after", "delta"),
+    [
+        ("10000000", "10", "add", "5", "6.666666666666666667", "14999999", "4999999"),
+        (
+            "10000000",
+            "10",
+            "remove",
+            "3",
+            "14.285714285714285714",
+            "7000000",
+            "3000000",
+        ),
+        (
+            "14999999",
+            "6.666666666666666667",
+            "remove",
+            "1",
+            "7.142857176870750729",
+            "13999999",
+            "1000000",
+        ),
+    ],
+)
+def test_margin_rounding_vectors(
+    collateral, leverage, direction, amount, result, after, delta
+):
+    quote = margin.margin_quote(
+        {"collateral_amount": collateral, "leverage": leverage},
+        {"available_to_trade": "9000000"},
+        {"minLeverage": 1, "maxLeverage": 100},
+        direction,
+        amount,
+    )
+    assert quote["requestedLeverage"] == result
+    assert quote["collateralAfter"] == after
+    assert quote["actualDeltaUsdc"] == delta
+
+
+def test_margin_rejects_wrong_lcd_network(monkeypatch):
+    monkeypatch.setattr(
+        keeper,
+        "request",
+        lambda *args, **kwargs: {
+            "oneClickTrading": {"enabled": True, "chainId": "cataclysm-1"}
+        },
+    )
+    monkeypatch.setattr(
+        margin,
+        "_get_json",
+        lambda url: {"default_node_info": {"network": "nibiru-testnet-2"}},
+    )
+    with pytest.raises(ValueError, match="network do not match"):
+        margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 1)
+
+
+def test_margin_snapshot_checks_raw_position_and_available_funds(monkeypatch):
+    def gql(endpoint, query, variables=None, token=None):
+        if query == keeper.ROUTE:
+            return {
+                "oneClickTrading": {
+                    "enabled": True,
+                    "chainId": "cataclysm-1",
+                    "contractAddress": "nibi1contract",
+                }
+            }
+        if query == keeper.POSITION:
+            return {
+                "perp": {
+                    "trade": {
+                        "id": 7,
+                        "trader": "nibi1trader",
+                        "isOpen": True,
+                        "tradeType": "trade",
+                        "collateralAmount": 10000000,
+                        "leverage": 10.0,
+                        "perpBorrowing": {
+                            "marketId": 0,
+                            "collateralToken": {"id": 1, "symbol": "USDC"},
+                        },
+                    }
+                }
+            }
+        return {
+            "perp": {
+                "borrowing": {
+                    "marketId": 0,
+                    "isOpen": True,
+                    "minLeverage": 1,
+                    "maxLeverage": 100,
+                    "collateralToken": {"id": 1},
+                }
+            }
+        }
+
+    raw = {
+        "user": "nibi1trader",
+        "user_trade_index": "UserTradeIndex(7)",
+        "market_index": "MarketIndex(0)",
+        "collateral_index": "TokenIndex(1)",
+        "is_open": True,
+        "trade_type": "trade",
+        "collateral_amount": "10000000",
+        "leverage": "10",
+    }
+    funds = {"collateral_index": "TokenIndex(1)", "available_to_trade": "9000000"}
+    monkeypatch.setattr(keeper, "request", gql)
+    monkeypatch.setattr(
+        margin,
+        "_get_json",
+        lambda url: {"default_node_info": {"network": "cataclysm-1"}},
+    )
+    monkeypatch.setattr(
+        margin,
+        "smart",
+        lambda lcd, contract, message: raw if "get_trade_raw" in message else funds,
+    )
+    snapshot, available, market = margin.snapshot(
+        keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7
+    )
+    assert snapshot == raw
+    assert available == funds
+    assert market["marketId"] == 0
+    raw["collateral_amount"] = "9000000"
+    with pytest.raises(ValueError, match="Position changed"):
+        margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)
+
+
+def test_leverage_is_separate_update_intent():
+    assert intents.leverage_intent(7, "5") == {
+        "kind": "UPDATE_TRADE",
+        "target": {"userTradeId": "7"},
+        "body": {
+            "requestedLeverage": "5",
+            "takeProfit": {"operation": "keep"},
+            "stopLoss": {"operation": "keep"},
+        },
+    }
+
+
+def test_margin_dry_run_and_recheck(session, monkeypatch):
+    raw = {"collateral_amount": "10000000", "leverage": "10"}
+    funds = {"available_to_trade": "20000000"}
+    market = {"minLeverage": 1, "maxLeverage": 100}
+    monkeypatch.setattr("cli_anything.sai.sai_cli.session", lambda ctx: session)
+    monkeypatch.setattr(margin, "snapshot", lambda *args: (raw, funds, market))
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "trade",
+            "margin",
+            "7",
+            "--direction",
+            "add",
+            "--amount",
+            "10",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert '"requestedLeverage": "5"' in result.output
+
+
+def test_margin_refuses_changed_position(session, monkeypatch):
+    items = iter(
+        [
+            (
+                {"collateral_amount": "10000000", "leverage": "10"},
+                {"available_to_trade": "20000000"},
+                {"minLeverage": 1, "maxLeverage": 100},
+            ),
+            (
+                {"collateral_amount": "11000000", "leverage": "10"},
+                {"available_to_trade": "20000000"},
+                {"minLeverage": 1, "maxLeverage": 100},
+            ),
+        ]
+    )
+    monkeypatch.setattr("cli_anything.sai.sai_cli.session", lambda ctx: session)
+    monkeypatch.setattr(margin, "snapshot", lambda *args: next(items))
+    result = CliRunner().invoke(
+        main, ["trade", "margin", "7", "--direction", "add", "--amount", "5"]
+    )
+    assert result.exit_code != 0
+    assert "Position changed" in result.output

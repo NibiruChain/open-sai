@@ -81,6 +81,21 @@ def close_intent(trade_id: int, cancel: bool = False) -> dict[str, Any]:
     }
 
 
+def leverage_intent(trade_id: int, leverage: str) -> dict[str, Any]:
+    if trade_id < 0:
+        raise ValueError("Trade id must not be negative")
+    positive(leverage, "Leverage")
+    return {
+        "kind": "UPDATE_TRADE",
+        "target": {"userTradeId": str(trade_id)},
+        "body": {
+            "takeProfit": {"operation": "keep"},
+            "stopLoss": {"operation": "keep"},
+            "requestedLeverage": leverage,
+        },
+    }
+
+
 def tpsl_intent(
     trade_id: int, tp: str | None, sl: str | None, clear_tp: bool, clear_sl: bool
 ) -> dict[str, Any]:
