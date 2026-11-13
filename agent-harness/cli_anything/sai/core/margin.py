@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -97,9 +98,16 @@ def snapshot(
         or raw.get("trade_type") != "trade"
     ):
         raise ValueError("Position changed; review the margin change again")
-    if str(raw.get("collateral_amount")) != str(position["collateralAmount"]) or float(
-        str(raw.get("leverage"))
-    ) != float(position["leverage"]):
+    contract_leverage = float(str(raw.get("leverage")))
+    indexed_leverage = float(position["leverage"])
+    if (
+        str(raw.get("collateral_amount")) != str(position["collateralAmount"])
+        or not math.isfinite(contract_leverage)
+        or not math.isfinite(indexed_leverage)
+        or not math.isclose(
+            contract_leverage, indexed_leverage, rel_tol=1e-15, abs_tol=0.0
+        )
+    ):
         raise ValueError(
             "Indexed position differs from contract state; wait for synchronization and retry"
         )
