@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from cli_anything.sai.core import intents, keeper, margin, storage
-from cli_anything.sai.sai_cli import main
 from click.testing import CliRunner
+from sai_cli.core import intents, keeper, margin, storage
+from sai_cli.sai_cli import main
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from cli_anything.sai.core import storage
+from sai_cli.core import storage
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 from websockets.typing import Subprotocol
@@ -35,7 +35,7 @@ def _resolve_cli() -> list[str]:
         raise RuntimeError("Installed sai command is required")
     import sys
 
-    return [sys.executable, "-m", "cli_anything.sai"]
+    return [sys.executable, "-m", "sai_cli"]
 
 
 @pytest.fixture
@@ -342,7 +342,7 @@ def test_two_processes_cannot_reserve_same_position(tmp_path, monkeypatch):
         pass
     program = """
 import sys
-from cli_anything.sai.core import storage
+from sai_cli.core import storage
 sys.stdin.read(1)
 try:
     storage.pending(sys.argv[1], 'https://example.com/query', '0xabc', 'CLOSE_POSITION', '7')

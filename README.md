@@ -29,7 +29,7 @@ passphrase. Sessions expire; browser-to-device API credential provisioning and
 per-device revocation are not implemented here.
 
 For command examples, setup details, and recovery behavior, read the
-[CLI guide](agent-harness/cli_anything/sai/README.md) and the
+[CLI guide](cli/sai_cli/README.md) and the
 [agent skill](skills/cli-anything-sai/SKILL.md). A trade accepted by Keeper is
 still pending until its outcome is observed. Use `--dry-run` to inspect a local
 trade request without submitting it.

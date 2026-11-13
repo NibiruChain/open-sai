@@ -10,4 +10,4 @@ test:
 check:
     uv run ruff check .
     uv run ruff format --check .
-    uv run ty check agent-harness/cli_anything/sai
+    uv run ty check cli/sai_cli

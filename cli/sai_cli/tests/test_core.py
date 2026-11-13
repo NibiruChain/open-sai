@@ -7,9 +7,9 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from cli_anything.sai.core import intents, keeper, margin, storage
-from cli_anything.sai.sai_cli import main
 from click.testing import CliRunner
+from sai_cli.core import intents, keeper, margin, storage
+from sai_cli.sai_cli import main
 
 
 @pytest.fixture(autouse=True)
@@ -521,7 +521,7 @@ def test_margin_dry_run_and_recheck(session, monkeypatch):
     raw = {"collateral_amount": "10000000", "leverage": "10"}
     funds = {"available_to_trade": "20000000"}
     market = {"minLeverage": 1, "maxLeverage": 100}
-    monkeypatch.setattr("cli_anything.sai.sai_cli.session", lambda ctx: session)
+    monkeypatch.setattr("sai_cli.sai_cli.session", lambda ctx: session)
     monkeypatch.setattr(margin, "snapshot", lambda *args: (raw, funds, market))
     result = CliRunner().invoke(
         main,
@@ -556,7 +556,7 @@ def test_margin_refuses_changed_position(session, monkeypatch):
             ),
         ]
     )
-    monkeypatch.setattr("cli_anything.sai.sai_cli.session", lambda ctx: session)
+    monkeypatch.setattr("sai_cli.sai_cli.session", lambda ctx: session)
     monkeypatch.setattr(margin, "snapshot", lambda *args: next(items))
     result = CliRunner().invoke(
         main, ["trade", "margin", "7", "--direction", "add", "--amount", "5"]
