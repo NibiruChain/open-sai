@@ -14,3 +14,12 @@
 `CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 15 tests on
 2026-11-13, including installed-command HTTP and WebSocket fixtures. These
 fixtures do not prove a live trade. `just check` passed Ruff and ty.
+
+## Mainnet Verification
+
+On 2026-11-13, an authorized manual test signed in with an EVM wallet, opened
+a BTC market position with $2 collateral at 2x leverage, closed 50%, and closed
+the remainder. Keeper's indexed trade history showed matching open,
+size-decrease, and close events. The final position query showed no open
+positions for the test account. This validates those observed actions, not all
+order types or all market conditions.

@@ -29,3 +29,29 @@ the local request without submitting an intent. Accepted means Keeper admitted
 the request; it does not mean the trade executed. Use `intent local ADDRESS`
 and `intent status ADDRESS --key KEY` to inspect and reconcile. If the outcome
 is unknown, retain its intent key and do not blindly submit again.
+
+## Examples
+
+These examples use placeholders for the public account address, local wallet
+name, and an existing trade ID. They do not fund an account or send a trade.
+
+```bash
+cli-anything-sai --json market list
+cli-anything-sai --json account positions 0xYOUR_ADDRESS
+cli-anything-sai --json account balances 0xYOUR_ADDRESS
+cli-anything-sai auth login --address 0xYOUR_ADDRESS --wallet WALLET_NAME
+cli-anything-sai --json trade open --market 0 --side long --type market \
+  --amount 2 --leverage 2 --slippage 1 --dry-run
+cli-anything-sai --json trade open --market 0 --side long --type limit \
+  --amount 2 --leverage 2 --price 60000 --slippage 1 --dry-run
+cli-anything-sai --json trade partial-close 42 --percent 50 --dry-run
+cli-anything-sai --json trade close 42 --dry-run
+cli-anything-sai --json intent status 0xYOUR_ADDRESS --key INTENT_KEY
+cli-anything-sai --json watch price 3
+```
+
+For a live market order, the CLI refreshes the market price before admission
+and includes the reference price in the accepted response. A dry run reports
+that price refresh is still required. Partial close reads live position and
+market data, including in dry-run mode. A successful execution remains pending
+locally until the CLI observes matching indexed trade history.
