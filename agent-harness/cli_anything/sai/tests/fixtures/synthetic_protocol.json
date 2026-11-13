@@ -1,0 +1,80 @@
+{
+  "address": "0x1111111111111111111111111111111111111111",
+  "challenge_response": {
+    "data": {
+      "createUserIntentAuthChallenge": {
+        "nonce": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evmAddress": "0x1111111111111111111111111111111111111111",
+        "expiresAt": "2099-01-01T00:05:00Z",
+        "chainId": "cataclysm-1",
+        "typedData": {
+          "types": {
+            "EIP712Domain": [
+              {"name": "name", "type": "string"},
+              {"name": "version", "type": "string"}
+            ],
+            "UserTradingSession": [
+              {"name": "account", "type": "address"},
+              {"name": "challenge", "type": "bytes32"},
+              {"name": "action", "type": "string"},
+              {"name": "expiresAt", "type": "string"}
+            ]
+          },
+          "primaryType": "UserTradingSession",
+          "domain": {"name": "Sai", "version": "1", "chainId": null, "verifyingContract": "", "salt": ""},
+          "message": {
+            "account": "0x1111111111111111111111111111111111111111",
+            "challenge": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "action": "Synthetic test only",
+            "expiresAt": "2099-01-01T00:05:00Z"
+          }
+        }
+      }
+    }
+  },
+  "session_response": {
+    "data": {"createUserIntentSession": {
+      "token": "SYNTHETIC_NOT_A_REAL_TOKEN",
+      "evmAddress": "0x1111111111111111111111111111111111111111",
+      "expiresAt": "2099-01-01T01:00:00Z"
+    }}
+  },
+  "account_positions_response": {
+    "data": {"perp": {"trades": [{
+      "id": 7,
+      "trader": "nibi1syntheticfixture",
+      "isOpen": true,
+      "isLong": true,
+      "tradeType": "trade",
+      "collateralAmount": 10000000,
+      "leverage": 2.0,
+      "openPrice": 100.0,
+      "tp": null,
+      "sl": null,
+      "state": {"liquidationPrice": 50.0, "pnlCollateral": 0.0, "pnlPct": 0.0, "positionValue": 10000000.0},
+      "perpBorrowing": {"marketId": 3, "baseToken": {"symbol": "BTC"}, "collateralToken": {"symbol": "USDC"}}
+    }]}}
+  },
+  "account_balance_ws_payload": {
+    "data": {"userBalances": [
+      {"amount": "12500000", "usd_value": 12.5, "token_info": {"name": "USDC on Sai", "symbol": "USDC", "decimals": 6, "type": "sai"}},
+      {"amount": "1500000", "usd_value": 1.5, "token_info": {"name": "USDC Credits on Sai", "symbol": "USDC", "decimals": 6, "type": "sai"}}
+    ]}
+  },
+  "intents": {
+    "open_limit": {"kind": "OPEN_TRADE", "body": {"market": {"marketIndex": "MarketIndex(3)"}, "side": "long", "orderType": "limit", "amountUsd": "20", "leverage": "2", "maxSlippagePct": "1", "intentPrice": "100", "takeProfit": "110"}},
+    "close": {"kind": "CLOSE_POSITION", "target": {"userTradeId": "7"}, "body": {}},
+    "cancel": {"kind": "CANCEL_PENDING_TRADE", "target": {"userTradeId": "7"}, "body": {}},
+    "partial_close": {"kind": "DECREASE_POSITION_SIZE", "target": {"userTradeId": "7"}, "body": {"collateral": {"amountUsdc": "5000000", "amountUsd": "5"}, "leverageDelta": "0"}},
+    "tpsl": {"kind": "UPDATE_TRADE", "target": {"userTradeId": "7"}, "body": {"takeProfit": {"operation": "set", "value": "110"}, "stopLoss": {"operation": "clear"}}},
+    "leverage": {"kind": "UPDATE_TRADE", "target": {"userTradeId": "7"}, "body": {"takeProfit": {"operation": "keep"}, "stopLoss": {"operation": "keep"}, "requestedLeverage": "5"}},
+    "margin_add": {"kind": "UPDATE_TRADE", "target": {"userTradeId": "7"}, "body": {"takeProfit": {"operation": "keep"}, "stopLoss": {"operation": "keep"}, "requestedLeverage": "6.666666666666666667"}}
+  },
+  "close_admission_request": {
+    "intentKey": "<intent-key>",
+    "intent": {"intentSchemaVersion": "v0", "tsIntentInit": "<timestamp>", "kind": "CLOSE_POSITION", "target": {"userTradeId": "7"}, "body": {}},
+    "lifecycle": {"sequence": 1, "lifecycleStep": "jwt_pass", "tsLifecycleStep": "<timestamp>"}
+  },
+  "admission_ack": {"data": {"recordUserIntent": {"intentKey": "<intent-key>", "kind": "CLOSE_POSITION", "lifecycleStep": "jwt_pass", "execActor": "server", "evmAddress": "0x1111111111111111111111111111111111111111", "txHash": null, "errorCode": null, "errorMsg": null}}},
+  "intent_status_response": {"data": {"userIntents": [{"intentKey": "<intent-key>", "kind": "CLOSE_POSITION", "lifecycleStep": "exec_pass", "execActor": "server", "evmAddress": "0x1111111111111111111111111111111111111111", "txHash": "SYNTHETIC_TX_HASH", "execBlock": 123, "execBlockTs": "2099-01-01T00:00:10Z", "errorCode": null, "errorMsg": null}]}}
+}

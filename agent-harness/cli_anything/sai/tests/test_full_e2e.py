@@ -12,12 +12,19 @@ import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from cli_anything.sai.core import storage
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 from websockets.typing import Subprotocol
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def fixture(name: str) -> dict:
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def _resolve_cli() -> list[str]:
@@ -85,6 +92,8 @@ def test_installed_cli_queries_local_keeper(keeper_server):
 
 
 def test_installed_cli_receives_balance_snapshot():
+    golden = fixture("synthetic_protocol.json")["account_balance_ws_payload"]
+
     def handler(connection):
         assert json.loads(connection.recv())["type"] == "connection_init"
         connection.send(json.dumps({"type": "connection_ack"}))
@@ -94,21 +103,7 @@ def test_installed_cli_receives_balance_snapshot():
                 {
                     "id": "1",
                     "type": "next",
-                    "payload": {
-                        "data": {
-                            "userBalances": [
-                                {
-                                    "amount": "10",
-                                    "token_info": {
-                                        "name": "USDC on Sai",
-                                        "symbol": "USDC",
-                                        "decimals": 6,
-                                        "type": "sai",
-                                    },
-                                }
-                            ]
-                        }
-                    },
+                    "payload": golden,
                 }
             )
         )
@@ -135,11 +130,64 @@ def test_installed_cli_receives_balance_snapshot():
             check=True,
             timeout=10,
         )
-        assert (
-            json.loads(result.stdout)["data"]["userBalances"][0]["token_info"]["name"]
-            == "USDC on Sai"
-        )
+        assert json.loads(result.stdout) == golden
+        assert [
+            row["token_info"]["name"] for row in golden["data"]["userBalances"]
+        ] == ["USDC on Sai", "USDC Credits on Sai"]
     finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_installed_watch_replays_observed_btc_websocket_snapshot():
+    golden = fixture("mainnet_price_ws_payload.json")
+
+    def handler(connection):
+        assert json.loads(connection.recv())["type"] == "connection_init"
+        connection.send(json.dumps({"type": "connection_ack"}))
+        request = json.loads(connection.recv())
+        assert request["type"] == "subscribe"
+        assert request["payload"]["variables"] == {"id": 3}
+        connection.send(json.dumps({"id": "1", "type": "next", "payload": golden}))
+        try:
+            connection.recv()
+        except ConnectionClosed:
+            pass
+
+    server = serve(
+        handler, "127.0.0.1", 0, subprotocols=[Subprotocol("graphql-transport-ws")]
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.socket.getsockname()[1]
+    process = subprocess.Popen(
+        [
+            *_resolve_cli(),
+            "--json",
+            "watch",
+            "price",
+            "3",
+            "--ws-endpoint",
+            f"ws://127.0.0.1:{port}/query",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read_first_line():
+        assert process.stdout is not None
+        lines.put(process.stdout.readline())
+
+    reader = threading.Thread(target=read_first_line, daemon=True)
+    reader.start()
+    try:
+        assert json.loads(lines.get(timeout=10)) == golden
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+        reader.join(timeout=10)
         server.shutdown()
         thread.join()
 

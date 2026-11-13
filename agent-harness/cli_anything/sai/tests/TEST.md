@@ -7,6 +7,9 @@
 - Verify encrypted credential round trips, incorrect passwords, and restrictive
   file permissions without using real credentials.
 - Verify WebSocket transport with a local protocol fixture.
+- Replay public mainnet market HTTP responses and a BTC WebSocket payload from
+  saved fixtures, and compare synthetic account, auth, and trade messages with
+  independently authored expected wire shapes. See [fixture provenance](fixtures/README.md).
 - Do not submit live trades or acquire a real wallet session in automated tests.
 
 ## Local Results
@@ -16,6 +19,11 @@ exercise recovery after a lost admission response across CLI restarts,
 concurrent position reservations, a WebSocket disconnect and fresh snapshot,
 and refusal of partial GraphQL errors. These fixtures do not prove a live
 trade. `just check` runs Ruff and ty.
+On 2026-11-13, `CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 40 tests.
+Routine tests use in-process stubs or local loopback HTTP and WebSocket servers;
+they do not require an external Keeper connection or real credentials. A guard
+blocks external TCP connections in the pytest process; subprocess fixtures use
+explicit loopback endpoints.
 Margin tests cover exact integer rounding, stale position detection, balance
 checks, and network mismatch. A read-only mainnet LCD contract balance query
 also succeeded.

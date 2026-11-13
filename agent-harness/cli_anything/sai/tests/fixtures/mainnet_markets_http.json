@@ -1,0 +1,2561 @@
+{
+  "data": {
+    "perp": {
+      "borrowings": [
+        {
+          "marketId": 0,
+          "price": 68669.9,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 3,
+            "symbol": "BTC",
+            "name": "btc"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 0,
+          "price": 68669.9,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 3,
+            "symbol": "BTC",
+            "name": "btc"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1,
+          "price": 1931.3,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 4,
+            "symbol": "ETH",
+            "name": "eth"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1,
+          "price": 1931.3,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 4,
+            "symbol": "ETH",
+            "name": "eth"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 16,
+          "price": 79.45,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 17,
+            "symbol": "SOL",
+            "name": "sol"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 16,
+          "price": 79.45,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 17,
+            "symbol": "SOL",
+            "name": "sol"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 17,
+          "price": 1.0234,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 18,
+            "symbol": "XRP",
+            "name": "xrp"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 17,
+          "price": 1.0234,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 18,
+            "symbol": "XRP",
+            "name": "xrp"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 18,
+          "price": 0.7887,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 19,
+            "symbol": "SUI",
+            "name": "sui"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 18,
+          "price": 0.7887,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 19,
+            "symbol": "SUI",
+            "name": "sui"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 19,
+          "price": 0.1374,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 20,
+            "symbol": "ENA",
+            "name": "ena"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 19,
+          "price": 0.1374,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 20,
+            "symbol": "ENA",
+            "name": "ena"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 20,
+          "price": 0.14574,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 21,
+            "symbol": "ARB",
+            "name": "arb"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 20,
+          "price": 0.14574,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 21,
+            "symbol": "ARB",
+            "name": "arb"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 21,
+          "price": 0.31121,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 22,
+            "symbol": "TRX",
+            "name": "trx"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 21,
+          "price": 0.31121,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 22,
+            "symbol": "TRX",
+            "name": "trx"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 22,
+          "price": 0.5391,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 23,
+            "symbol": "APT",
+            "name": "apt"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 22,
+          "price": 0.5391,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 23,
+            "symbol": "APT",
+            "name": "apt"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 23,
+          "price": 0.08701,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 24,
+            "symbol": "POL",
+            "name": "pol"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 23,
+          "price": 0.08701,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 24,
+            "symbol": "POL",
+            "name": "pol"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 24,
+          "price": 1.149,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 25,
+            "symbol": "GRAM",
+            "name": "ton"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 24,
+          "price": 1.149,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 25,
+            "symbol": "GRAM",
+            "name": "ton"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 25,
+          "price": 0.17,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 26,
+            "symbol": "ADA",
+            "name": "ada"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 25,
+          "price": 0.17,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 26,
+            "symbol": "ADA",
+            "name": "ada"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 26,
+          "price": 48.59,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 27,
+            "symbol": "LTC",
+            "name": "ltc"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 26,
+          "price": 48.59,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 27,
+            "symbol": "LTC",
+            "name": "ltc"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 27,
+          "price": 0.06424,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 28,
+            "symbol": "DOGE",
+            "name": "doge"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 27,
+          "price": 0.06424,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 28,
+            "symbol": "DOGE",
+            "name": "doge"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 28,
+          "price": 0.6515,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 29,
+            "symbol": "ASTER",
+            "name": "aster"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 28,
+          "price": 0.6515,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 29,
+            "symbol": "ASTER",
+            "name": "aster"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 29,
+          "price": 631.95,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 30,
+            "symbol": "BNB",
+            "name": "bnb"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 29,
+          "price": 631.95,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 30,
+            "symbol": "BNB",
+            "name": "bnb"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 30,
+          "price": 0.0033863,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 31,
+            "symbol": "PUMP",
+            "name": "pump"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 30,
+          "price": 0.0033863,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 31,
+            "symbol": "PUMP",
+            "name": "pump"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 31,
+          "price": 8.184,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 32,
+            "symbol": "AVAX",
+            "name": "avax"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 31,
+          "price": 8.184,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 32,
+            "symbol": "AVAX",
+            "name": "avax"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 32,
+          "price": 111.41,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 33,
+            "symbol": "AAVE",
+            "name": "aave"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 32,
+          "price": 111.41,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 33,
+            "symbol": "AAVE",
+            "name": "aave"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 33,
+          "price": 0.00603,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 34,
+            "symbol": "PENGU",
+            "name": "pengu"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 33,
+          "price": 0.00603,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 34,
+            "symbol": "PENGU",
+            "name": "pengu"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 34,
+          "price": 9.835,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 35,
+            "symbol": "LINK",
+            "name": "link"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 34,
+          "price": 9.835,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 35,
+            "symbol": "LINK",
+            "name": "link"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 35,
+          "price": 2.653e-06,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 36,
+            "symbol": "BONK",
+            "name": "bonk"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 35,
+          "price": 2.653e-06,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 36,
+            "symbol": "BONK",
+            "name": "bonk"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 36,
+          "price": 4.25e-06,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 37,
+            "symbol": "SHIB",
+            "name": "shib"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 36,
+          "price": 4.25e-06,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 37,
+            "symbol": "SHIB",
+            "name": "shib"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 37,
+          "price": 1.075,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 38,
+            "symbol": "TRUMP",
+            "name": "trump"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 37,
+          "price": 1.075,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 38,
+            "symbol": "TRUMP",
+            "name": "trump"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 38,
+          "price": 3.432,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 39,
+            "symbol": "NEAR",
+            "name": "near"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 38,
+          "price": 3.432,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 39,
+            "symbol": "NEAR",
+            "name": "near"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 39,
+          "price": 0.2017,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 40,
+            "symbol": "KAITO",
+            "name": "kaito"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 39,
+          "price": 0.2017,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 40,
+            "symbol": "KAITO",
+            "name": "kaito"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 40,
+          "price": 0.4044,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 41,
+            "symbol": "MNT",
+            "name": "mnt"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 40,
+          "price": 0.4044,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 41,
+            "symbol": "MNT",
+            "name": "mnt"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 42,
+          "price": 0.5119,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 43,
+            "symbol": "VIRTUAL",
+            "name": "virtual"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 42,
+          "price": 0.5119,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 5,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 43,
+            "symbol": "VIRTUAL",
+            "name": "virtual"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 43,
+          "price": 71.637,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 44,
+            "symbol": "HYPE",
+            "name": "hype"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 43,
+          "price": 71.637,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 44,
+            "symbol": "HYPE",
+            "name": "hype"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 44,
+          "price": 944.54,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 45,
+            "symbol": "ZEC",
+            "name": "zec"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 44,
+          "price": 944.54,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 20,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0008,
+          "closeFeePct": 0.0008,
+          "baseToken": {
+            "id": 45,
+            "symbol": "ZEC",
+            "name": "zec"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1000,
+          "price": 688.245,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 59,
+            "symbol": "QQQ",
+            "name": "qqq"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1000,
+          "price": 688.245,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 59,
+            "symbol": "QQQ",
+            "name": "qqq"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1001,
+          "price": 756.93,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 60,
+            "symbol": "SPY",
+            "name": "spy"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1001,
+          "price": 756.93,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 60,
+            "symbol": "SPY",
+            "name": "spy"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1002,
+          "price": 166.065,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 61,
+            "symbol": "NVDA",
+            "name": "nvda"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1002,
+          "price": 166.065,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 61,
+            "symbol": "NVDA",
+            "name": "nvda"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1003,
+          "price": 585.69,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 62,
+            "symbol": "AMD",
+            "name": "amd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1003,
+          "price": 585.69,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 62,
+            "symbol": "AMD",
+            "name": "amd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1004,
+          "price": 61.17,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 63,
+            "symbol": "INTC",
+            "name": "intc"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1004,
+          "price": 61.17,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 63,
+            "symbol": "INTC",
+            "name": "intc"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1005,
+          "price": 522.9,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 64,
+            "symbol": "MSFT",
+            "name": "msft"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1005,
+          "price": 522.9,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 64,
+            "symbol": "MSFT",
+            "name": "msft"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1006,
+          "price": 354.755,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 65,
+            "symbol": "AAPL",
+            "name": "aapl"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1006,
+          "price": 354.755,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 65,
+            "symbol": "AAPL",
+            "name": "aapl"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1007,
+          "price": 298.805,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 66,
+            "symbol": "GOOGL",
+            "name": "googl"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1007,
+          "price": 298.805,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 66,
+            "symbol": "GOOGL",
+            "name": "googl"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1008,
+          "price": 267.41,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 67,
+            "symbol": "AMZN",
+            "name": "amzn"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1008,
+          "price": 267.41,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 67,
+            "symbol": "AMZN",
+            "name": "amzn"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1009,
+          "price": 623.4,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 68,
+            "symbol": "META",
+            "name": "meta"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1009,
+          "price": 623.4,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 68,
+            "symbol": "META",
+            "name": "meta"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1010,
+          "price": 363.94,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 69,
+            "symbol": "AVGO",
+            "name": "avgo"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1010,
+          "price": 363.94,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 69,
+            "symbol": "AVGO",
+            "name": "avgo"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1011,
+          "price": 397.465,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 70,
+            "symbol": "TSLA",
+            "name": "tsla"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1011,
+          "price": 397.465,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 70,
+            "symbol": "TSLA",
+            "name": "tsla"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1012,
+          "price": 589.3,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 71,
+            "symbol": "BRK.B",
+            "name": "brk-b"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1012,
+          "price": 589.3,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 71,
+            "symbol": "BRK.B",
+            "name": "brk-b"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1013,
+          "price": 130.64,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 72,
+            "symbol": "COIN",
+            "name": "coin"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1013,
+          "price": 130.64,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 72,
+            "symbol": "COIN",
+            "name": "coin"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1014,
+          "price": 342.895,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 73,
+            "symbol": "JPM",
+            "name": "jpm"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1014,
+          "price": 342.895,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 73,
+            "symbol": "JPM",
+            "name": "jpm"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1015,
+          "price": 171.61,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 74,
+            "symbol": "PLTR",
+            "name": "pltr"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1015,
+          "price": 171.61,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 74,
+            "symbol": "PLTR",
+            "name": "pltr"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1016,
+          "price": 9.84,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 75,
+            "symbol": "QBTS",
+            "name": "qbts"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1016,
+          "price": 9.84,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 75,
+            "symbol": "QBTS",
+            "name": "qbts"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1017,
+          "price": 5.825,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 76,
+            "symbol": "QUBT",
+            "name": "qubt"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1017,
+          "price": 5.825,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 76,
+            "symbol": "QUBT",
+            "name": "qubt"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1018,
+          "price": 3899.24355,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 77,
+            "symbol": "XAU",
+            "name": "xau-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1018,
+          "price": 3899.24355,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 77,
+            "symbol": "XAU",
+            "name": "xau-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1019,
+          "price": 50.04003,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 78,
+            "symbol": "XAG",
+            "name": "xag-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1019,
+          "price": 50.04003,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 78,
+            "symbol": "XAG",
+            "name": "xag-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1020,
+          "price": 1526.64763,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 79,
+            "symbol": "XPT",
+            "name": "xpt-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1020,
+          "price": 1526.64763,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 79,
+            "symbol": "XPT",
+            "name": "xpt-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1021,
+          "price": 1007.61759,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 80,
+            "symbol": "XPD",
+            "name": "xpd-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1021,
+          "price": 1007.61759,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 80,
+            "symbol": "XPD",
+            "name": "xpd-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1023,
+          "price": 96.069,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 82,
+            "symbol": "XBR",
+            "name": "xbr-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1023,
+          "price": 96.069,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 82,
+            "symbol": "XBR",
+            "name": "xbr-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1024,
+          "price": 3.30514074,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 83,
+            "symbol": "NG",
+            "name": "ng-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1024,
+          "price": 3.30514074,
+          "isOpen": true,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 83,
+            "symbol": "NG",
+            "name": "ng-usd"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1025,
+          "price": 25.645,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 84,
+            "symbol": "GME",
+            "name": "gme"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        },
+        {
+          "marketId": 1025,
+          "price": 25.645,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 84,
+            "symbol": "GME",
+            "name": "gme"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 2,
+            "symbol": "stNIBI"
+          }
+        },
+        {
+          "marketId": 1027,
+          "price": 140.17,
+          "isOpen": false,
+          "visible": true,
+          "minLeverage": 1,
+          "maxLeverage": 100,
+          "minPositionSizeUSD": 1,
+          "openFeePct": 0.0005,
+          "closeFeePct": 0.0005,
+          "baseToken": {
+            "id": 86,
+            "symbol": "SPCX",
+            "name": "spcx"
+          },
+          "quoteToken": {
+            "symbol": null
+          },
+          "collateralToken": {
+            "id": 1,
+            "symbol": "USDC"
+          }
+        }
+      ]
+    }
+  }
+}
