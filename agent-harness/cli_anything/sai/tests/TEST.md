@@ -36,3 +36,8 @@ A second $4 position at 2x leverage successfully added $1 of margin. After a
 12-second wait, removing $0.50 of margin and closing the position also
 succeeded. The final position query showed no open positions for the test
 account.
+
+A final authorized check opened a BTC position, updated its stop loss, and
+closed it. A separate BTC long limit order at 40,000 was created and canceled.
+Keeper reported successful execution, and the final position query showed no
+open positions for the test account.
