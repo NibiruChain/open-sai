@@ -30,3 +30,6 @@ testpaths = ["agent-harness/cli_anything/sai/tests"]
 [tool.ruff]
 target-version = "py311"
 exclude = ["agent-harness/cli_anything/sai/utils/repl_skin.py"]
+
+[tool.ty.environment]
+extra-paths = ["agent-harness"]
