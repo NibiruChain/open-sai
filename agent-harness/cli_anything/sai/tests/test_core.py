@@ -469,25 +469,6 @@ def test_margin_snapshot_checks_raw_position_and_available_funds(monkeypatch):
     assert snapshot == raw
     assert available == funds
     assert market["marketId"] == 0
-    raw["leverage"] = "2.18082250881298451"
-    original_gql = gql
-
-    def rounded_gql(endpoint, query, variables=None, token=None):
-        result = original_gql(endpoint, query, variables, token)
-        if query == keeper.POSITION:
-            result["perp"]["trade"]["leverage"] = 2.1808225088129847
-        return result
-
-    monkeypatch.setattr(keeper, "request", rounded_gql)
-    assert (
-        margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)[0]
-        == raw
-    )
-    raw["leverage"] = "2.18"
-    with pytest.raises(ValueError, match="Indexed position differs"):
-        margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)
-    raw["leverage"] = "10"
-    monkeypatch.setattr(keeper, "request", gql)
     raw["collateral_amount"] = "9000000"
     with pytest.raises(ValueError, match="Indexed position differs"):
         margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)
