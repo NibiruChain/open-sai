@@ -11,6 +11,7 @@ license = "Apache-2.0"
 dependencies = ["click>=8.1", "cryptography>=44", "httpx>=0.28", "prompt-toolkit>=3", "websockets>=14"]
 
 [project.scripts]
+sai = "cli_anything.sai.sai_cli:main"
 cli-anything-sai = "cli_anything.sai.sai_cli:main"
 
 [dependency-groups]

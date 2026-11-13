@@ -15,11 +15,11 @@ from websockets.typing import Subprotocol
 
 
 def _resolve_cli() -> list[str]:
-    path = shutil.which("cli-anything-sai")
+    path = shutil.which("sai")
     if path:
         return [path]
     if os.environ.get("CLI_ANYTHING_FORCE_INSTALLED") == "1":
-        raise RuntimeError("Installed CLI is required")
+        raise RuntimeError("Installed sai command is required")
     import sys
 
     return [sys.executable, "-m", "cli_anything.sai"]
@@ -50,6 +50,19 @@ def keeper_server():
     server.shutdown()
     server.server_close()
     thread.join()
+
+
+def test_installed_sai_command_help():
+    result = subprocess.run(
+        [*_resolve_cli(), "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert "Usage: sai " in result.stdout
+    assert "market" in result.stdout
+    assert "trade" in result.stdout
 
 
 def test_installed_cli_queries_local_keeper(keeper_server):

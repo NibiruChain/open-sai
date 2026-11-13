@@ -5,7 +5,7 @@ description: Inspect Sai markets and positions, follow live updates, and submit 
 
 # Sai CLI
 
-Use `cli-anything-sai --help` to inspect commands. Add `--json` before the
+Use `sai --help` to inspect commands. Add `--json` before the
 command for machine-readable output. Mainnet is the default. Override the
 Keeper HTTP endpoint with `--endpoint`; WebSocket commands derive their endpoint
 from it unless `--ws-endpoint` is supplied.
@@ -36,20 +36,20 @@ These examples use placeholders for the public account address, local wallet
 name, and an existing trade ID. They do not fund an account or send a trade.
 
 ```bash
-cli-anything-sai --json market list
-cli-anything-sai --json account positions 0xYOUR_ADDRESS
-cli-anything-sai --json account balances 0xYOUR_ADDRESS
-cli-anything-sai auth login --address 0xYOUR_ADDRESS --wallet WALLET_NAME
-cli-anything-sai --json trade open --market 0 --side long --type market \
+sai --json market list
+sai --json account positions 0xYOUR_ADDRESS
+sai --json account balances 0xYOUR_ADDRESS
+sai auth login --address 0xYOUR_ADDRESS --wallet WALLET_NAME
+sai --json trade open --market 0 --side long --type market \
   --amount 2 --leverage 2 --slippage 1 --dry-run
-cli-anything-sai --json trade open --market 0 --side long --type limit \
+sai --json trade open --market 0 --side long --type limit \
   --amount 2 --leverage 2 --price 60000 --slippage 1 --dry-run
-cli-anything-sai --json trade partial-close 42 --percent 50 --dry-run
-cli-anything-sai --json trade leverage 42 --leverage 5 --dry-run
-cli-anything-sai --json trade margin 42 --direction add --amount 5 --dry-run
-cli-anything-sai --json trade close 42 --dry-run
-cli-anything-sai --json intent status 0xYOUR_ADDRESS --key INTENT_KEY
-cli-anything-sai --json watch price 3
+sai --json trade partial-close 42 --percent 50 --dry-run
+sai --json trade leverage 42 --leverage 5 --dry-run
+sai --json trade margin 42 --direction add --amount 5 --dry-run
+sai --json trade close 42 --dry-run
+sai --json intent status 0xYOUR_ADDRESS --key INTENT_KEY
+sai --json watch price 3
 ```
 
 For a live market order, the CLI refreshes the market price before admission

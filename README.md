@@ -5,7 +5,7 @@ first project is a trader CLI for Sai's market data and intent-based trading.
 
 ## Trader CLI
 
-The `cli-anything-sai` command provides market and account queries, live data,
+The `sai` command provides market and account queries, live data,
 and trading intents. It uses Sai Keeper's mainnet endpoint by default. Fund the
 Sai account through Sai Web before trading; depositing and bridging funds are
 outside the CLI.
@@ -14,9 +14,9 @@ Install [uv](https://docs.astral.sh/uv/) and Python 3.11 or newer, then run:
 
 ```bash
 uv sync
-uv run cli-anything-sai --help
-uv run cli-anything-sai --json market list
-uv run cli-anything-sai --json market prices
+uv run sai --help
+uv run sai --json market list
+uv run sai --json market prices
 ```
 
 To trade, obtain a Keeper session with an EVM wallet using `auth login` and the
