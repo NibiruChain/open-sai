@@ -469,6 +469,14 @@ def test_margin_snapshot_checks_raw_position_and_available_funds(monkeypatch):
     assert snapshot == raw
     assert available == funds
     assert market["marketId"] == 0
+    # The contract decimal may have more precision than the indexed Float.
+    # Matching their binary64 representations must not reject this snapshot.
+    raw["leverage"] = "10.00000000000000001"
+    assert (
+        margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)[0]
+        == raw
+    )
+    raw["leverage"] = "10"
     raw["collateral_amount"] = "9000000"
     with pytest.raises(ValueError, match="Indexed position differs"):
         margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)
