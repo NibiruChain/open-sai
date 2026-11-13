@@ -11,9 +11,11 @@
 
 ## Local Results
 
-`CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 25 tests on
-2026-11-13, including installed-command HTTP and WebSocket fixtures. These
-fixtures do not prove a live trade. `just check` passed Ruff and ty.
+Automated tests include installed-command HTTP and WebSocket fixtures. They
+exercise recovery after a lost admission response across CLI restarts,
+concurrent position reservations, a WebSocket disconnect and fresh snapshot,
+and refusal of partial GraphQL errors. These fixtures do not prove a live
+trade. `just check` runs Ruff and ty.
 Margin tests cover exact integer rounding, stale position detection, balance
 checks, and network mismatch. A read-only mainnet LCD contract balance query
 also succeeded.

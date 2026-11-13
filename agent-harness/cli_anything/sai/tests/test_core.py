@@ -156,6 +156,29 @@ def test_passphrase_file_descriptor(session):
     assert "sensitive-token" not in result.output
 
 
+@pytest.mark.parametrize("failure", ["expired", "wrong_endpoint"])
+def test_session_refuses_expired_or_wrong_network(session, failure):
+    if failure == "expired":
+        session["expiresAt"] = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    else:
+        session["endpoint"] = "https://other.example/query"
+    storage.save_session(session, "secret")
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"secret\n")
+    os.close(write_fd)
+    try:
+        result = CliRunner().invoke(
+            main, ["--passphrase-fd", str(read_fd), "auth", "status"]
+        )
+    finally:
+        os.close(read_fd)
+    assert result.exit_code != 0
+    assert (
+        "expired" if failure == "expired" else "another Keeper endpoint"
+    ) in result.output
+    assert "sensitive-token" not in result.output
+
+
 def test_untrusted_status_does_not_resolve_uncertain(session, monkeypatch):
     key = "example"
     storage.pending(
