@@ -95,10 +95,14 @@ def snapshot(
         or funds.get("collateral_index") != token
         or raw.get("is_open") is not True
         or raw.get("trade_type") != "trade"
-        or str(raw.get("collateral_amount")) != str(position["collateralAmount"])
-        or float(str(raw.get("leverage"))) != float(position["leverage"])
     ):
         raise ValueError("Position changed; review the margin change again")
+    if str(raw.get("collateral_amount")) != str(position["collateralAmount"]) or float(
+        str(raw.get("leverage"))
+    ) != float(position["leverage"]):
+        raise ValueError(
+            "Indexed position differs from contract state; wait for synchronization and retry"
+        )
     return raw, funds, market
 
 

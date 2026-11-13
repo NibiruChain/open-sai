@@ -33,6 +33,8 @@ change, and the actual margin delta may differ if the position changes after
 the final check. `--dry-run` reads live state and prints the quote without
 submitting an intent. Use `--lcd-endpoint` to select the matching network's
 Nibiru REST service; the CLI checks that its chain matches Keeper.
+The CLI refuses the quote if the indexed position and contract disagree. Wait
+for the index to synchronize and retry; no margin intent has been submitted.
 
 The CLI persists non-secret request identities under `$SAI_HOME/trader` or
 `~/.sai/trader`. A network error after submission leaves the outcome unknown.

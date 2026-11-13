@@ -470,7 +470,7 @@ def test_margin_snapshot_checks_raw_position_and_available_funds(monkeypatch):
     assert available == funds
     assert market["marketId"] == 0
     raw["collateral_amount"] = "9000000"
-    with pytest.raises(ValueError, match="Position changed"):
+    with pytest.raises(ValueError, match="Indexed position differs"):
         margin.snapshot(keeper.MAINNET_HTTP, "https://example.com", "0xabc", 7)
 
 
