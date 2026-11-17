@@ -10,17 +10,30 @@ and trading intents. It uses Sai Keeper's mainnet endpoint by default. Fund the
 Sai account through Sai Web before trading; depositing and bridging funds are
 outside the CLI.
 
-Install [uv](https://docs.astral.sh/uv/) and Python 3.11 or newer, then run:
+Install [uv](https://docs.astral.sh/uv/), then run the CLI without
+installing it:
 
 ```bash
-uv sync
-uv run sai --help
-uv run sai --json market list
-uv run sai --json market prices
+uvx --from git+https://github.com/SaiDotFun/open-sai sai --json market prices
 ```
 
-To install the command into your user tool directory from the checkout, run
-`uv tool install .`. Then run `sai --help` without `uv run`.
+To install `sai` on your `PATH`, run:
+
+```bash
+uv tool install git+https://github.com/SaiDotFun/open-sai
+sai --help
+```
+
+Upgrade with `uv tool upgrade sai-cli`, or rerun the install command with
+`--reinstall`. Both Git commands install from `main`. `sai --version`
+prints the installed version. The package is `sai-cli` and is not on PyPI
+yet, so `uv tool install sai` installs an unrelated PyPI package.
+
+Agents: run `sai --skill` to print the agent skill that matches the installed
+version. Agents that load skills ahead of time can install it with
+`npx skills add SaiDotFun/open-sai --skill sai`.
+
+To work from a checkout, run `uv sync`, then `uv run sai --help`.
 
 For command examples, setup details, and recovery behavior, read the
 [CLI guide](cli/sai_cli/README.md) and the
@@ -65,7 +78,7 @@ to encrypt it with a passphrase instead.
 
 Run `just install`, `just test`, and `just check`.
 
-Install the agent skill with
-`npx skills add SaiDotFun/open-sai --skill sai -g -y`. The repository copy at
-`skills/sai/SKILL.md` is the source; the package ships it through the symlink
-`cli/sai_cli/skills/SKILL.md`.
+The repository copy at `skills/sai/SKILL.md` is the source of the agent skill;
+the package ships it through the symlink `cli/sai_cli/skills/SKILL.md`, and
+`sai --skill` prints it. When you bump the version in `pyproject.toml`, update
+`metadata.cli-version` in the skill to match; a test checks this.

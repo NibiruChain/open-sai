@@ -1,6 +1,7 @@
 # Sai CLI
 
-Install dependencies with `uv sync`, then run `uv run sai --help`.
+Install `sai` as the [root README](../../README.md) shows. From a checkout, run
+`uv sync`, then `uv run sai --help`.
 The CLI connects to mainnet Keeper by default and accepts `--endpoint` for a
 different network. `account balances` and `watch` accept `--ws-endpoint` if the
 WebSocket service differs from the HTTP endpoint.
