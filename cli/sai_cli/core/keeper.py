@@ -103,6 +103,32 @@ def request(
     return data
 
 
+def check_session_typed_data(
+    typed_data: dict[str, Any], address: str, nonce: str
+) -> None:
+    """Refuse typed data that is not Keeper's session challenge for ADDRESS.
+
+    The signer must never receive a payload the endpoint substituted, such as
+    a token permit or an order.
+    """
+    try:
+        domain = typed_data["domain"]
+        message = typed_data["message"]
+        valid = (
+            typed_data["primaryType"] == "UserTradingSession"
+            and domain["name"] == "Sai"
+            and domain["version"] == "1"
+            and isinstance(message["account"], str)
+            and message["account"].lower() == address.lower()
+            and isinstance(message["challenge"], str)
+            and message["challenge"].lower() == nonce.lower()
+        )
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise KeeperError("Challenge is not a Sai trading session request") from exc
+    if not valid:
+        raise KeeperError("Challenge is not a Sai trading session request")
+
+
 def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
     """Sign public typed challenge with ud. Signature and JWT stay in memory."""
     challenge = request(endpoint, CHALLENGE, {"address": address})[
@@ -111,6 +137,7 @@ def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
     if challenge["evmAddress"].lower() != address.lower():
         raise KeeperError("Challenge address does not match the requested account")
     typed_data = challenge["typedData"]
+    check_session_typed_data(typed_data, address, challenge["nonce"])
     declared = {field["name"] for field in typed_data["types"]["EIP712Domain"]}
     domain = typed_data["domain"]
     typed_data["domain"] = {

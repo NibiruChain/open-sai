@@ -236,7 +236,7 @@ def test_wallet_signing_omits_only_empty_undeclared_domain_fields(monkeypatch, s
             "verifyingContract": "",
         },
         "primaryType": "UserTradingSession",
-        "message": {"account": session["evmAddress"]},
+        "message": {"account": session["evmAddress"], "challenge": "nonce"},
     }
 
     def query(endpoint, query, variables=None, token=None):
