@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import shlex
 import shutil
 import sys
 import time
-from datetime import UTC, datetime
 from decimal import Decimal
 from importlib import metadata, resources
 from typing import Any
@@ -20,6 +18,7 @@ from websockets.sync.client import connect
 from websockets.typing import Subprotocol
 
 from .core import clipboard, intents, keeper, margin, storage
+from .core import session as sessions
 from .utils.repl_skin import ReplSkin
 
 PACKAGE = "sai-cli"
@@ -67,37 +66,7 @@ def emit(ctx: click.Context, value: Any) -> None:
 
 
 def session(ctx: click.Context) -> dict[str, str]:
-    result = storage.load_session()
-    if result.get("endpoint") != ctx.obj["endpoint"]:
-        raise ValueError("Stored session belongs to another Keeper endpoint")
-    expiry = datetime.fromisoformat(result["expiresAt"])
-    if expiry <= datetime.now(UTC):
-        raise ValueError("Trading session expired; sign in again")
-    return result
-
-
-def import_session(token: str, endpoint: str) -> dict[str, str]:
-    try:
-        payload = token.split(".")[1]
-        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        address = data["sub"]
-        expires = datetime.fromtimestamp(data["exp"], UTC)
-        if (
-            not isinstance(address, str)
-            or not address.startswith("0x")
-            or len(address) != 42
-            or data.get("purpose") != "user_intent"
-            or expires <= datetime.now(UTC)
-        ):
-            raise ValueError
-    except (ValueError, KeyError, IndexError, TypeError, OverflowError) as exc:
-        raise ValueError("Invalid or expired Sai session token") from exc
-    return {
-        "token": token,
-        "evmAddress": address,
-        "expiresAt": expires.isoformat(),
-        "endpoint": endpoint,
-    }
+    return sessions.load_active_session(ctx.obj["endpoint"])
 
 
 @click.group(invoke_without_command=True)
@@ -219,14 +188,7 @@ def login(
         result = signed_login(ctx.obj["endpoint"], account, wallet, address)
         result["endpoint"] = ctx.obj["endpoint"]
         storage.save_session(result)
-        emit(
-            ctx,
-            {
-                "address": result["evmAddress"],
-                "expiresAt": result["expiresAt"],
-                "endpoint": result["endpoint"],
-            },
-        )
+        emit(ctx, sessions.summary(result))
     except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -328,21 +290,14 @@ def import_token(ctx: click.Context) -> None:
     """
     try:
         token = read_token()
-        result = import_session(token, ctx.obj["endpoint"])
+        result = sessions.import_session(token, ctx.obj["endpoint"])
         storage.save_session(result)
         # Re-read: the person may have copied something else since, and that
         # must survive.
         copied = clipboard.read()
         if copied is not None and copied[0] == token and not clipboard.clear(copied[1]):
             click.echo("Warning: could not clear the clipboard", err=True)
-        emit(
-            ctx,
-            {
-                "address": result["evmAddress"],
-                "expiresAt": result["expiresAt"],
-                "endpoint": result["endpoint"],
-            },
-        )
+        emit(ctx, sessions.summary(result))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -372,14 +327,7 @@ def auth_status(ctx: click.Context) -> None:
     """Show the account and expiration without showing the token."""
     try:
         result = session(ctx)
-        emit(
-            ctx,
-            {
-                "address": result["evmAddress"],
-                "expiresAt": result["expiresAt"],
-                "endpoint": result["endpoint"],
-            },
-        )
+        emit(ctx, sessions.summary(result))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
