@@ -527,6 +527,58 @@ def test_partial_close_trade_binds_to_the_confirmed_size(mcp, monkeypatch):
     assert fake.intent() == preview["intent"]
 
 
+def test_recent_pending_open_blocks_a_second_open(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    first = invoke(mcp, "trade_open", confirm(mcp, "preview_open", OPEN_ARGS))
+    assert first["status"] == "accepted"
+
+    other = {**OPEN_ARGS, "side": "short"}
+    trade = confirm(mcp, "preview_open", other)
+    blocked = invoke(mcp, "trade_open", trade)
+    assert blocked["code"] == "RECENT_OPEN_PENDING"
+    assert blocked["intentKeys"] == [first["intentKey"]]
+    assert "intent_local" in blocked["error"]
+    assert len(fake.submitted) == 1
+
+    # A close is not an open and is not blocked.
+    invoke(mcp, "trade_close", confirm(mcp, "preview_close", {"trade_id": 7}))
+    assert len(fake.submitted) == 2
+
+    allowed = invoke(mcp, "trade_open", {**trade, "allow_concurrent_open": True})
+    assert allowed["status"] == "accepted"
+    assert len(fake.submitted) == 3
+
+
+def test_unknown_open_after_a_timeout_blocks_with_its_key(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    fake = FakeKeeper(lose_ack=True)
+    monkeypatch.setattr(keeper, "request", fake)
+    trade = confirm(mcp, "preview_open", OPEN_ARGS)
+    lost = invoke(mcp, "trade_open", trade)
+    assert lost["code"] == "OUTCOME_UNKNOWN"
+    fake.lose_ack = False
+    blocked = invoke(mcp, "trade_open", trade)
+    assert blocked["code"] == "RECENT_OPEN_PENDING"
+    assert blocked["intentKeys"] == [lost["intentKey"]]
+    assert len(fake.submitted) == 1
+
+
+def test_only_recent_unresolved_opens_count():
+    key = "20260101T000000000Z_AAAAAAAAAAAAAAAA"
+    storage.pending(key, ENDPOINT, ADDRESS, "OPEN_TRADE", "")
+    storage.set_status(key, ENDPOINT, ADDRESS, "accepted")
+    assert tools.recent_opens(ENDPOINT, ADDRESS) == [
+        {"intentKey": key, "status": "accepted"}
+    ]
+    later = datetime.now(UTC).timestamp() + tools.RECENT_OPEN_SECONDS + 1
+    assert tools.recent_opens(ENDPOINT, ADDRESS, now=later) == []
+    assert tools.recent_opens("http://127.0.0.1:1/query", ADDRESS) == []
+    storage.set_status(key, ENDPOINT, ADDRESS, "terminal")
+    assert tools.recent_opens(ENDPOINT, ADDRESS) == []
+
+
 def test_validation_comes_before_the_session(mcp):
     error = invoke(
         mcp, "trade_open", {**OPEN_ARGS, "amount": "-1", "preview_digest": "0" * 64}

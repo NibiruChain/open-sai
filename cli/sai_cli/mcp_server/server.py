@@ -52,6 +52,10 @@ again, and retry with the new previewDigest (and referencePrice).
 executed. Use intent_status with the intent key to follow it.
 - If a trade returns code OUTCOME_UNKNOWN, call intent_status with its \
 intentKey. Never resubmit blindly; the first request may have gone through.
+- After a timeout or error on any trade_* call, call intent_local before \
+retrying. trade_open refuses with RECENT_OPEN_PENDING while a recent open \
+is unknown or accepted; check those intents with intent_status, and pass \
+allow_concurrent_open=true only if the user wants another open position.
 - Never ask the user for a session token or passphrase. They sign in \
 themselves by running `sai auth login` or `sai auth import` in a terminal.
 - Never read MCP client config files to learn about this server; call \
@@ -224,6 +228,7 @@ async def trade_open(
     take_profit: str | None = None,
     stop_loss: str | None = None,
     reference_price: str | None = None,
+    allow_concurrent_open: bool = False,
 ) -> str:
     """Submit an open-trade intent. Call preview_open with the same
     arguments, show the user the preview, and get their explicit
@@ -233,7 +238,10 @@ async def trade_open(
     Refuses without submitting: PREVIEW_MISMATCH when the intent differs
     from the confirmed preview, and, for a market order, PRICE_MOVED when
     Keeper's current price moved from reference_price by more than the
-    slippage percent. Both return a new preview to show the user.
+    slippage percent. Both return a new preview to show the user. Also
+    RECENT_OPEN_PENDING when an open for this account from the last few
+    minutes is still unknown or accepted: call intent_local and
+    intent_status before retrying.
 
     Args:
         market_id: Market id from market_list.
@@ -249,12 +257,17 @@ async def trade_open(
         preview_digest: previewDigest from the confirmed preview_open.
         reference_price: referencePrice from the confirmed preview_open;
             required for market orders only.
+        allow_concurrent_open: True to submit despite a recent pending
+            open, only after intent_status shows it and the user confirms
+            they want another position. An intent still `unknown` blocks
+            every trade until intent_status reconciles it.
     """
     return await call(
         tools.open_trade,
         dry_run=False,
         preview_digest=preview_digest,
         reference_price=reference_price,
+        allow_concurrent_open=allow_concurrent_open,
         market_id=market_id,
         side=side,
         order_type=order_type,
