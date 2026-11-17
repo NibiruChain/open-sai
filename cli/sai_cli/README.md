@@ -22,8 +22,10 @@ requires a funded account; funding is performed separately. Trade commands
 support `--dry-run` to inspect the local semantic request.
 For a live market order, the CLI refreshes the price before admission and
 reports that reference price after acceptance. A dry run marks the price as
-requiring refresh and may include an optional supplied reference. A partial close reads and rechecks the
-position before submission. Market schedule and other Keeper admission checks
+requiring refresh and may include an optional supplied reference. A partial close sizes the
+reduction from the Perp contract's collateral, refuses when Keeper's index
+disagrees with the contract, and rechecks the position before submission. It
+accepts `--lcd-endpoint` like `trade margin`. Market schedule and other Keeper admission checks
 remain authoritative.
 
 `trade leverage TRADE_ID --leverage VALUE` sets a target leverage.

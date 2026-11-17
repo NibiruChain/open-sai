@@ -568,29 +568,26 @@ def trade_margin(
 @trade.command("partial-close")
 @click.argument("trade_id", type=int)
 @click.option("--percent", type=click.IntRange(1, 99), required=True)
+@click.option(
+    "--lcd-endpoint",
+    default=margin.MAINNET_LCD,
+    show_default=True,
+    help="Nibiru REST endpoint for exact contract state.",
+)
 @click.option("--dry-run", is_flag=True)
 @click.pass_context
 def partial_close(
-    ctx: click.Context, trade_id: int, percent: int, dry_run: bool
+    ctx: click.Context, trade_id: int, percent: int, lcd_endpoint: str, dry_run: bool
 ) -> None:
     """Reduce an open USDC position by a whole percentage."""
     try:
         active = session(ctx)
-        data = keeper.request(
-            ctx.obj["endpoint"],
-            keeper.POSITION,
-            {"trader": active["evmAddress"], "id": trade_id},
+        # The snapshot refuses when Keeper's index differs from the contract,
+        # so the reduction is never sized from a lagging collateral amount.
+        raw, _, borrowing = margin.snapshot(
+            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
         )
-        item = data["perp"]["trade"]
-        rows = (
-            [item] if item and item["isOpen"] and item["tradeType"] == "trade" else []
-        )
-        if (
-            len(rows) != 1
-            or rows[0]["perpBorrowing"]["collateralToken"]["symbol"] != "USDC"
-        ):
-            raise ValueError("Open USDC position not found")
-        market_id = rows[0]["perpBorrowing"]["marketId"]
+        market_id = borrowing["marketId"]
         markets = keeper.request(ctx.obj["endpoint"], keeper.MARKETS)["perp"][
             "borrowings"
         ]
@@ -602,27 +599,27 @@ def partial_close(
         ]
         if len(candidates) != 1 or not candidates[0]["isOpen"]:
             raise ValueError("Open market data not available")
+        position = {
+            "id": trade_id,
+            "collateralAmount": raw["collateral_amount"],
+            "leverage": raw["leverage"],
+        }
         payload = intents.partial_intent(
-            rows[0], percent, Decimal(str(candidates[0]["minPositionSizeUSD"]))
+            position, percent, Decimal(str(candidates[0]["minPositionSizeUSD"]))
         )
         if dry_run:
             emit(ctx, {"dryRun": True, "intent": payload})
         else:
-            latest = keeper.request(
-                ctx.obj["endpoint"],
-                keeper.POSITION,
-                {"trader": active["evmAddress"], "id": trade_id},
-            )["perp"]["trade"]
+            latest, _, _ = margin.snapshot(
+                ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+            )
             if (
-                not latest
-                or not latest["isOpen"]
-                or latest["tradeType"] != "trade"
-                or latest["collateralAmount"] != rows[0]["collateralAmount"]
-                or latest["leverage"] != rows[0]["leverage"]
+                latest["collateral_amount"] != raw["collateral_amount"]
+                or latest["leverage"] != raw["leverage"]
             ):
                 raise ValueError("Position changed; review the reduction again")
             emit(ctx, intents.submit(ctx.obj["endpoint"], active, payload))
-    except (ValueError, KeyError, keeper.KeeperError) as exc:
+    except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

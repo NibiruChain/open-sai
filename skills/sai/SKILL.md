@@ -58,8 +58,9 @@ sai --json watch price 3
 
 For a live market order, the CLI refreshes the market price before admission
 and includes the reference price in the accepted response. A dry run reports
-that price refresh is still required. Partial close reads live position and
-market data, including in dry-run mode. A successful execution remains pending
+that price refresh is still required. Partial close reads live position,
+contract, and market data, including in dry-run mode, and refuses while Keeper's
+index lags the contract. A successful execution remains pending
 locally until the CLI observes matching indexed trade history.
 
 Margin commands quote from live contract state even in dry-run mode. They
