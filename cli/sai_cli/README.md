@@ -29,33 +29,36 @@ MCP** button that copies it is in review
   stdin, and never prints it. Like `auth login` and `auth status`, it prints
   only `address`, `expiresAt`, and `endpoint`.
 - After storing the token, it reads the clipboard again and clears it only if
-  it still holds the token. Anything copied in the meantime, such as a
-  passphrase, stays.
+  it still holds the token. Anything copied in the meantime stays.
 
-`auth login --account NAME` signs Keeper's challenge with the Foundry keystore
-`NAME`. Before signing, the CLI checks that the typed data has primary type
+`auth login` signs Keeper's challenge with a local key. Before anything
+signs, the CLI checks that the typed data has primary type
 `UserTradingSession`, domain `Sai` version `1`, your address, and the issued
-challenge nonce. It then runs `cast wallet sign --account NAME --data
---from-file PATH` on your terminal, so `cast` prompts for the keystore
-password. Without `--address`, the CLI first runs `cast wallet address
---account NAME`, which prompts for the password too.
-`auth login --address ADDRESS --wallet NAME` is experimental and
-workstation-only: it signs with the private `ud` wallet manager.
+challenge nonce.
+
+- `auth login --wallet NAME` uses the `ud` wallet manager. The CLI reads the
+  address from `ud evm wallet show NAME`, then runs `ud evm wallet run NAME --
+  wallet sign --data --from-file PATH`. `ud` hands `cast` the keystore
+  password itself, so nothing prompts. If ud's Cast keystore for `NAME` is
+  `missing` or a `name-conflict`, login fails and names the state.
+- `auth login --account NAME` uses the Foundry keystore `NAME`. If `ud` is on
+  `PATH` and `ud evm wallet show NAME` reports Cast state `matching`, it signs
+  through `ud` as above. Otherwise it runs `cast wallet address --account
+  NAME` and `cast wallet sign --account NAME --data --from-file PATH` on your
+  terminal, and `cast` prompts for the keystore password.
+
+`--address ADDRESS` is optional. With `ud`, the CLI refuses to sign when it
+differs from the wallet's address. With `cast`, it replaces `cast wallet
+address` and saves one password prompt.
 
 The session is bound to its account and Keeper endpoint and expires with the
-token. Global option `--keyring-backend` (environment variable
-`SAI_KEYRING_BACKEND`) chooses how `$SAI_HOME/trader/session.json` is
-encrypted:
-
-- `test` (default): AES-GCM with a fixed key built into the CLI, like the
-  Cosmos SDK `test` keyring. No prompt, so agents can run authenticated
-  commands. This only keeps the token out of plaintext; anyone who can read the
-  file and this source can decrypt it.
-- `file`: AES-GCM with a key derived from your passphrase by scrypt. Commands
-  that need the session prompt for it, or read it from an inherited file
-  descriptor given to `--passphrase-fd`, which selects `file` unless `test`
-  is set explicitly. Sessions saved before keyring backends existed load under
-  `file`.
+token. The CLI writes `$SAI_HOME/trader/session.json` with mode 0600,
+encrypted by AES-GCM with a fixed key built into the CLI, like the Cosmos SDK
+`test` keyring. Nothing prompts, so agents can run authenticated commands.
+This only keeps the token out of plaintext; anyone who can read the file and
+this source can decrypt it. Older versions could encrypt the session with a
+passphrase. The CLI refuses those files and asks you to run `sai auth import`
+or `sai auth login` again.
 
 
 ## Commands

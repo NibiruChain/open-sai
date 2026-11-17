@@ -52,12 +52,14 @@ Trading needs a Sai session. There are two ways to get one:
   token at the hidden prompt or press Enter to read the clipboard. You can
   also tell your agent "connect Sai"; it runs `sai auth import`, which reads
   the clipboard when there is no terminal.
-- **With a Foundry keystore.** This works today. Run
-  `sai auth login --account NAME`. The CLI
-  fetches Keeper's sign-in challenge, checks that it is a Sai trading-session
-  request for your address, and runs `cast wallet sign`, which asks for the
-  keystore password. Pass `--address` to skip the extra password prompt from
-  `cast wallet address`.
+- **With a local key.** This works today. Run
+  `sai auth login --account NAME` for a Foundry keystore, or
+  `sai auth login --wallet NAME` for a wallet in the `ud` wallet manager.
+  The CLI fetches Keeper's sign-in challenge, checks that it is a Sai
+  trading-session request for your address, and only then has the wallet
+  sign it. When `ud` manages a matching keystore by that name, `ud` supplies the keystore password and
+  nothing prompts. Otherwise `--account` signs with `cast wallet sign`, which
+  asks for the keystore password.
 
 After connecting, commands run without prompts until the session expires. Know
 what the token is:
@@ -68,11 +70,10 @@ what the token is:
   Withdrawals still need your wallet.
 - It cannot be revoked yet. Signing out of Sai Web does not sign out the CLI.
 
-By default (`--keyring-backend test`), the CLI stores the session encrypted
-with a key built into the CLI, like the Cosmos SDK `test` keyring. That keeps
-the token out of plaintext files but does not protect it from anyone who can
-read your files. Use `--keyring-backend file` (or set `SAI_KEYRING_BACKEND`)
-to encrypt it with a passphrase instead.
+The CLI stores the session in `~/.sai/trader/session.json` with mode 0600,
+encrypted with a key built into the CLI, like the Cosmos SDK `test` keyring.
+That keeps the token out of plaintext files and grep, but anyone who can read
+your files can decrypt it. There is no session passphrase.
 
 ## Development
 

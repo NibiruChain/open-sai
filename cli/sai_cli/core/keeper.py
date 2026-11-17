@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -200,7 +202,7 @@ def signed_session(
 
 
 def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
-    """Sign the challenge with a ud wallet (experimental, workstation-only)."""
+    """Sign the challenge with a ud wallet; ud supplies the keystore password."""
     return signed_session(
         endpoint,
         address,
@@ -217,6 +219,74 @@ def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
             "--from-file",
         ],
     )
+
+
+def is_address(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 42 or not value.startswith("0x"):
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in value[2:])
+
+
+@dataclass(frozen=True)
+class UdWallet:
+    """Public details from `ud evm wallet show`.
+
+    `cast_state` is ud's Cast keystore state for the name: `matching`,
+    `missing`, or `name-conflict`, or None when ud printed none. `ud evm
+    wallet run` signs only when it is `matching`.
+    """
+
+    address: str
+    cast_state: str | None
+
+    @property
+    def can_sign(self) -> bool:
+        return self.cast_state == "matching"
+
+
+def parse_wallet(output: str) -> UdWallet | None:
+    """Read the first JSON object in OUTPUT that has an `address`.
+
+    `ud evm wallet show` prints a JSON object, but tolerate log lines or other
+    text around it.
+    """
+    decoder = json.JSONDecoder()
+    start = output.find("{")
+    while start != -1:
+        try:
+            value, _ = decoder.raw_decode(output, start)
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and is_address(value.get("address")):
+            cast = value.get("cast")
+            state = cast.get("state") if isinstance(cast, dict) else None
+            return UdWallet(value["address"], state if isinstance(state, str) else None)
+        start = output.find("{", start + 1)
+    return None
+
+
+def ud_wallet(wallet: str) -> UdWallet | None:
+    """Read a ud wallet's public details, or None if ud cannot show it.
+
+    `ud evm wallet show` prints public data only. Its stdin and stderr are
+    closed so it can never prompt, and only the address and Cast state leave
+    this function.
+    """
+    if shutil.which("ud") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ud", "evm", "wallet", "show", wallet],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_wallet(proc.stdout)
 
 
 def cast_address(account: str) -> str:

@@ -28,7 +28,8 @@ When the person asks you to connect Sai:
 
 1. Ask them to copy their session token with the **Connect Sai CLI / MCP**
    button in Sai Web. If their Sai Web has no such button yet, ask them to
-   run `sai auth login --account NAME` in their own terminal instead (below).
+   run `sai auth login --wallet NAME` or `sai auth login --account NAME` in
+   their own terminal instead (below).
 2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
    stores the token, clears the clipboard, and prints `address`,
    `expiresAt`, and `endpoint`.
@@ -42,10 +43,16 @@ Never ask the person to paste the token into the chat, and never pass it as an
 argument, environment variable, or piped input. `auth import` does not accept
 those.
 
-People with a Foundry keystore can instead run `sai auth login --account NAME`
-in their own terminal; `cast` prompts for the keystore password.
-`auth login --address ADDRESS --wallet NAME` is experimental and works only on
-workstations with the private `ud` wallet manager.
+People with a local key can instead sign in from their own terminal:
+
+- `sai auth login --wallet NAME` signs with a wallet in the `ud` wallet
+  manager. It reads the address from `ud` and does not prompt.
+- `sai auth login --account NAME` signs with a Foundry keystore. It goes
+  through `ud` without a prompt when `ud` manages a matching keystore by that
+  name; otherwise `cast` prompts for the keystore password.
+
+`--address` is an optional cross-check; leave it out unless the person gives
+one.
 
 Once connected, commands need no prompt until the session expires. `auth
 status` shows the address and expiry without revealing the token. Tell the
@@ -54,11 +61,10 @@ token, lasts as long as Keeper issues it (30 days in production), authorizes
 all trading on their deposited funds, and cannot be revoked yet. Signing out
 of Sai Web does not sign out the CLI.
 
-The default keyring backend `test` encrypts the stored session with a key
-built into the CLI and never prompts. If the person chose `--keyring-backend
-file`, commands ask for their passphrase or read it from an inherited file
-descriptor given to `--passphrase-fd`. Never put a passphrase in arguments,
-environment variables, output, or logs.
+The CLI encrypts the stored session with a key built into the CLI and never
+prompts for a passphrase. If it reports a passphrase-encrypted session from an
+older version, ask the person to sign in again with `sai auth import` or `sai
+auth login`.
 
 ## Trading
 

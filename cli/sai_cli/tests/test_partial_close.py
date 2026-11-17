@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -107,29 +106,11 @@ def partial_close(monkeypatch, indexed: int, contract: int, *args: str):
         "smart",
         lambda lcd, contract, message: raw if "get_trade_raw" in message else funds,
     )
-    storage.save_session(session_for(keeper.MAINNET_HTTP), "secret")
-    read_fd, write_fd = os.pipe()
-    os.write(write_fd, b"secret\n")
-    os.close(write_fd)
-    try:
-        result = CliRunner().invoke(
-            main,
-            [
-                "--json",
-                "--keyring-backend",
-                "file",
-                "--passphrase-fd",
-                str(read_fd),
-                "trade",
-                "partial-close",
-                "7",
-                "--percent",
-                "50",
-                *args,
-            ],
-        )
-    finally:
-        os.close(read_fd)
+    storage.save_session(session_for(keeper.MAINNET_HTTP))
+    result = CliRunner().invoke(
+        main,
+        ["--json", "trade", "partial-close", "7", "--percent", "50", *args],
+    )
     return result, submitted
 
 
