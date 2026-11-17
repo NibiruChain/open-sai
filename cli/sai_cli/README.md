@@ -39,12 +39,13 @@ challenge nonce.
 - `auth login --wallet NAME` uses the `ud` wallet manager. The CLI reads the
   address from `ud evm wallet show NAME`, then runs `ud evm wallet run NAME --
   wallet sign --data --from-file PATH`. `ud` hands `cast` the keystore
-  password itself, so nothing prompts.
+  password itself, so nothing prompts. If ud's Cast keystore for `NAME` is
+  `missing` or a `name-conflict`, login fails and names the state.
 - `auth login --account NAME` uses the Foundry keystore `NAME`. If `ud` is on
-  `PATH` and `ud evm wallet show NAME` succeeds, it signs through `ud` as
-  above. Otherwise it runs `cast wallet address --account NAME` and `cast
-  wallet sign --account NAME --data --from-file PATH` on your terminal, and
-  `cast` prompts for the keystore password.
+  `PATH` and `ud evm wallet show NAME` reports Cast state `matching`, it signs
+  through `ud` as above. Otherwise it runs `cast wallet address --account
+  NAME` and `cast wallet sign --account NAME --data --from-file PATH` on your
+  terminal, and `cast` prompts for the keystore password.
 
 `--address ADDRESS` is optional. With `ud`, the CLI refuses to sign when it
 differs from the wallet's address. With `cast`, it replaces `cast wallet

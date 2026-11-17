@@ -237,20 +237,41 @@ def checked_address(found: str, expected: str | None) -> str:
     return found
 
 
+def ud_state_hint(wallet: str, state: str | None) -> str:
+    """Explain why ud cannot sign with WALLET and how to fix it."""
+    prefix = f"ud wallet {wallet} has Cast keystore state {state or 'unknown'}"
+    if state == "missing":
+        return f"{prefix}; run `ud evm wallet sync {wallet}` to create it"
+    if state == "name-conflict":
+        return (
+            f"{prefix}: another keystore already uses that name; rename it,"
+            f" then run `ud evm wallet sync {wallet}`"
+        )
+    return f"{prefix}; check `ud evm wallet show {wallet}`"
+
+
 def signed_login(
     endpoint: str, account: str | None, wallet: str | None, address: str | None
 ) -> dict[str, str]:
-    """Sign in with a ud wallet when possible, else with cast."""
+    """Sign in with a ud wallet when possible, else with cast.
+
+    --account uses ud only when ud's Cast keystore for the name matches the
+    wallet, since `ud evm wallet run` refuses otherwise; a Foundry keystore
+    that merely shares a name with a ud wallet still signs through cast.
+    """
     name = wallet or account
     assert name
-    found = keeper.ud_wallet_address(name)
-    if found is not None:
-        return keeper.wallet_session(endpoint, checked_address(found, address), name)
+    found = keeper.ud_wallet(name)
+    if found is not None and found.can_sign:
+        address = checked_address(found.address, address)
+        return keeper.wallet_session(endpoint, address, name)
     if wallet:
-        raise ValueError(
-            f"`ud evm wallet show {wallet}` failed or printed no address;"
-            " check that ud is installed and knows this wallet"
-        )
+        if found is None:
+            raise ValueError(
+                f"`ud evm wallet show {wallet}` failed or printed no address;"
+                " check that ud is installed and knows this wallet"
+            )
+        raise ValueError(ud_state_hint(wallet, found.cast_state))
     assert account
     if address is None:
         address = keeper.cast_address(account)

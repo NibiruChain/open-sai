@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -226,8 +227,25 @@ def is_address(value: object) -> bool:
     return all(c in "0123456789abcdefABCDEF" for c in value[2:])
 
 
-def parse_wallet_address(output: str) -> str | None:
-    """Return the `address` of the first JSON object in OUTPUT that has one.
+@dataclass(frozen=True)
+class UdWallet:
+    """Public details from `ud evm wallet show`.
+
+    `cast_state` is ud's Cast keystore state for the name: `matching`,
+    `missing`, or `name-conflict`, or None when ud printed none. `ud evm
+    wallet run` signs only when it is `matching`.
+    """
+
+    address: str
+    cast_state: str | None
+
+    @property
+    def can_sign(self) -> bool:
+        return self.cast_state == "matching"
+
+
+def parse_wallet(output: str) -> UdWallet | None:
+    """Read the first JSON object in OUTPUT that has an `address`.
 
     `ud evm wallet show` prints a JSON object, but tolerate log lines or other
     text around it.
@@ -240,16 +258,19 @@ def parse_wallet_address(output: str) -> str | None:
         except ValueError:
             value = None
         if isinstance(value, dict) and is_address(value.get("address")):
-            return value["address"]
+            cast = value.get("cast")
+            state = cast.get("state") if isinstance(cast, dict) else None
+            return UdWallet(value["address"], state if isinstance(state, str) else None)
         start = output.find("{", start + 1)
     return None
 
 
-def ud_wallet_address(wallet: str) -> str | None:
-    """Read a ud wallet's public address, or None if ud cannot show it.
+def ud_wallet(wallet: str) -> UdWallet | None:
+    """Read a ud wallet's public details, or None if ud cannot show it.
 
     `ud evm wallet show` prints public data only. Its stdin and stderr are
-    closed so it can never prompt, and only the address leaves this function.
+    closed so it can never prompt, and only the address and Cast state leave
+    this function.
     """
     if shutil.which("ud") is None:
         return None
@@ -265,7 +286,7 @@ def ud_wallet_address(wallet: str) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return parse_wallet_address(proc.stdout)
+    return parse_wallet(proc.stdout)
 
 
 def cast_address(account: str) -> str:

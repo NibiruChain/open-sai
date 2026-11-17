@@ -542,12 +542,25 @@ def test_login_requires_one_signer(env: Env) -> None:
 UD_SECRET = "ud-keystore-password"
 
 
-def fake_ud(env: Env, known: str = "dev") -> None:
-    """A ud that knows wallet KNOWN and signs as `cast` would through it.
+def fake_ud(env: Env, known: str = "dev", state: str = "matching") -> None:
+    """A ud that knows wallet KNOWN, whose Cast keystore is in STATE.
 
-    `show` prints a log line and a secret on stderr around its JSON, as a
-    noisy real tool might.
+    `show` prints ud's real JSON shape, plus a log line and a secret on
+    stderr, as a noisy real tool might. Like real ud, `run` signs only when
+    the state is `matching`.
     """
+    shown = {
+        "name": known,
+        "address": ADDRESS.upper().replace("0X", "0x"),
+        "notes": "",
+        "cast": {
+            "name": known,
+            "address": ADDRESS.upper().replace("0X", "0x"),
+            "state": state,
+            "keystorePath": f"/keystores/{known}",
+            "duplicateNames": [],
+        },
+    }
     env.tool(
         "ud",
         "import json\n"
@@ -555,10 +568,11 @@ def fake_ud(env: Env, known: str = "dev") -> None:
         f"if args[:3] == ['evm', 'wallet', 'show'] and args[3] == {known!r}:\n"
         f"    sys.stderr.write({UD_SECRET!r} + '\\n')\n"
         "    print('Reading wallet document')\n"
-        "    print(json.dumps({'name': args[3], 'address': "
-        f"{ADDRESS.upper().replace('0X', '0x')!r}, 'cast': {{'synced': True}}}}))\n"
+        f"    print(json.dumps({shown!r}))\n"
         f"elif args[:4] == ['evm', 'wallet', 'run', {known!r}] and args[4:7] == "
         "['--', 'wallet', 'sign']:\n"
+        f"    if {state!r} != 'matching':\n"
+        "        sys.exit('wallet is not synchronized with Cast')\n"
         "    assert args[7:9] == ['--data', '--from-file']\n"
         "    data = json.load(open(args[-1]))\n"
         "    assert data['primaryType'] == 'UserTradingSession'\n"
@@ -626,6 +640,44 @@ def test_account_login_signs_through_ud_when_it_knows_the_name(
     assert len(keeper_auth["signatures"]) == 1
 
 
+def test_account_login_uses_cast_when_ud_keystore_conflicts(
+    env: Env, keeper_auth
+) -> None:
+    # A Foundry keystore `dev` that is not ud's wallet `dev`.
+    fake_ud(env, state="name-conflict")
+    fake_cast(env)
+    result = login(env, keeper_auth, "--account", "dev")
+    assert result.returncode == 0, result.stderr
+    calls = env.log.read_text().splitlines()
+    assert calls[0].endswith("ud evm wallet show dev")
+    assert calls[1].endswith("cast wallet address --account dev")
+    assert " wallet sign --account dev --data --from-file " in calls[2]
+    assert "wallet run" not in env.log.read_text()
+    assert len(keeper_auth["signatures"]) == 1
+
+
+@pytest.mark.parametrize(
+    "state, hint",
+    [
+        ("missing", "run `ud evm wallet sync dev` to create it"),
+        ("name-conflict", "another keystore already uses that name"),
+    ],
+)
+def test_wallet_login_names_an_unsigned_cast_state(
+    env: Env, keeper_auth, state: str, hint: str
+) -> None:
+    fake_ud(env, state=state)
+    fake_cast(env)
+    result = login(env, keeper_auth, "--wallet", "dev")
+    assert result.returncode != 0
+    assert f"Cast keystore state {state}" in result.stderr
+    assert hint in result.stderr
+    calls = env.log.read_text()
+    assert "wallet run" not in calls
+    assert "/cast " not in calls
+    assert keeper_auth["signatures"] == []
+
+
 def test_account_login_falls_back_to_cast(env: Env, keeper_auth) -> None:
     fake_ud(env, known="someone-else")
     fake_cast(env)
@@ -647,19 +699,29 @@ def test_ud_login_refuses_foreign_typed_data(env: Env, keeper_auth) -> None:
     assert keeper_auth["signatures"] == []
 
 
+def ud_show(address: object, state: object = "matching") -> str:
+    return json.dumps({"name": "a", "address": address, "cast": {"state": state}})
+
+
 @pytest.mark.parametrize(
     "output, expected",
     [
-        (json.dumps({"address": ADDRESS}), ADDRESS),
+        (ud_show(ADDRESS), keeper.UdWallet(ADDRESS, "matching")),
+        (ud_show(ADDRESS, "name-conflict"), keeper.UdWallet(ADDRESS, "name-conflict")),
+        (json.dumps({"address": ADDRESS}), keeper.UdWallet(ADDRESS, None)),
+        (ud_show(ADDRESS, 3), keeper.UdWallet(ADDRESS, None)),
         (
             "note {not json}\n" + json.dumps({"x": {"address": 1}, "address": OTHER}),
-            OTHER,
+            keeper.UdWallet(OTHER, None),
         ),
-        ('log line\n{"name": "a"}\n' + json.dumps({"address": ADDRESS}), ADDRESS),
-        (json.dumps({"address": "0x123"}), None),
-        (json.dumps({"address": "0x" + "g" * 40}), None),
+        (
+            'log line\n{"name": "a"}\n' + ud_show(ADDRESS),
+            keeper.UdWallet(ADDRESS, "matching"),
+        ),
+        (ud_show("0x123"), None),
+        (ud_show("0x" + "g" * 40), None),
         ("", None),
     ],
 )
-def test_parse_wallet_address(output: str, expected: str | None) -> None:
-    assert keeper.parse_wallet_address(output) == expected
+def test_parse_wallet(output: str, expected: keeper.UdWallet | None) -> None:
+    assert keeper.parse_wallet(output) == expected
