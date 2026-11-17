@@ -76,6 +76,29 @@ encrypted with a key built into the CLI, like the Cosmos SDK `test` keyring.
 That keeps the token out of plaintext files and grep, but anyone who can read
 your files can decrypt it. There is no session passphrase.
 
+## Use Sai From Your Agent (MCP)
+
+The `sai-mcp` server gives MCP clients such as Claude Code the same reads,
+previews, and trades as the CLI. Connect to Sai with the CLI first; the
+server reads that session and never asks for a token or passphrase. It needs
+the default `test` keyring backend.
+
+```bash
+claude mcp add sai -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp
+```
+
+From a checkout, use `uv run --directory /path/to/open-sai sai-mcp` as the
+command instead.
+
+The server starts read-only: market data, account reads, intent status, and
+trade previews. To let the agent submit trades, add
+`--env SAI_MCP_EXPOSED_TOOLS=all` to the command above. Each trade must carry
+the `previewDigest` from a preview the user confirmed; if the position or
+price changed since then, the server refuses and returns a fresh preview.
+Ask the agent to call `mcp_info` to see the version, endpoints, mode, and
+signed-in account. `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`
+select another network.
+
 ## Development
 
 Run `just install`, `just test`, and `just check`.
