@@ -1,9 +1,11 @@
 """Sai MCP server over stdio.
 
 Tools return JSON strings and never raise. Read-only tools carry
-`readOnlyHint=True`; trade tools carry `destructiveHint=True`. With
-SAI_MCP_EXPOSED_TOOLS=read-only, the default, the server drops every tool
-that is not read-only, so trade tools exist only when set to `all`.
+`readOnlyHint=True`; trade tools carry `destructiveHint=True`. Exposure goes
+by name, not annotation: the six TRADE_TOOL_NAMES are registered only when
+SAI_MCP_EXPOSED_TOOLS is `all`. The default, `read-only`, applies to the
+module-level `mcp` too, so a server started without the variable never
+offers a trade tool.
 """
 
 from __future__ import annotations
@@ -23,6 +25,16 @@ from . import info, tools
 
 ENV_MODE = "SAI_MCP_EXPOSED_TOOLS"
 MODES = ("read-only", "all")
+TRADE_TOOL_NAMES = frozenset(
+    {
+        "trade_open",
+        "trade_close",
+        "trade_tpsl",
+        "trade_leverage",
+        "trade_margin",
+        "trade_partial_close",
+    }
+)
 
 INSTRUCTIONS = """\
 Sai perpetuals trading on Nibiru through Sai Keeper.
@@ -410,7 +422,7 @@ async def trade_partial_close(trade_id: int, percent: int) -> str:
 
 # Registration
 
-TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
+READ_TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
     (auth_status, read_only("Auth Status", open_world=False)),
     (market_list, read_only("Market List")),
     (market_prices, read_only("Market Prices")),
@@ -425,6 +437,9 @@ TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
     (preview_leverage, read_only("Preview Leverage")),
     (preview_margin, read_only("Preview Margin Change")),
     (preview_partial_close, read_only("Preview Partial Close")),
+)
+
+TRADE_TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
     (trade_open, destructive("Open Trade")),
     (trade_close, destructive("Close Trade")),
     (trade_tpsl, destructive("Set TP/SL")),
@@ -434,8 +449,13 @@ TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
 )
 
 
-def create_server() -> FastMCP:
-    """Build a server with every tool registered, before exposure filtering."""
+def create_server(mode: str = "read-only") -> FastMCP:
+    """Build a server for exposure MODE.
+
+    Trade tools are registered only when MODE is `all`. The check goes by
+    name, so a read tool that is mislabeled cannot carry a trade through.
+    """
+    mode = exposed_tools_mode(mode)
     server = FastMCP("sai", instructions=INSTRUCTIONS)
 
     async def mcp_info() -> str:
@@ -463,9 +483,7 @@ def create_server() -> FastMCP:
                     "websocket": ws,
                     "lcd": config.lcd_endpoint,
                 },
-                "exposedTools": "all"
-                if any(name.startswith("trade_") for name in names)
-                else "read-only",
+                "exposedTools": mode,
                 "tools": names,
                 "session": tools.session_state(config),
             }
@@ -473,7 +491,11 @@ def create_server() -> FastMCP:
         return await call(report)
 
     server.add_tool(mcp_info, annotations=read_only("MCP Info", open_world=False))
-    for function, hints in TOOLS:
+    selected = READ_TOOLS + (TRADE_TOOLS if mode == "all" else ())
+    for function, hints in selected:
+        name = getattr(function, "__name__", "")
+        if mode != "all" and (not name or name in TRADE_TOOL_NAMES):
+            raise RuntimeError(f"Trade tool {name!r} is in READ_TOOLS")
         server.add_tool(function, annotations=hints)
     return server
 
@@ -492,30 +514,18 @@ def exposed_tools_mode(value: str | None = None) -> str:
     return mode
 
 
-def apply_exposed_tools_mode(server: FastMCP, mode: str) -> list[str]:
-    """Remove every tool not annotated read-only unless MODE is `all`."""
-    if exposed_tools_mode(mode) == "all":
-        return []
-    removed: list[str] = []
-    for tool in list(server._tool_manager.list_tools()):
-        annotations = tool.annotations
-        if not (annotations and annotations.readOnlyHint):
-            server._tool_manager.remove_tool(tool.name)
-            removed.append(tool.name)
-    return removed
-
-
-mcp = create_server()
+# Built at import from SAI_MCP_EXPOSED_TOOLS, so `mcp` is read-only unless
+# the variable says `all`, however the server is started.
+mcp = create_server(exposed_tools_mode())
 
 
 def main() -> None:
-    """Apply the exposure mode and serve over stdio."""
+    """Serve over stdio with the exposure mode chosen at import."""
     logging.basicConfig(
         level=logging.WARNING,
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    apply_exposed_tools_mode(mcp, exposed_tools_mode())
     mcp.run()
 
 

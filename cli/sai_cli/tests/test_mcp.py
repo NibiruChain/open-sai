@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -129,7 +131,7 @@ class FakeKeeper:
 
 @pytest.fixture
 def mcp() -> FastMCP:
-    return server.create_server()
+    return server.create_server("all")
 
 
 # Schema and exposure
@@ -160,16 +162,54 @@ def test_no_tool_accepts_a_token_or_passphrase(mcp):
             assert "token" not in field and "pass" not in field, tool.name
 
 
-def test_read_only_mode_removes_exactly_the_trade_tools(mcp):
-    removed = server.apply_exposed_tools_mode(mcp, "read-only")
-    assert set(removed) == TRADE_TOOLS
-    assert {tool.name for tool in mcp._tool_manager.list_tools()} == READ_TOOLS
-    assert invoke(mcp, "mcp_info")["exposedTools"] == "read-only"
+def names(mcp: FastMCP) -> set[str]:
+    return {tool.name for tool in mcp._tool_manager.list_tools()}
 
 
-def test_all_mode_keeps_every_tool(mcp):
-    assert server.apply_exposed_tools_mode(mcp, "all") == []
+def test_read_only_mode_registers_no_trade_tool():
+    assert server.TRADE_TOOL_NAMES == TRADE_TOOLS
+    for mcp in (server.create_server(), server.create_server("read-only")):
+        assert names(mcp) == READ_TOOLS
+        assert invoke(mcp, "mcp_info")["exposedTools"] == "read-only"
+
+
+def test_all_mode_registers_every_tool(mcp):
+    assert names(mcp) == READ_TOOLS | TRADE_TOOLS
     assert invoke(mcp, "mcp_info")["exposedTools"] == "all"
+
+
+def test_read_only_mode_goes_by_name_not_annotation(monkeypatch):
+    """A trade tool mislabeled read-only is still never registered."""
+    mislabeled = ((server.trade_close, server.read_only("Close Trade")),)
+    monkeypatch.setattr(server, "READ_TOOLS", server.READ_TOOLS + mislabeled)
+    with pytest.raises(RuntimeError, match="trade_close"):
+        server.create_server("read-only")
+
+
+def test_invalid_mode_exits():
+    with pytest.raises(SystemExit, match="Invalid SAI_MCP_EXPOSED_TOOLS"):
+        server.create_server("write")
+
+
+def test_module_level_server_is_read_only_without_the_variable(tmp_path):
+    """Importing `server.mcp` and running it, as `mcp run` does, never
+    exposes trades unless SAI_MCP_EXPOSED_TOOLS is `all`."""
+    code = (
+        "import json; from sai_cli.mcp_server import server;"
+        " print(json.dumps(sorted(t.name for t in"
+        " server.mcp._tool_manager.list_tools())))"
+    )
+    for env, expected in (({}, READ_TOOLS), ({server.ENV_MODE: "all"}, None)):
+        done = subprocess.run(
+            [sys.executable, "-c", code],
+            env={"SAI_HOME": str(tmp_path), "PATH": os.defpath, **env},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+        listed = set(json.loads(done.stdout))
+        assert listed == (expected or READ_TOOLS | TRADE_TOOLS)
 
 
 def test_mode_defaults_to_read_only_and_rejects_unknown_values(monkeypatch):
