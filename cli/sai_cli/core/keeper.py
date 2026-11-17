@@ -138,8 +138,8 @@ def check_session_typed_data(
         raise KeeperError("Challenge is not a Sai trading session request")
 
 
-def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
-    """Sign public typed challenge with ud. Signature and JWT stay in memory."""
+def fetch_challenge(endpoint: str, address: str) -> tuple[dict[str, Any], str]:
+    """Return checked typed data to sign and its challenge nonce."""
     challenge = request(endpoint, CHALLENGE, {"address": address})[
         "createUserIntentAuthChallenge"
     ]
@@ -156,38 +156,92 @@ def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
     }
     if any(typed_data["domain"].get(key) in (None, "") for key in declared):
         raise KeeperError("Challenge has an empty declared signing domain field")
+    return typed_data, challenge["nonce"]
+
+
+def signed_session(
+    endpoint: str,
+    address: str,
+    sign_command: list[str],
+    *,
+    interactive: bool = False,
+) -> dict[str, str]:
+    """Sign Keeper's challenge with SIGN_COMMAND plus the typed-data file path.
+
+    With INTERACTIVE, the signer keeps the user's terminal for stdin and
+    stderr, so it can prompt for a keystore password. Only stdout, the
+    signature, is captured. The signature and JWT stay in memory.
+    """
+    typed_data, nonce = fetch_challenge(endpoint, address)
     with tempfile.TemporaryDirectory(prefix="sai-auth-") as temp:
         path = Path(temp) / "challenge.json"
         path.write_text(json.dumps(typed_data), encoding="utf-8")
         path.chmod(0o600)
         try:
             proc = subprocess.run(
-                [
-                    "ud",
-                    "evm",
-                    "wallet",
-                    "run",
-                    wallet,
-                    "--",
-                    "wallet",
-                    "sign",
-                    "--data",
-                    "--from-file",
-                    str(path),
-                ],
-                capture_output=True,
+                [*sign_command, str(path)],
+                stdout=subprocess.PIPE,
+                stderr=None if interactive else subprocess.PIPE,
                 text=True,
                 check=True,
-                timeout=120,
+                timeout=300 if interactive else 120,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise KeeperError("Wallet signing failed") from exc
     signature = proc.stdout.strip()
     if not signature.startswith("0x") or len(signature) != 132:
         raise KeeperError("Wallet signer returned an invalid signature")
-    session = request(
-        endpoint, SESSION, {"signature": signature, "challenge": challenge["nonce"]}
-    )["createUserIntentSession"]
+    session = request(endpoint, SESSION, {"signature": signature, "challenge": nonce})[
+        "createUserIntentSession"
+    ]
     if session["evmAddress"].lower() != address.lower():
         raise KeeperError("Session address does not match the requested account")
     return session
+
+
+def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
+    """Sign the challenge with a ud wallet (experimental, workstation-only)."""
+    return signed_session(
+        endpoint,
+        address,
+        [
+            "ud",
+            "evm",
+            "wallet",
+            "run",
+            wallet,
+            "--",
+            "wallet",
+            "sign",
+            "--data",
+            "--from-file",
+        ],
+    )
+
+
+def cast_address(account: str) -> str:
+    """Read a Foundry keystore address; cast may prompt for its password."""
+    try:
+        proc = subprocess.run(
+            ["cast", "wallet", "address", "--account", account],
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise KeeperError(f"cast could not read keystore account {account}") from exc
+    address = proc.stdout.strip()
+    if not address.startswith("0x") or len(address) != 42:
+        raise KeeperError("cast returned an invalid address")
+    return address
+
+
+def cast_session(endpoint: str, address: str, account: str) -> dict[str, str]:
+    """Sign the challenge with a Foundry keystore through `cast wallet sign`."""
+    return signed_session(
+        endpoint,
+        address,
+        ["cast", "wallet", "sign", "--account", account, "--data", "--from-file"],
+        interactive=True,
+    )
