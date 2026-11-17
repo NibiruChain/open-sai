@@ -48,6 +48,10 @@ marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
 admission does not establish execution or finality.
 
+Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
+prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.
+In a terminal, the shell keeps command history in `$SAI_HOME/trader/history`.
+
 `utils/repl_skin.py` is adapted from CLI-Anything
 (https://github.com/HKUDS/CLI-Anything) under the Apache License 2.0. See the
 repository license.

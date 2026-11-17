@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import click
 import pytest
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
+from sai_cli.core import keeper
+from sai_cli.sai_cli import main, repl, repl_args
 from sai_cli.utils.repl_skin import ReplSkin
 
 REPO = Path(__file__).resolve().parents[3]
@@ -58,3 +63,24 @@ def test_skill_is_named_sai(path):
 
 def test_packaged_skill_matches_repository_skill():
     assert PACKAGE_SKILL.read_bytes() == REPO_SKILL.read_bytes()
+
+
+def test_repl_help_maps_to_click_help():
+    assert repl_args("help") == ["--help"]
+    assert repl_args("help trade open") == ["trade", "open", "--help"]
+    assert repl_args("market list") == ["market", "list"]
+
+
+def test_repl_writes_history_and_shows_help(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SAI_HOME", str(tmp_path))
+    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "json": True})
+    with create_pipe_input() as pipe:
+        pipe.send_text("help\rhelp trade\r")
+        pipe.close()
+        repl(ctx, pt_input=pipe, pt_output=DummyOutput())
+    out = capsys.readouterr().out
+    assert "Usage: sai" in out
+    assert "partial-close" in out
+    history = (tmp_path / "trader" / "history").read_text(encoding="utf-8")
+    assert "+help\n" in history
+    assert "+help trade\n" in history

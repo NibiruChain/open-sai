@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import shlex
+import sys
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -91,20 +92,41 @@ def main(
         repl(ctx)
 
 
-def repl(ctx: click.Context) -> None:
+def repl_args(line: str) -> list[str]:
+    """Turn one REPL line into CLI arguments; `help [COMMAND...]` shows help."""
+    args = shlex.split(line)
+    if args and args[0] in ("help", "?"):
+        return [*args[1:], "--help"]
+    return args
+
+
+def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> None:
+    """Run the interactive shell.
+
+    History is kept in $SAI_HOME/trader/history when stdin is a terminal or a
+    prompt_toolkit input is supplied. Ctrl-C cancels the current line or
+    command and returns to the prompt; Ctrl-D or `exit` leaves.
+    """
     skin = ReplSkin("sai", version="0.1.0")
     skin.print_banner()
-    click.echo("Enter a command, or 'exit'.")
+    click.echo("Enter a command, 'help', or 'exit'.")
+    pt_session = (
+        skin.create_prompt_session(input=pt_input, output=pt_output)
+        if pt_input is not None or sys.stdin.isatty()
+        else None
+    )
     while True:
         try:
-            line = input("sai> ")
-        except (EOFError, KeyboardInterrupt):
+            line = skin.get_input(pt_session)
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
             click.echo()
             break
-        if line.strip() in ("exit", "quit"):
+        if line in ("exit", "quit"):
             break
         try:
-            args = shlex.split(line)
+            args = repl_args(line)
             if args:
                 main.main(
                     args=[
@@ -113,8 +135,11 @@ def repl(ctx: click.Context) -> None:
                         *(["--json"] if ctx.obj["json"] else []),
                         *args,
                     ],
+                    prog_name="sai",
                     standalone_mode=False,
                 )
+        except (click.Abort, KeyboardInterrupt):
+            click.echo("Interrupted", err=True)
         except (click.ClickException, ValueError, keeper.KeeperError) as exc:
             click.echo(f"Error: {exc}", err=True)
 

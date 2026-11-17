@@ -586,3 +586,23 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_repl_survives_an_aborted_command_and_shows_help(tmp_path):
+    env = {**os.environ, "SAI_HOME": str(tmp_path)}
+    env.pop("TELEGRAM_PASSWORD", None)
+    # The passphrase prompt reaches end of input, which Click reports as an
+    # abort. A new session has no terminal, so getpass reads stdin.
+    aborted = subprocess.run(
+        _resolve_cli(),
+        input="help\nauth status\n",
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+        env=env,
+        start_new_session=True,
+    )
+    assert aborted.returncode == 0, aborted.stderr
+    assert "Usage: sai" in aborted.stdout
+    assert "Interrupted" in aborted.stderr

@@ -1,6 +1,7 @@
 # Adapted from repl_skin.py in CLI-Anything
 # (https://github.com/HKUDS/CLI-Anything), licensed under the Apache License,
-# Version 2.0. Modified for Sai: branding, history location, and skill lookup.
+# Version 2.0. Modified for Sai: branding, history location, skill lookup, and
+# prompt session options.
 """Terminal REPL styling for the Sai CLI.
 
 Usage:
@@ -456,8 +457,11 @@ class ReplSkin:
 
     # ── Prompt toolkit session factory ────────────────────────────────
 
-    def create_prompt_session(self):
+    def create_prompt_session(self, **options):
         """Create a prompt_toolkit PromptSession with skin styling.
+
+        Args:
+            options: Extra PromptSession arguments, such as input and output.
 
         Returns:
             A configured PromptSession, or None if prompt_toolkit unavailable.
@@ -475,6 +479,7 @@ class ReplSkin:
                 auto_suggest=AutoSuggestFromHistory(),
                 style=style,
                 enable_history_search=True,
+                **options,
             )
             return session
         except ImportError:
