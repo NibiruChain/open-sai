@@ -30,9 +30,29 @@ def package_version() -> str:
     return metadata.version(PACKAGE)
 
 
+def check_skill(data: bytes) -> bytes:
+    """Reject a packaged skill that is not a skill file.
+
+    The package copy is a symlink to skills/sai/SKILL.md. A checkout without
+    symlink support, such as Windows without core.symlinks, stores the link
+    target path as file text instead.
+    """
+    if not data.startswith(b"---"):
+        raise click.ClickException(
+            "Packaged SKILL.md has no frontmatter; this build may contain a"
+            " symlink path instead of the skill. Reinstall from a checkout"
+            " with symlinks enabled."
+        )
+    return data
+
+
+def read_packaged_skill() -> bytes:
+    return resources.files("sai_cli").joinpath("skills/SKILL.md").read_bytes()
+
+
 def skill_bytes() -> bytes:
     """Return the agent skill packaged with this version of the CLI."""
-    return resources.files("sai_cli").joinpath("skills/SKILL.md").read_bytes()
+    return check_skill(read_packaged_skill())
 
 
 def print_skill(ctx: click.Context, _param: click.Parameter, value: bool) -> None:

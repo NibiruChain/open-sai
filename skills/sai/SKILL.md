@@ -7,9 +7,10 @@ metadata:
 
 # Sai CLI
 
-`sai --skill` prints this file as shipped with the installed CLI; run it if
-your copy may be older or newer than `sai --version`. The installed
-`sai --help` is the authority for commands and options.
+Always run `sai --skill` first and follow its output over any other copy of
+this file. It prints the skill shipped with the installed CLI, works offline,
+and stays correct when two builds report the same `sai --version`. The
+installed `sai --help` is the authority for commands and options.
 
 Use `sai --help` to inspect commands. Add `--json` before the
 command for machine-readable output. Mainnet is the default. Override the
