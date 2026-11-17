@@ -307,18 +307,32 @@ def intent_status(
 # Preview binding
 
 
+def canonical_price(value: object) -> str:
+    """Write a price so equal amounts give equal text: 100, 100.0 -> 100."""
+    return format(Decimal(str(value)).normalize(), "f")
+
+
 def digest_material(preview: dict[str, Any]) -> dict[str, Any]:
     """Return the parts of PREVIEW the user confirms.
 
-    That is the intent, plus the margin quote when there is one. A market
-    open leaves out its intent price, which is refreshed at submit and
-    checked against the confirmed referencePrice instead.
+    That is the account the trade would be submitted under, the intent, and
+    the margin quote when there is one. A market open leaves out its intent
+    price, which is refreshed at submit, and binds the referencePrice the
+    user confirmed instead.
     """
     intent = copy.deepcopy(preview["intent"])
     body = intent.get("body", {})
+    account = preview.get("account")
+    material: dict[str, Any] = {
+        "account": account.lower() if isinstance(account, str) else None,
+        "intent": intent,
+    }
     if intent.get("kind") == "OPEN_TRADE" and body.get("orderType") == "market":
         body.pop("intentPrice", None)
-    material: dict[str, Any] = {"intent": intent}
+        reference = preview.get("referencePrice")
+        material["referencePrice"] = (
+            canonical_price(reference) if reference is not None else None
+        )
     if "quote" in preview:
         material["quote"] = preview["quote"]
     return material
@@ -336,26 +350,46 @@ def with_digest(preview: dict[str, Any]) -> dict[str, Any]:
     return {**preview, "previewDigest": preview_digest(preview)}
 
 
+def preview_account(config: Config) -> str | None:
+    """Return the signed-in address a trade would use, or None without one."""
+    try:
+        return session_loader(config)()["evmAddress"]
+    except SessionUnavailable:
+        return None
+
+
 def bound(
+    config: Config,
     digest: str | None,
     reference_price: str | None = None,
     slippage: str | None = None,
 ) -> trading.SubmitCheck:
     """Return a check that refuses any intent but the confirmed one.
 
-    With REFERENCE_PRICE, it also refuses a market open whose refreshed
-    price moved from it by more than SLIPPAGE percent.
+    The digest is recomputed for the signed-in account and, for a market
+    open, with the caller's REFERENCE_PRICE, so a changed account or
+    reference needs a new confirmation. It then refuses a market open whose
+    refreshed price moved from REFERENCE_PRICE by more than SLIPPAGE percent.
     """
     if not digest:
         raise ValueError(NEEDS_DIGEST)
+    reference = (
+        intents.positive(reference_price, "Reference price")
+        if reference_price is not None
+        else None
+    )
 
     def check(preview: dict[str, Any]) -> None:
-        fresh = with_digest(preview)
-        if fresh["previewDigest"] != digest:
+        fresh = with_digest({**preview, "account": preview_account(config)})
+        confirmed = (
+            fresh
+            if reference is None
+            else {**fresh, "referencePrice": format(reference, "f")}
+        )
+        if preview_digest(confirmed) != digest:
             raise Refused(MISMATCH, "PREVIEW_MISMATCH", fresh)
-        if reference_price is None or slippage is None:
+        if reference is None or slippage is None:
             return
-        reference = intents.positive(reference_price, "Reference price")
         current = Decimal(str(preview["referencePrice"]))
         moved = abs(current - reference) / reference * 100
         if moved > Decimal(slippage):
@@ -369,6 +403,7 @@ def bound(
 
 
 def submit_check(
+    config: Config,
     dry_run: bool,
     digest: str | None,
     reference_price: str | None = None,
@@ -377,7 +412,7 @@ def submit_check(
     """Return the pre-submit check for a trade; a dry run never calls it."""
     if dry_run:
         return lambda _preview: None
-    return bound(digest, reference_price, slippage)
+    return bound(config, digest, reference_price, slippage)
 
 
 # Statuses of an open that may still fill, and how long one can. Keeper
@@ -440,9 +475,12 @@ def both(
     return check
 
 
-def finish(dry_run: bool, result: dict[str, Any]) -> dict[str, Any]:
-    """Add the previewDigest to a preview; pass a submission through."""
-    return with_digest(result) if dry_run else result
+def finish(config: Config, dry_run: bool, result: dict[str, Any]) -> dict[str, Any]:
+    """Add the account and previewDigest to a preview; pass a submission
+    through."""
+    if not dry_run:
+        return result
+    return with_digest({**result, "account": preview_account(config)})
 
 
 # Trading: each action previews with dry_run and submits without it. A
@@ -474,7 +512,7 @@ def open_trade(
     if not dry_run and market and reference_price is None:
         raise ValueError(NEEDS_REFERENCE)
     check = submit_check(
-        dry_run, preview_digest, reference_price, slippage if market else None
+        config, dry_run, preview_digest, reference_price, slippage if market else None
     )
     if not dry_run and not allow_concurrent_open:
         check = both(no_recent_open(config), check)
@@ -501,7 +539,7 @@ def open_trade(
         result["referencePrice"] = format(Decimal(str(current)), "f")
     if notices:
         result["notices"] = notices
-    return finish(dry_run, result)
+    return finish(config, dry_run, result)
 
 
 def close_trade(
@@ -512,7 +550,7 @@ def close_trade(
     cancel_order: bool,
     preview_digest: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(dry_run, preview_digest)
+    check = submit_check(config, dry_run, preview_digest)
     result = trading.close_trade(
         config.endpoint,
         session_loader(config),
@@ -521,7 +559,7 @@ def close_trade(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(dry_run, result)
+    return finish(config, dry_run, result)
 
 
 def set_tpsl(
@@ -535,7 +573,7 @@ def set_tpsl(
     clear_stop_loss: bool,
     preview_digest: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(dry_run, preview_digest)
+    check = submit_check(config, dry_run, preview_digest)
     result = trading.set_tpsl(
         config.endpoint,
         session_loader(config),
@@ -547,7 +585,7 @@ def set_tpsl(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(dry_run, result)
+    return finish(config, dry_run, result)
 
 
 def set_leverage(
@@ -558,7 +596,7 @@ def set_leverage(
     leverage: str,
     preview_digest: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(dry_run, preview_digest)
+    check = submit_check(config, dry_run, preview_digest)
     result = trading.set_leverage(
         config.endpoint,
         session_loader(config),
@@ -567,7 +605,7 @@ def set_leverage(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(dry_run, result)
+    return finish(config, dry_run, result)
 
 
 def change_margin(
@@ -579,7 +617,7 @@ def change_margin(
     amount: str,
     preview_digest: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(dry_run, preview_digest)
+    check = submit_check(config, dry_run, preview_digest)
     result = trading.change_margin(
         config.endpoint,
         session_loader(config),
@@ -590,7 +628,7 @@ def change_margin(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(dry_run, result)
+    return finish(config, dry_run, result)
 
 
 def partial_close(
@@ -601,7 +639,7 @@ def partial_close(
     percent: int,
     preview_digest: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(dry_run, preview_digest)
+    check = submit_check(config, dry_run, preview_digest)
     result = trading.partial_close(
         config.endpoint,
         session_loader(config),
@@ -611,4 +649,4 @@ def partial_close(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(dry_run, result)
+    return finish(config, dry_run, result)

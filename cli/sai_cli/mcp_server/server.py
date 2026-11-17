@@ -42,7 +42,7 @@ Sai perpetuals trading on Nibiru through Sai Keeper.
 - Call mcp_info first to learn the version, endpoints, exposure mode, and \
 whether a usable session exists.
 - Before any trade, call the matching preview_* tool, show the user the \
-preview, and get their explicit confirmation. Only then call the trade_* \
+preview and the account it names, and get their explicit confirmation. Only then call the trade_* \
 tool with the same arguments plus the preview's previewDigest, and for a \
 market open also its referencePrice.
 - If a trade_* tool returns PREVIEW_MISMATCH or PRICE_MOVED, nothing was \

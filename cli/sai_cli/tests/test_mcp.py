@@ -21,6 +21,7 @@ from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 
 ADDRESS = "0x" + "b" * 40
+OTHER = "0x" + "c" * 40
 ENDPOINT = keeper.MAINNET_HTTP
 TOKEN = "header.secret-session-token-value.signature"
 
@@ -393,16 +394,23 @@ def test_preview_open_is_exactly_what_trade_open_submits(mcp, monkeypatch):
     assert fake.submitted[-1]["intentKey"] == result["intentKey"]
 
 
-def test_digest_is_canonical_and_ignores_the_market_price():
-    preview = {"intent": {"kind": "OPEN_TRADE", "body": {"orderType": "market"}}}
-    priced = {
-        "referencePrice": "1",
-        "intent": {
-            "body": {"intentPrice": "5", "orderType": "market"},
-            "kind": "OPEN_TRADE",
-        },
-    }
-    assert tools.preview_digest(preview) == tools.preview_digest(priced)
+def test_digest_binds_account_and_reference_not_market_intent_price():
+    def market(intent_price: str, reference: str, account: str) -> dict:
+        return {
+            "account": account,
+            "referencePrice": reference,
+            "intent": {
+                "kind": "OPEN_TRADE",
+                "body": {"orderType": "market", "intentPrice": intent_price},
+            },
+        }
+
+    base = tools.preview_digest(market("5", "100", ADDRESS))
+    # The refreshed intent price, reference spelling, and address case don't
+    # change what the user confirmed.
+    assert tools.preview_digest(market("6", "100.0", ADDRESS.upper())) == base
+    assert tools.preview_digest(market("5", "101", ADDRESS)) != base
+    assert tools.preview_digest(market("5", "100", OTHER)) != base
     limit = {"intent": {"kind": "OPEN_TRADE", "body": {"orderType": "limit"}}}
     assert tools.preview_digest(limit) != tools.preview_digest(
         {
@@ -510,7 +518,13 @@ def test_market_open_binds_to_the_reference_price(mcp, monkeypatch):
     assert moved["code"] == "PRICE_MOVED"
     assert "1.5000%" in moved["error"]
     assert moved["preview"]["referencePrice"] == "101.5"
-    assert moved["preview"]["previewDigest"] == preview["previewDigest"]
+    assert moved["preview"]["previewDigest"] != preview["previewDigest"]
+    assert fake.submitted == []
+
+    # Retrying the old confirmation with the new price needs a new digest.
+    retry = invoke(mcp, "trade_open", {**trade, "reference_price": "101.5"})
+    assert retry["code"] == "PREVIEW_MISMATCH"
+    assert retry["preview"]["previewDigest"] == moved["preview"]["previewDigest"]
     assert fake.submitted == []
 
     # A 0.5% move is within slippage and submits the refreshed price.
@@ -519,6 +533,70 @@ def test_market_open_binds_to_the_reference_price(mcp, monkeypatch):
     assert result["status"] == "accepted"
     assert result["referencePrice"] == "100.5"
     assert fake.intent()["body"]["intentPrice"] == "100.5"
+
+
+def test_market_open_resubmits_only_with_the_new_confirmation(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    fake = FakeKeeper({keeper.MARKETS: markets(price=100)})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_ARGS)
+    fake.answers[keeper.MARKETS] = markets(price=110)
+    moved = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_ARGS,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+        },
+    )
+    assert moved["code"] == "PRICE_MOVED"
+    fresh = moved["preview"]
+    result = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_ARGS,
+            "preview_digest": fresh["previewDigest"],
+            "reference_price": fresh["referencePrice"],
+        },
+    )
+    assert result["status"] == "accepted"
+    assert fake.intent()["body"]["intentPrice"] == "110"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("close", {"trade_id": 7}),
+        ("leverage", {"trade_id": 7, "leverage": "3"}),
+        ("tpsl", {"trade_id": 7, "take_profit": "120"}),
+        ("open", OPEN_ARGS),
+    ],
+)
+def test_preview_is_bound_to_the_signed_in_account(mcp, monkeypatch, name, arguments):
+    storage.save_session(stored_session())
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, f"preview_{name}", arguments)
+    assert preview["account"] == ADDRESS
+    # The person signs in to another account before confirming.
+    storage.save_session({**stored_session(), "evmAddress": OTHER})
+    error = invoke(
+        mcp,
+        f"trade_{name}",
+        {**arguments, "preview_digest": preview["previewDigest"]},
+    )
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["account"] == OTHER
+    assert fake.submitted == []
+    assert storage.list_pending(ENDPOINT, OTHER) == []
+
+
+def test_preview_without_a_session_names_no_account(mcp, monkeypatch):
+    monkeypatch.setattr(keeper, "request", FakeKeeper())
+    preview = invoke(mcp, "preview_close", {"trade_id": 7})
+    assert preview["account"] is None
 
 
 def test_reference_price_is_only_for_market_orders(mcp, monkeypatch):
