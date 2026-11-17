@@ -5,9 +5,9 @@ same errors as the CLI's core. `run` turns a call into a JSON string and
 never raises: known errors become `{"error", "code"}` objects, and anything
 else becomes a generic error with the traceback logged to stderr.
 
-The server never takes a session token or passphrase. It reads the session
-that `sai auth login` or `sai auth import` stored, and only the `test`
-keyring backend, because an MCP client cannot pass a passphrase.
+The server never takes a session token. It reads the session that `sai auth
+login` or `sai auth import` stored, the same way the CLI does, without a
+prompt, and never returns the token.
 """
 
 from __future__ import annotations
@@ -31,18 +31,9 @@ from . import info
 
 log = logging.getLogger("sai_cli.mcp_server")
 
-FILE_BACKEND = (
-    "The stored Sai session uses keyring backend file, which needs a passphrase"
-    " the MCP server cannot receive. In a terminal, run `sai auth login` or"
-    " `sai auth import` again with the default test keyring backend."
-)
 NO_ADDRESS = (
     "No address given and no stored Sai session. Pass address, or sign in with"
     " `sai auth login` or `sai auth import` in a terminal."
-)
-FILE_BACKEND_ADDRESS = (
-    "No address given, and the stored session uses keyring backend file, so"
-    " the MCP server cannot read its address. Pass address."
 )
 OTHER_ENDPOINT = (
     "No address given, and the stored session belongs to a different Keeper"
@@ -179,11 +170,7 @@ REDACTED = "[redacted session token]"
 def redact(text: str) -> str:
     """Remove the stored session token from TEXT, if one can be read."""
     try:
-        token = (
-            storage.load_session()["token"]
-            if storage.stored_backend() == "test"
-            else None
-        )
+        token = storage.load_session()["token"]
     except (ValueError, KeyError):
         token = None
     return text.replace(token, REDACTED) if token else text
@@ -203,19 +190,11 @@ def run(action: Callable[[], Any]) -> str:
 
 
 def session_loader(config: Config) -> trading.SessionLoader:
-    """Return a loader for the active `test`-backend session.
-
-    It refuses a `file`-backend session instead of asking for a passphrase.
-    """
+    """Return a loader for the active stored session; it never prompts."""
 
     def load() -> dict[str, str]:
         try:
-            backend = storage.stored_backend()
-            if backend == "file":
-                raise SessionUnavailable(FILE_BACKEND)
             return sessions.load_active_session(config.endpoint)
-        except SessionUnavailable:
-            raise
         except ValueError as exc:
             raise SessionUnavailable(str(exc)) from exc
 
@@ -232,11 +211,8 @@ def resolve_address(config: Config, address: str | None) -> dict[str, Any]:
     if address:
         return {"address": address, "addressSource": "argument"}
     try:
-        backend = storage.stored_backend()
-        if backend is None:
+        if not storage.session_exists():
             raise SessionUnavailable(NO_ADDRESS)
-        if backend == "file":
-            raise SessionUnavailable(FILE_BACKEND_ADDRESS)
         stored = storage.load_session()
         expiry = datetime.fromisoformat(stored["expiresAt"])
     except SessionUnavailable:
@@ -256,19 +232,8 @@ def resolve_address(config: Config, address: str | None) -> dict[str, Any]:
 def session_state(config: Config) -> dict[str, Any]:
     """Describe the stored session without its token."""
     try:
-        backend = storage.stored_backend()
-        if backend is None:
-            return {"signedIn": False, "backend": None}
-        if backend == "file":
-            return {
-                "signedIn": True,
-                "backend": "file",
-                "usable": False,
-                "address": None,
-                "expiresAt": None,
-                "expired": None,
-                "note": FILE_BACKEND,
-            }
+        if not storage.session_exists():
+            return {"signedIn": False}
         stored = storage.load_session()
         expiry = datetime.fromisoformat(stored["expiresAt"])
     except ValueError as exc:
@@ -277,7 +242,6 @@ def session_state(config: Config) -> dict[str, Any]:
     matches = stored.get("endpoint") == config.endpoint
     return {
         "signedIn": True,
-        "backend": "test",
         "usable": matches and not expired,
         "address": stored["evmAddress"],
         "expiresAt": stored["expiresAt"],
@@ -289,11 +253,7 @@ def session_state(config: Config) -> dict[str, Any]:
 
 def auth_status(config: Config) -> dict[str, Any]:
     result = sessions.summary(session_loader(config)())
-    return {
-        **result,
-        "endpoint": info.public_url(result["endpoint"]),
-        "backend": "test",
-    }
+    return {**result, "endpoint": info.public_url(result["endpoint"])}
 
 
 # Reads

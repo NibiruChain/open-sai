@@ -672,8 +672,10 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
     assert invoke(mcp, "intent_local")["intents"][0]["status"] == "terminal"
 
 
-def test_file_backend_session_is_refused_without_a_passphrase(mcp, monkeypatch):
-    storage.save_session(stored_session(), "passphrase")
+def test_passphrase_session_is_refused_without_a_prompt(mcp, monkeypatch):
+    # A session from an older version that encrypted it with a passphrase.
+    path = storage.directory() / "session.json"
+    path.write_text(json.dumps({"version": 1, "nonce": "", "ciphertext": ""}))
     fake = FakeKeeper({keeper.POSITIONS: {"perp": {"trades": []}}})
     monkeypatch.setattr(keeper, "request", fake)
     for name, arguments in (
@@ -684,14 +686,14 @@ def test_file_backend_session_is_refused_without_a_passphrase(mcp, monkeypatch):
     ):
         error = invoke(mcp, name, arguments)
         assert error["code"] == "SESSION_UNAVAILABLE", name
-        assert "keyring backend file" in error["error"]
+        assert "passphrase-encrypted" in error["error"]
         assert "sai auth login" in error["error"]
     assert invoke(mcp, "account_positions")["code"] == "SESSION_UNAVAILABLE"
     assert invoke(mcp, "account_positions", {"address": ADDRESS})["perp"] == {
         "trades": []
     }
     info = invoke(mcp, "mcp_info")["session"]
-    assert info["backend"] == "file" and info["usable"] is False
+    assert info["signedIn"] is False and "passphrase-encrypted" in info["error"]
     assert fake.submitted == []
 
 
@@ -779,7 +781,7 @@ def test_mcp_info_strips_credentials_from_endpoints(monkeypatch):
 def test_session_reports_never_include_the_token(mcp):
     storage.save_session(stored_session())
     status = invoke(mcp, "auth_status")
-    assert set(status) == {"address", "expiresAt", "endpoint", "backend"}
+    assert set(status) == {"address", "expiresAt", "endpoint"}
     assert (status["address"], status["endpoint"]) == (ADDRESS, ENDPOINT)
     info = invoke(mcp, "mcp_info")
     assert info["session"]["address"] == ADDRESS

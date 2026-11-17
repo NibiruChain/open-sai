@@ -79,9 +79,9 @@ your files can decrypt it. There is no session passphrase.
 ## Use Sai From Your Agent (MCP)
 
 The `sai-mcp` server gives MCP clients such as Claude Code the same reads,
-previews, and trades as the CLI. Connect to Sai with the CLI first; the
-server reads that session and never asks for a token or passphrase. It needs
-the default `test` keyring backend.
+previews, and trades as the CLI. Connect to Sai with the CLI first. The
+server reads the stored session without a prompt, never asks for the token,
+and never returns it.
 
 ```bash
 claude mcp add sai -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp

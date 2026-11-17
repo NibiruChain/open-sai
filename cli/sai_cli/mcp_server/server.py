@@ -59,7 +59,7 @@ allow_concurrent_open=true only if the user wants another open position.
 - Account reads report the address they read. With addressSource \
 "session", the address came from the stored sign-in; say so to the user, \
 and pass address explicitly to read any other account.
-- Never ask the user for a session token or passphrase. They sign in \
+- Never ask the user for a session token. They sign in \
 themselves by running `sai auth login` or `sai auth import` in a terminal.
 - Never read MCP client config files to learn about this server; call \
 mcp_info instead.
@@ -103,7 +103,7 @@ async def auth_status() -> str:
     """Show the signed-in account and session expiry, never the token.
 
     The session comes from `sai auth login` or `sai auth import`, run by the
-    user in a terminal with the default test keyring backend.
+    user in a terminal.
     """
     return await call(tools.auth_status)
 
