@@ -91,10 +91,27 @@ From a checkout, use `uv run --directory /path/to/open-sai sai-mcp` as the
 command instead.
 
 The server starts read-only: market data, account reads, intent status, and
-trade previews. To let the agent submit trades, add
-`--env SAI_MCP_EXPOSED_TOOLS=all` to the command above. Each trade must carry
-the `previewDigest` from a preview the user confirmed; if the position or
-price changed since then, the server refuses and returns a fresh preview.
+trade previews. To let the agent submit trades, set
+`SAI_MCP_EXPOSED_TOOLS=all` before the `--`:
+
+```bash
+claude mcp add sai -e SAI_MCP_EXPOSED_TOOLS=all -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp
+```
+
+Each preview names the signed-in `account`, and each trade must carry the
+`previewDigest` from a preview the user confirmed. Before submitting, the
+server rebuilds the trade and refuses it with a fresh preview when it no
+longer matches:
+
+- Every trade: the signed-in account and the trade's arguments.
+- `trade_margin` and `trade_partial_close`: also the position state the
+  preview quoted.
+- `trade_open` for a market order: also the market price, which may move at
+  most the slippage from the confirmed `referencePrice`. A new price needs a
+  new confirmation.
+- `trade_close`, `trade_tpsl`, and `trade_leverage`: nothing beyond the
+  account and arguments.
+
 Ask the agent to call `mcp_info` to see the version, endpoints, mode, and
 signed-in account. `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`
 select another network.
