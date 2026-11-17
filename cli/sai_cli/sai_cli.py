@@ -9,14 +9,10 @@ import sys
 import time
 from importlib import metadata, resources
 from typing import Any
-from urllib.parse import urlsplit
 
 import click
-from websockets.exceptions import WebSocketException
-from websockets.sync.client import connect
-from websockets.typing import Subprotocol
 
-from .core import clipboard, keeper, margin, reconcile, storage, trading
+from .core import clipboard, keeper, margin, reconcile, storage, stream, trading
 from .core import session as sessions
 from .utils.repl_skin import ReplSkin
 
@@ -388,14 +384,18 @@ def history(ctx: click.Context, address: str) -> None:
 @click.pass_context
 def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Read one account balance snapshot from Keeper's subscription."""
-    query = "subscription($user:String!) { userBalances(where:{user:$user}) { amount usd_value token_info { name symbol decimals type } } }"
-    watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        query,
-        {"user": address},
-        once=True,
-        ctx=ctx,
-    )
+    try:
+        emit(
+            ctx,
+            stream.snapshot(
+                ws_url(ctx, ws_endpoint),
+                stream.BALANCES,
+                {"user": address},
+                notify=warn_connected,
+            ),
+        )
+    except stream.StreamError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.group()
@@ -670,8 +670,8 @@ def watch() -> None:
 def watch_positions(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Follow position snapshots for ADDRESS until interrupted."""
     watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        "subscription($user:String!) { perpTrades(where:{trader:$user}) { id trader isOpen isLong tradeType leverage openPrice tp sl } }",
+        ws_url(ctx, ws_endpoint),
+        stream.POSITIONS,
         {"user": address},
     )
 
@@ -683,8 +683,8 @@ def watch_positions(ctx: click.Context, address: str, ws_endpoint: str | None) -
 def watch_balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Follow balances, preserving Sai deposit and credit labels."""
     watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        "subscription($user:String!) { userBalances(where:{user:$user}) { amount usd_value token_info { name symbol decimals type } } }",
+        ws_url(ctx, ws_endpoint),
+        stream.BALANCES,
         {"user": address},
     )
 
@@ -696,97 +696,42 @@ def watch_balances(ctx: click.Context, address: str, ws_endpoint: str | None) ->
 def watch_price(ctx: click.Context, token_id: int, ws_endpoint: str | None) -> None:
     """Follow the current price of TOKEN_ID."""
     watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        "subscription($id:Int!) { tokenPricesUsd(where:{tokenId:$id}) { priceUsd token { id symbol } lastUpdatedBlock { block block_ts } } }",
+        ws_url(ctx, ws_endpoint),
+        stream.PRICE,
         {"id": token_id},
     )
 
 
-def derive_ws(endpoint: str) -> str:
-    parsed = urlsplit(endpoint)
-    if parsed.scheme not in ("http", "https"):
-        raise click.ClickException("Cannot derive WebSocket endpoint")
-    return parsed._replace(scheme="wss" if parsed.scheme == "https" else "ws").geturl()
+def ws_url(ctx: click.Context, ws_endpoint: str | None) -> str:
+    try:
+        return ws_endpoint or stream.derive_ws(ctx.obj["endpoint"])
+    except stream.StreamError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
-def watch_stream(
-    ws_endpoint: str,
-    query: str,
-    variables: dict[str, Any],
-    once: bool = False,
-    ctx: click.Context | None = None,
-) -> None:
-    parsed = urlsplit(ws_endpoint)
-    if parsed.scheme != "wss" and not (
-        parsed.scheme == "ws" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-    ):
-        raise click.ClickException(
-            "WebSocket endpoint must use WSS, except on loopback"
-        )
-    while True:
-        try:
-            with connect(
-                ws_endpoint,
-                subprotocols=[Subprotocol("graphql-transport-ws")],
-                open_timeout=10,
-            ) as socket:
-                socket.send(json.dumps({"type": "connection_init"}))
-                message = json.loads(socket.recv(timeout=10))
-                if message.get("type") != "connection_ack":
-                    raise ValueError("Keeper did not acknowledge WebSocket connection")
-                socket.send(
-                    json.dumps(
-                        {
-                            "id": "1",
-                            "type": "subscribe",
-                            "payload": {"query": query, "variables": variables},
-                        }
-                    )
+def warn_connected(message: str) -> None:
+    click.echo(message, err=True)
+
+
+def watch_stream(ws_endpoint: str, query: str, variables: dict[str, Any]) -> None:
+    """Print each snapshot as a JSON line, reconnecting until interrupted."""
+    try:
+        stream.check_ws(ws_endpoint)
+        while True:
+            try:
+                for payload in stream.payloads(
+                    ws_endpoint, query, variables, notify=warn_connected
+                ):
+                    click.echo(json.dumps(payload, separators=(",", ":")))
+            except stream.DISCONNECTS as exc:
+                click.echo(
+                    f"Disconnected ({type(exc).__name__}); data may be stale;"
+                    " reconnecting in 2s",
+                    err=True,
                 )
-                click.echo("Connected; waiting for current snapshot", err=True)
-                while True:
-                    message = json.loads(socket.recv(timeout=20 if once else None))
-                    if message.get("type") == "ping":
-                        socket.send(json.dumps({"type": "pong"}))
-                    elif message.get("type") == "next":
-                        payload = message.get("payload")
-                        expected = next(
-                            (
-                                name
-                                for name in (
-                                    "userBalances",
-                                    "perpTrades",
-                                    "tokenPricesUsd",
-                                )
-                                if name in query
-                            ),
-                            None,
-                        )
-                        if (
-                            not isinstance(payload, dict)
-                            or payload.get("errors")
-                            or not isinstance(payload.get("data"), dict)
-                            or expected is None
-                            or not isinstance(payload["data"].get(expected), list)
-                        ):
-                            raise click.ClickException(
-                                "Keeper subscription returned incomplete data"
-                            )
-                        if once:
-                            if ctx is not None:
-                                emit(ctx, payload)
-                            return
-                        click.echo(json.dumps(payload, separators=(",", ":")))
-                    elif message.get("type") in ("error", "complete"):
-                        raise click.ClickException("Keeper subscription ended")
-        except (OSError, TimeoutError, WebSocketException) as exc:
-            if once:
-                raise click.ClickException("Could not read balance snapshot") from exc
-            click.echo(
-                f"Disconnected ({type(exc).__name__}); data may be stale; reconnecting in 2s",
-                err=True,
-            )
-            time.sleep(2)
+                time.sleep(2)
+    except stream.StreamError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":
