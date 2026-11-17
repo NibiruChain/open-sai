@@ -15,8 +15,9 @@ balances ADDRESS`, and `account history ADDRESS` for data. Use `watch price
 TOKEN_ID`, `watch positions ADDRESS`, or `watch balances ADDRESS` for streams.
 Streams reconnect after transport interruptions and emit a new snapshot.
 
-Use `auth login --address ADDRESS --wallet NAME` with the optional `ud` wallet
-manager, or `auth import` to provide an existing session through a hidden prompt.
+Use `auth import` to provide an existing session through a hidden prompt.
+`auth login --address ADDRESS --wallet NAME` is experimental and works only on
+workstations with the private `ud` wallet manager.
 The encrypted local token expires according to Keeper's session. `auth status`
 shows the address and expiry without revealing credentials. Write commands ask
 for the local passphrase, or read it from an inherited file descriptor given to
@@ -32,14 +33,14 @@ is unknown, retain its intent key and do not blindly submit again.
 
 ## Examples
 
-These examples use placeholders for the public account address, local wallet
-name, and an existing trade ID. They do not fund an account or send a trade.
+These examples use placeholders for the public account address and an
+existing trade ID. They do not fund an account or send a trade.
 
 ```bash
 sai --json market list
 sai --json account positions 0xYOUR_ADDRESS
 sai --json account balances 0xYOUR_ADDRESS
-sai auth login --address 0xYOUR_ADDRESS --wallet WALLET_NAME
+sai auth import
 sai --json trade open --market 0 --side long --type market \
   --amount 2 --leverage 2 --slippage 1 --dry-run
 sai --json trade open --market 0 --side long --type limit \

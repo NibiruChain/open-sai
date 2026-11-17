@@ -22,9 +22,10 @@ uv run sai --json market prices
 To install the command into your user tool directory from the checkout, run
 `uv tool install .`. Then run `sai --help` without `uv run`.
 
-To trade, obtain a Keeper session with an EVM wallet using `auth login` and the
-optional local `ud` wallet manager, or use `auth import` to enter an existing
-session through a hidden prompt. The CLI encrypts the session locally with a
+To trade, use `sai auth import` to enter an existing Keeper session through a
+hidden prompt. `sai auth login --wallet` is experimental and works only on
+workstations with the private `ud` wallet manager; public users should use
+`sai auth import` for now. The CLI encrypts the session locally with a
 passphrase. Sessions expire; browser-to-device API credential provisioning and
 per-device revocation are not implemented here.
 

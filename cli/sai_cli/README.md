@@ -5,9 +5,10 @@ The CLI connects to mainnet Keeper by default and accepts `--endpoint` for a
 different network. `account balances` and `watch` accept `--ws-endpoint` if the
 WebSocket service differs from the HTTP endpoint.
 
-`auth login --address ADDRESS --wallet NAME` uses the local `ud` wallet manager
-to sign a Keeper challenge. `auth import` reads an existing session token from a
-hidden prompt. Both protect the session at rest with a passphrase. The session
+`auth import` reads an existing session token from a hidden prompt. Public
+users should use it for now. `auth login --address ADDRESS --wallet NAME` is
+experimental and workstation-only: it signs a Keeper challenge with the private
+`ud` wallet manager, which is not publicly available. Both protect the session at rest with a passphrase. The session
 is scoped to its account and endpoint and expires; device-specific credentials
 and revocation are not implemented. For unattended processes, supply a private
 inherited file descriptor with `--passphrase-fd`; do not pass the secret itself
