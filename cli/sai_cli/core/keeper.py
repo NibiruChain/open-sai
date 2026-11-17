@@ -38,7 +38,14 @@ class AdmissionRejected(KeeperError):
 
 
 class OutcomeUnknown(KeeperError):
-    """The server may have accepted the request."""
+    """The server may have accepted the request.
+
+    INTENT_KEY names the intent to reconcile, when one was reserved.
+    """
+
+    def __init__(self, message: str, intent_key: str | None = None) -> None:
+        super().__init__(message)
+        self.intent_key = intent_key
 
 
 class NotSent(KeeperError):

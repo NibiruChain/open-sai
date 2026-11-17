@@ -192,7 +192,8 @@ def submit(
         raise
     except (keeper.KeeperError, KeyError, TypeError, AttributeError) as exc:
         raise keeper.OutcomeUnknown(
-            f"Outcome unknown for intent {key}; reconcile before another trade"
+            f"Outcome unknown for intent {key}; reconcile before another trade",
+            key,
         ) from exc
     storage.set_status(key, endpoint, account, "accepted")
     return {
