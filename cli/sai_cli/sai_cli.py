@@ -93,9 +93,6 @@ def main(
 
 def repl(ctx: click.Context) -> None:
     skin = ReplSkin("sai", version="0.1.0")
-    skin.skill_install_cmd = (
-        "npx skills add NibiruChain/open-sai --skill cli-anything-sai -g -y"
-    )
     skin.print_banner()
     click.echo("Enter a command, or 'exit'.")
     while True:

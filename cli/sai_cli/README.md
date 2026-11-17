@@ -41,5 +41,6 @@ The CLI persists non-secret request identities under `$SAI_HOME/trader` or
 Reconcile the original intent before trying another action. Keeper admission
 does not establish execution or finality.
 
-This client uses the `ReplSkin` file from CLI-Anything, distributed under the
-Apache License 2.0. See the repository license.
+`utils/repl_skin.py` is adapted from CLI-Anything
+(https://github.com/HKUDS/CLI-Anything) under the Apache License 2.0. See the
+repository license.
