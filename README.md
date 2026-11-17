@@ -25,8 +25,9 @@ sai --help
 ```
 
 Upgrade with `uv tool upgrade sai-cli`, or rerun the install command with
-`--reinstall`. Both Git commands install from `main`, so they work once the
-CLI is merged there. `sai --version` prints the installed version.
+`--reinstall`. Both Git commands install from `main`. `sai --version`
+prints the installed version. The package is `sai-cli` and is not on PyPI
+yet, so `uv tool install sai` installs an unrelated PyPI package.
 
 Agents: run `sai --skill` to print the agent skill that matches the installed
 version. Agents that load skills ahead of time can install it with
