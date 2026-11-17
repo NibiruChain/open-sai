@@ -16,6 +16,7 @@ import sys
 import termios
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,7 +28,8 @@ from sai_cli.core import keeper, storage
 
 ADDRESS = "0x" + "b" * 40
 OTHER = "0x" + "c" * 40
-NONCE = "0x" + "12" * 32
+# Keeper sends the nonce as bare hex and the typed-data challenge with 0x.
+NONCE = "12" * 32
 SIGNATURE = "0x" + "1" * 130
 
 
@@ -89,13 +91,16 @@ class Env:
             timeout=30,
         )
 
-    def run_tty(self, *args: str, typed: list[str]) -> tuple[int, str, str]:
+    def run_tty(
+        self, *args: str, typed: list[str | Callable[[], object]]
+    ) -> tuple[int, str, str]:
         """Run with a pseudo-terminal on stdin and answer each hidden prompt.
 
         `getpass` turns echo off with TCSAFLUSH, which drops input typed
         earlier. Each line therefore waits until stderr has grown since the
         previous answer, which `getpass` only does after reading it, and echo
-        is off again for the next prompt.
+        is off again for the next prompt. A callable entry runs once that
+        next prompt is showing, before the line that answers it.
         """
         primary, secondary = pty.openpty()
         proc = subprocess.Popen(
@@ -125,6 +130,9 @@ class Env:
                     if len(errors) > mark and not echo:
                         break
                     time.sleep(0.01)
+                if callable(line):
+                    line()
+                    continue
                 os.write(primary, (line + "\n").encode())
                 mark = len(errors)
             assert proc.stdout
@@ -148,9 +156,11 @@ def env(tmp_path: Path) -> Env:
 
 
 def assert_connected(env: Env, token: str, result_stdout: str) -> None:
-    assert json.loads(result_stdout) == {
-        "evmAddress": ADDRESS,
-        "expiresAt": json.loads(result_stdout)["expiresAt"],
+    output = json.loads(result_stdout)
+    assert output == {
+        "address": ADDRESS,
+        "expiresAt": output["expiresAt"],
+        "endpoint": keeper.MAINNET_HTTP,
     }
     assert token.encode() not in env.stored_bytes()
     status = env.run("--json", "auth", "status")
@@ -177,7 +187,7 @@ def test_agent_import_ignores_piped_stdin(env: Env) -> None:
     piped = make_token(OTHER)
     result = env.run("--json", "auth", "import", stdin=piped + "\n")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["evmAddress"] == ADDRESS
+    assert json.loads(result.stdout)["address"] == ADDRESS
     assert piped not in result.stdout + result.stderr
 
 
@@ -199,6 +209,23 @@ def test_agent_import_skips_failing_clipboard_tool(env: Env) -> None:
     calls = env.log.read_text()
     assert "wl-paste --no-newline" in calls
     assert "xclip -selection clipboard -o" in calls
+
+
+def test_agent_import_skips_binary_clipboard(env: Env) -> None:
+    token = make_token()
+    env.tool("pbpaste", "sys.stdout.buffer.write(b'\\x89PNG\\r\\n\\x1a\\n\\xff')\n")
+    env.tool(
+        "xclip",
+        "if '-o' in sys.argv:\n"
+        "    sys.stdout.write(open(CLIP).read())\n"
+        "else:\n"
+        "    open(CLIP, 'w').write(sys.stdin.read())\n",
+    )
+    env.clip.write_text(token)
+    result = env.run("--json", "auth", "import")
+    assert result.returncode == 0, result.stderr
+    assert "codec" not in result.stderr
+    assert env.clip.read_text() == ""
 
 
 def test_agent_import_without_clipboard_asks_for_a_terminal(env: Env) -> None:
@@ -264,6 +291,16 @@ def test_file_backend_import_and_status_use_passphrase(env: Env) -> None:
     assert code == 0, stderr
     envelope = json.loads((env.home / "trader" / "session.json").read_text())
     assert (envelope["version"], envelope["backend"]) == (2, "file")
+    # Copying a passphrase during the prompts must survive the clear.
+    env.clip.write_text(token)
+    code, _, stderr = env.run_tty(
+        *flags,
+        "auth",
+        "import",
+        typed=["", lambda: env.clip.write_text("hunter22"), "hunter22", "hunter22"],
+    )
+    assert code == 0, stderr
+    assert env.clip.read_text() == "hunter22"
     code, stdout, stderr = env.run_tty(*flags, "auth", "status", typed=["hunter22"])
     assert code == 0, stderr
     assert json.loads(stdout)["address"] == ADDRESS
@@ -375,7 +412,7 @@ def typed_data(**overrides) -> dict:
         "domain": {"name": "Sai", "version": "1", "chainId": 6900},
         "message": {
             "account": ADDRESS,
-            "challenge": NONCE,
+            "challenge": "0x" + NONCE,
             "action": "Enable Sai trading",
             "expiresAt": "2026-11-17T00:05:00Z",
         },

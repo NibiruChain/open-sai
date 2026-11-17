@@ -250,7 +250,7 @@ NO_CLIPBOARD = (
 )
 
 
-def read_token() -> tuple[str, clipboard.Tool | None]:
+def read_token() -> str:
     """Read the token from a hidden prompt or, without a terminal, the
     clipboard. Never from arguments, the environment, or piped stdin."""
     if sys.stdin.isatty():
@@ -262,7 +262,7 @@ def read_token() -> tuple[str, clipboard.Tool | None]:
             err=True,
         ).strip()
         if token:
-            return token, None
+            return token
     copied = clipboard.read()
     if copied is None:
         if sys.stdin.isatty():
@@ -272,7 +272,7 @@ def read_token() -> tuple[str, clipboard.Tool | None]:
         raise ValueError(
             "Clipboard is empty; copy the session token from Sai Web and retry"
         )
-    return copied
+    return copied[0]
 
 
 @auth.command("import")
@@ -283,22 +283,24 @@ def import_token(ctx: click.Context) -> None:
     In a terminal, paste the token at the hidden prompt or press Enter to read
     the clipboard. Without a terminal, as when an agent runs this, read the
     clipboard. After storing the token, clear the clipboard if it still holds
-    the token. Prints only the address and expiry.
+    the token. Prints the address, expiry, and endpoint, never the token.
     """
     try:
-        token, tool = read_token()
+        token = read_token()
         result = import_session(token, ctx.obj["endpoint"])
         save(ctx, result)
-        if tool is None:
-            copied = clipboard.read()
-            if copied is not None and copied[0] == token:
-                tool = copied[1]
-        cleared = tool is not None and clipboard.clear(tool)
-        if tool is not None and not cleared:
+        # Re-read: with backend file, the person may have copied a passphrase
+        # since, and that must survive.
+        copied = clipboard.read()
+        if copied is not None and copied[0] == token and not clipboard.clear(copied[1]):
             click.echo("Warning: could not clear the clipboard", err=True)
         emit(
             ctx,
-            {"evmAddress": result["evmAddress"], "expiresAt": result["expiresAt"]},
+            {
+                "address": result["evmAddress"],
+                "expiresAt": result["expiresAt"],
+                "endpoint": result["endpoint"],
+            },
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
