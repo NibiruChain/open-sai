@@ -198,7 +198,8 @@ def auth() -> None:
 )
 @click.option(
     "--address",
-    help="Optional EVM address to check against the wallet's address.",
+    help="EVM address to sign in as. With --account it skips `cast wallet"
+    " address`; with --wallet it must match the ud wallet's address.",
 )
 @click.pass_context
 def login(
@@ -260,6 +261,8 @@ def signed_login(
     --account never looks for ud: it signs with cast even when ud is
     installed and knows a wallet by the same name.
     """
+    if address is not None and not keeper.is_address(address):
+        raise ValueError(f"Not an EVM address: {address}")
     if account:
         if address is None:
             address = keeper.cast_address(account)

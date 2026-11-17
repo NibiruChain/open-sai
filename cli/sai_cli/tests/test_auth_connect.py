@@ -626,7 +626,9 @@ def test_wallet_login_reads_address_from_ud(env: Env, keeper_auth) -> None:
 
 def test_wallet_login_cross_checks_address(env: Env, keeper_auth) -> None:
     fake_ud(env)
-    same = login(env, keeper_auth, "--wallet", "dev", "--address", ADDRESS.upper())
+    same = login(
+        env, keeper_auth, "--wallet", "dev", "--address", "0x" + ADDRESS[2:].upper()
+    )
     assert same.returncode == 0, same.stderr
     env.log.write_text("")
     other = login(env, keeper_auth, "--wallet", "dev", "--address", OTHER)
@@ -731,3 +733,12 @@ def ud_show(address: object, state: object = "matching") -> str:
 )
 def test_parse_wallet(output: str, expected: keeper.UdWallet | None) -> None:
     assert keeper.parse_wallet(output) == expected
+
+
+def test_login_rejects_malformed_address_before_signing(env: Env, keeper_auth) -> None:
+    fake_cast(env)
+    result = login(env, keeper_auth, "--account", "dev", "--address", "0xTYPO")
+    assert result.returncode != 0
+    assert "Not an EVM address: 0xTYPO" in result.stderr
+    assert "cast" not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
