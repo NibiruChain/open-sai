@@ -236,7 +236,7 @@ def test_wallet_signing_omits_only_empty_undeclared_domain_fields(monkeypatch, s
             "verifyingContract": "",
         },
         "primaryType": "UserTradingSession",
-        "message": {"account": session["evmAddress"], "challenge": "nonce"},
+        "message": {"account": session["evmAddress"], "challenge": "0x" + "ab" * 32},
     }
 
     def query(endpoint, query, variables=None, token=None):
@@ -244,11 +244,11 @@ def test_wallet_signing_omits_only_empty_undeclared_domain_fields(monkeypatch, s
             return {
                 "createUserIntentAuthChallenge": {
                     "evmAddress": session["evmAddress"],
-                    "nonce": "nonce",
+                    "nonce": "ab" * 32,
                     "typedData": typed,
                 }
             }
-        assert variables == {"signature": "0x" + "1" * 130, "challenge": "nonce"}
+        assert variables == {"signature": "0x" + "1" * 130, "challenge": "ab" * 32}
         return {"createUserIntentSession": session}
 
     def sign(args, **kwargs):

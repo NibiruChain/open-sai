@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from sai_cli.core import keeper
 
@@ -13,26 +15,41 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("SAI_HOME", str(tmp_path))
 
 
-def challenge(nonce: str = "0x" + "ab" * 32) -> dict:
+# Keeper returns the nonce as bare hex and signs it as a 0x-prefixed bytes32
+# (`userintent/challenge.go` and `journal_session_typed_data.go`).
+NONCE = "ab" * 32
+
+
+def challenge() -> dict:
+    """Typed data shaped exactly like Keeper's UserTradingSessionTypedData."""
     return {
         "types": {
             "EIP712Domain": [
                 {"name": "name", "type": "string"},
                 {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
             ],
             "UserTradingSession": [
                 {"name": "account", "type": "address"},
                 {"name": "challenge", "type": "bytes32"},
+                {"name": "action", "type": "string"},
+                {"name": "expiresAt", "type": "string"},
             ],
         },
         "primaryType": "UserTradingSession",
-        "domain": {"name": "Sai", "version": "1"},
-        "message": {"account": ADDRESS.upper().replace("0X", "0x"), "challenge": nonce},
+        "domain": {"name": "Sai", "version": "1", "chainId": "0x1b58"},
+        "message": {
+            "account": "0x" + "A" * 40,
+            "challenge": "0x" + NONCE,
+            "action": "Enable Sai trading",
+            "expiresAt": "2099-01-01T00:05:00Z",
+        },
     }
 
 
 def test_session_typed_data_accepts_keeper_challenge():
-    keeper.check_session_typed_data(challenge(), ADDRESS, "0x" + "AB" * 32)
+    keeper.check_session_typed_data(challenge(), ADDRESS, NONCE)
+    keeper.check_session_typed_data(challenge(), ADDRESS, NONCE.upper())
 
 
 @pytest.mark.parametrize(
@@ -43,6 +60,8 @@ def test_session_typed_data_accepts_keeper_challenge():
         (("domain", "version"), "2"),
         (("message", "account"), "0x" + "b" * 40),
         (("message", "challenge"), "0x" + "cd" * 32),
+        (("message", "challenge"), "0x" + NONCE[:-2]),
+        (("message", "challenge"), 7),
     ],
 )
 def test_session_typed_data_refuses_substitution(path, value):
@@ -52,34 +71,54 @@ def test_session_typed_data_refuses_substitution(path, value):
         target = target[part]
     target[path[-1]] = value
     with pytest.raises(keeper.KeeperError, match="not a Sai trading session"):
-        keeper.check_session_typed_data(data, ADDRESS, "0x" + "ab" * 32)
+        keeper.check_session_typed_data(data, ADDRESS, NONCE)
+
+
+@pytest.mark.parametrize("nonce", ["", NONCE[:-2], "zz" * 32, NONCE + "00"])
+def test_session_typed_data_refuses_malformed_nonce(nonce):
+    with pytest.raises(keeper.KeeperError, match="not a Sai trading session"):
+        keeper.check_session_typed_data(challenge(), ADDRESS, nonce)
 
 
 def test_session_typed_data_refuses_missing_message():
     data = challenge()
     del data["message"]
     with pytest.raises(keeper.KeeperError):
-        keeper.check_session_typed_data(data, ADDRESS, "0x" + "ab" * 32)
+        keeper.check_session_typed_data(data, ADDRESS, NONCE)
+
+
+def wallet_login(monkeypatch, data: dict) -> list:
+    signed = []
+
+    def query(endpoint, query, variables=None, token=None):
+        if query == keeper.CHALLENGE:
+            return {
+                "createUserIntentAuthChallenge": {
+                    "evmAddress": ADDRESS,
+                    "nonce": NONCE,
+                    "typedData": data,
+                }
+            }
+        assert query == keeper.SESSION
+        assert variables == {"signature": "0x" + "1" * 130, "challenge": NONCE}
+        return {"createUserIntentSession": {"evmAddress": ADDRESS}}
+
+    def sign(args, **kwargs):
+        signed.append(args)
+        return SimpleNamespace(stdout="0x" + "1" * 130)
+
+    monkeypatch.setattr(keeper, "request", query)
+    monkeypatch.setattr(keeper.subprocess, "run", sign)
+    keeper.wallet_session(keeper.MAINNET_HTTP, ADDRESS, "wallet")
+    return signed
+
+
+def test_wallet_login_signs_a_keeper_shaped_challenge(monkeypatch):
+    assert len(wallet_login(monkeypatch, challenge())) == 1
 
 
 def test_wallet_login_never_signs_a_substituted_payload(monkeypatch):
     data = challenge()
     data["primaryType"] = "Permit"
-
-    def query(endpoint, query, variables=None, token=None):
-        assert query == keeper.CHALLENGE
-        return {
-            "createUserIntentAuthChallenge": {
-                "evmAddress": ADDRESS,
-                "nonce": "0x" + "ab" * 32,
-                "typedData": data,
-            }
-        }
-
-    def sign(*args, **kwargs):
-        raise AssertionError("signer must not run")
-
-    monkeypatch.setattr(keeper, "request", query)
-    monkeypatch.setattr(keeper.subprocess, "run", sign)
     with pytest.raises(keeper.KeeperError, match="not a Sai trading session"):
-        keeper.wallet_session(keeper.MAINNET_HTTP, ADDRESS, "wallet")
+        wallet_login(monkeypatch, data)

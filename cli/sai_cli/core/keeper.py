@@ -103,6 +103,16 @@ def request(
     return data
 
 
+def _challenge_hex(value: object) -> str:
+    """Normalize a 32-byte challenge; Keeper sends the nonce without 0x."""
+    if not isinstance(value, str):
+        raise TypeError("Challenge must be a string")
+    digits = value.lower().removeprefix("0x")
+    if len(digits) != 64 or any(c not in "0123456789abcdef" for c in digits):
+        raise ValueError("Challenge must be 32 bytes of hex")
+    return digits
+
+
 def check_session_typed_data(
     typed_data: dict[str, Any], address: str, nonce: str
 ) -> None:
@@ -120,10 +130,9 @@ def check_session_typed_data(
             and domain["version"] == "1"
             and isinstance(message["account"], str)
             and message["account"].lower() == address.lower()
-            and isinstance(message["challenge"], str)
-            and message["challenge"].lower() == nonce.lower()
+            and _challenge_hex(message["challenge"]) == _challenge_hex(nonce)
         )
-    except (KeyError, TypeError, AttributeError) as exc:
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise KeeperError("Challenge is not a Sai trading session request") from exc
     if not valid:
         raise KeeperError("Challenge is not a Sai trading session request")

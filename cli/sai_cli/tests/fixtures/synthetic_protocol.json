@@ -3,7 +3,7 @@
   "challenge_response": {
     "data": {
       "createUserIntentAuthChallenge": {
-        "nonce": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "evmAddress": "0x1111111111111111111111111111111111111111",
         "expiresAt": "2099-01-01T00:05:00Z",
         "chainId": "cataclysm-1",
