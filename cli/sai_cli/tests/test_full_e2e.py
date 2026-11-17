@@ -260,45 +260,19 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
             "endpoint": endpoint,
             "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         },
-        "test-passphrase",
     )
 
-    def invoke(*args, unlock=False):
-        if not unlock:
-            return subprocess.run(
-                [*_resolve_cli(), "--endpoint", endpoint, "--json", *args],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=10,
-            )
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, b"test-passphrase\n")
-        os.close(write_fd)
-        try:
-            return subprocess.run(
-                [
-                    *_resolve_cli(),
-                    "--endpoint",
-                    endpoint,
-                    "--json",
-                    "--keyring-backend",
-                    "file",
-                    "--passphrase-fd",
-                    str(read_fd),
-                    *args,
-                ],
-                pass_fds=(read_fd,),
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=10,
-            )
-        finally:
-            os.close(read_fd)
+    def invoke(*args):
+        return subprocess.run(
+            [*_resolve_cli(), "--endpoint", endpoint, "--json", *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
 
     try:
-        first = invoke("trade", "close", "7", unlock=True)
+        first = invoke("trade", "close", "7")
         assert first.returncode != 0
         assert "Outcome unknown" in first.stderr
         assert len(recorded) == 1
@@ -307,7 +281,7 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
         assert saved[0]["intentKey"] == key
         assert saved[0]["status"] == "unknown"
 
-        duplicate = invoke("trade", "close", "7", unlock=True)
+        duplicate = invoke("trade", "close", "7")
         assert duplicate.returncode != 0
         assert "Reconcile" in duplicate.stderr
         assert len(recorded) == 1
@@ -318,7 +292,7 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
             json.loads(invoke("intent", "local", address).stdout)[0]["status"]
             == "accepted"
         )
-        assert invoke("trade", "close", "7", unlock=True).returncode != 0
+        assert invoke("trade", "close", "7").returncode != 0
         assert len(recorded) == 1
 
         history_visible = True
@@ -328,7 +302,7 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
             json.loads(invoke("intent", "local", address).stdout)[0]["status"]
             == "terminal"
         )
-        after_reconciliation = invoke("trade", "close", "7", unlock=True)
+        after_reconciliation = invoke("trade", "close", "7")
         assert after_reconciliation.returncode != 0
         assert "Outcome unknown" in after_reconciliation.stderr
         assert len(recorded) == 2
@@ -530,44 +504,26 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
             "endpoint": endpoint,
             "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         },
-        "test-passphrase",
     )
 
-    def invoke(*args, unlock=False):
-        command = [*_resolve_cli(), "--endpoint", endpoint, "--json"]
-        if not unlock:
-            return subprocess.run(
-                [*command, *args],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=10,
-            )
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, b"test-passphrase\n")
-        os.close(write_fd)
-        try:
-            return subprocess.run(
-                [*command, "--keyring-backend", "file"]
-                + ["--passphrase-fd", str(read_fd), *args],
-                pass_fds=(read_fd,),
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=10,
-            )
-        finally:
-            os.close(read_fd)
+    def invoke(*args):
+        return subprocess.run(
+            [*_resolve_cli(), "--endpoint", endpoint, "--json", *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
 
     try:
-        first = invoke("trade", "tpsl", "7", "--take-profit", "100", unlock=True)
+        first = invoke("trade", "tpsl", "7", "--take-profit", "100")
         assert "Outcome unknown" in first.stderr
         key = recorded[0]["intentKey"]
 
         # Inside Keeper's admission window the key still blocks trading.
         fresh = invoke("intent", "status", address, "--key", key)
         assert json.loads(fresh.stdout)["localStatus"] == "unknown"
-        blocked = invoke("trade", "close", "7", unlock=True)
+        blocked = invoke("trade", "close", "7")
         assert "Reconcile" in blocked.stderr
         assert len(recorded) == 1
 
@@ -581,7 +537,7 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
         assert expired.returncode == 0
         assert json.loads(expired.stdout)["localStatus"] == "absent"
 
-        allowed = invoke("trade", "close", "7", unlock=True)
+        allowed = invoke("trade", "close", "7")
         assert "Reconcile" not in allowed.stderr
         assert len(recorded) == 2
         assert recorded[1]["intent"]["kind"] == "CLOSE_POSITION"
@@ -591,24 +547,17 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
         thread.join()
 
 
-def test_repl_survives_an_aborted_command_and_shows_help(tmp_path, monkeypatch):
-    env = {**os.environ, "SAI_HOME": str(tmp_path), "SAI_KEYRING_BACKEND": "file"}
+def test_repl_survives_a_failing_command_and_shows_help(tmp_path):
+    env = {**os.environ, "SAI_HOME": str(tmp_path)}
     env.pop("TELEGRAM_PASSWORD", None)
-    monkeypatch.setenv("SAI_HOME", str(tmp_path))
-    storage.save_session(
-        {
-            "token": "fake-token",
-            "evmAddress": "0x" + "a" * 40,
-            "endpoint": keeper.MAINNET_HTTP,
-            "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-        },
-        "secret",
-    )
-    # The passphrase prompt reaches end of input, which Click reports as an
-    # abort. A new session has no terminal, so getpass reads stdin.
-    aborted = subprocess.run(
+    # A passphrase-encrypted session from an older version fails without a
+    # prompt, and the shell keeps reading commands.
+    trader = tmp_path / "trader"
+    trader.mkdir()
+    (trader / "session.json").write_text(json.dumps({"version": 1}))
+    result = subprocess.run(
         _resolve_cli(),
-        input="help\nauth status\n",
+        input="auth status\nhelp\n",
         capture_output=True,
         check=False,
         text=True,
@@ -616,6 +565,6 @@ def test_repl_survives_an_aborted_command_and_shows_help(tmp_path, monkeypatch):
         env=env,
         start_new_session=True,
     )
-    assert aborted.returncode == 0, aborted.stderr
-    assert "Usage: sai" in aborted.stdout
-    assert "Interrupted" in aborted.stderr
+    assert result.returncode == 0, result.stderr
+    assert "Error: Stored session is passphrase-encrypted" in result.stderr
+    assert "Usage: sai" in result.stdout

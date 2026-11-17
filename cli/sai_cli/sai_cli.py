@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import shlex
 import sys
 import time
@@ -66,39 +65,8 @@ def emit(ctx: click.Context, value: Any) -> None:
     click.echo(json.dumps(value, indent=None if ctx.obj["json"] else 2, default=str))
 
 
-def read_passphrase(ctx: click.Context, *, new: bool = False) -> str:
-    """Read the backend `file` passphrase from --passphrase-fd or a prompt."""
-    fd = ctx.obj.get("passphrase_fd")
-    if fd is not None:
-        return os.read(fd, 4096).decode().rstrip("\r\n")
-    return click.prompt(
-        "New session passphrase" if new else "Session passphrase",
-        hide_input=True,
-        confirmation_prompt=new,
-        err=True,
-    )
-
-
-def save(ctx: click.Context, result: dict[str, str]) -> None:
-    """Store RESULT with the selected keyring backend."""
-    if ctx.obj["keyring_backend"] == "file":
-        storage.save_session(result, read_passphrase(ctx, new=True))
-    else:
-        storage.save_session(result)
-
-
 def session(ctx: click.Context) -> dict[str, str]:
-    # Check the stored backend first so a mismatch fails before any prompt.
-    stored = storage.stored_backend()
-    if ctx.obj["keyring_backend"] == "file" and stored == "test":
-        raise ValueError(
-            "Stored session uses keyring backend test; drop --keyring-backend"
-            " file or sign in again"
-        )
-    if ctx.obj["keyring_backend"] == "file" and stored == "file":
-        result = storage.load_session(read_passphrase(ctx))
-    else:
-        result = storage.load_session()
+    result = storage.load_session()
     if result.get("endpoint") != ctx.obj["endpoint"]:
         raise ValueError("Stored session belongs to another Keeper endpoint")
     expiry = datetime.fromisoformat(result["expiresAt"])
@@ -150,42 +118,11 @@ def import_session(token: str, endpoint: str) -> dict[str, str]:
 @click.option(
     "--json", "json_output", is_flag=True, help="Compact machine-readable JSON."
 )
-@click.option(
-    "--keyring-backend",
-    type=click.Choice(storage.BACKENDS),
-    default="test",
-    show_default=True,
-    envvar="SAI_KEYRING_BACKEND",
-    help="Session storage. test: encrypted with a built-in key, no prompt."
-    " file: encrypted with your passphrase.",
-)
-@click.option(
-    "--passphrase-fd",
-    type=click.IntRange(0),
-    help="Keyring backend file: read the passphrase from an inherited file descriptor.",
-)
 @click.pass_context
-def main(
-    ctx: click.Context,
-    endpoint: str,
-    json_output: bool,
-    keyring_backend: str,
-    passphrase_fd: int | None,
-) -> None:
+def main(ctx: click.Context, endpoint: str, json_output: bool) -> None:
     """Inspect Sai markets and account data, and submit trading intents."""
     ctx.ensure_object(dict)
-    if passphrase_fd is not None and keyring_backend != "file":
-        # Scripts written before keyring backends pass only --passphrase-fd.
-        source = ctx.get_parameter_source("keyring_backend")
-        if source is not click.core.ParameterSource.DEFAULT:
-            raise click.UsageError("--passphrase-fd requires --keyring-backend file")
-        keyring_backend = "file"
-    ctx.obj.update(
-        endpoint=endpoint,
-        json=json_output,
-        keyring_backend=keyring_backend,
-        passphrase_fd=passphrase_fd,
-    )
+    ctx.obj.update(endpoint=endpoint, json=json_output)
     if ctx.invoked_subcommand is None:
         repl(ctx)
 
@@ -231,8 +168,6 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
                         "--endpoint",
                         ctx.obj["endpoint"],
                         *(["--json"] if ctx.obj["json"] else []),
-                        "--keyring-backend",
-                        ctx.obj["keyring_backend"],
                         *args,
                     ],
                     prog_name="sai",
@@ -252,16 +187,16 @@ def auth() -> None:
 @auth.command("login")
 @click.option(
     "--account",
-    help="Foundry keystore name (~/.foundry/keystores). cast prompts for its password.",
-)
-@click.option(
-    "--address",
-    help="EVM address of the account. With --account, defaults to"
-    " `cast wallet address`, which prompts for the password a second time.",
+    help="Foundry keystore name (~/.foundry/keystores). Signs through ud when"
+    " ud knows the wallet; otherwise cast may prompt for the keystore password.",
 )
 @click.option(
     "--wallet",
-    help="Experimental: wallet name in the local ud wallet manager.",
+    help="Wallet name in the local ud wallet manager. Signs without a prompt.",
+)
+@click.option(
+    "--address",
+    help="Optional EVM address to check against the wallet's address.",
 )
 @click.pass_context
 def login(
@@ -269,22 +204,18 @@ def login(
 ) -> None:
     """Sign Keeper's trading-session challenge with a local key.
 
-    Use --account for a Foundry keystore. The CLI checks that the challenge
-    is a Sai `UserTradingSession` for this address before cast signs it.
+    Use --wallet for a ud wallet or --account for a Foundry keystore. With
+    --account, sai signs through ud when `ud evm wallet show` knows the name,
+    so ud supplies the keystore password; otherwise it falls back to cast,
+    which may prompt. The CLI checks that the challenge is a Sai
+    `UserTradingSession` for this address before anything signs it.
     """
     if bool(account) == bool(wallet):
         raise click.UsageError("Pass exactly one of --account or --wallet")
-    if wallet and not address:
-        raise click.UsageError("--wallet requires --address")
     try:
-        if account:
-            address = address or keeper.cast_address(account)
-            result = keeper.cast_session(ctx.obj["endpoint"], address, account)
-        else:
-            assert wallet and address
-            result = keeper.wallet_session(ctx.obj["endpoint"], address, wallet)
+        result = signed_login(ctx.obj["endpoint"], account, wallet, address)
         result["endpoint"] = ctx.obj["endpoint"]
-        save(ctx, result)
+        storage.save_session(result)
         emit(
             ctx,
             {
@@ -295,6 +226,35 @@ def login(
         )
     except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def checked_address(found: str, expected: str | None) -> str:
+    """Return FOUND, or fail when the --address cross-check disagrees."""
+    if expected is not None and expected.lower() != found.lower():
+        raise ValueError(
+            f"--address {expected} does not match the wallet address {found}"
+        )
+    return found
+
+
+def signed_login(
+    endpoint: str, account: str | None, wallet: str | None, address: str | None
+) -> dict[str, str]:
+    """Sign in with a ud wallet when possible, else with cast."""
+    name = wallet or account
+    assert name
+    found = keeper.ud_wallet_address(name)
+    if found is not None:
+        return keeper.wallet_session(endpoint, checked_address(found, address), name)
+    if wallet:
+        raise ValueError(
+            f"`ud evm wallet show {wallet}` failed or printed no address;"
+            " check that ud is installed and knows this wallet"
+        )
+    assert account
+    if address is None:
+        address = keeper.cast_address(account)
+    return keeper.cast_session(endpoint, address, account)
 
 
 NO_CLIPBOARD = (
@@ -341,9 +301,9 @@ def import_token(ctx: click.Context) -> None:
     try:
         token = read_token()
         result = import_session(token, ctx.obj["endpoint"])
-        save(ctx, result)
-        # Re-read: with backend file, the person may have copied a passphrase
-        # since, and that must survive.
+        storage.save_session(result)
+        # Re-read: the person may have copied something else since, and that
+        # must survive.
         copied = clipboard.read()
         if copied is not None and copied[0] == token and not clipboard.clear(copied[1]):
             click.echo("Warning: could not clear the clipboard", err=True)

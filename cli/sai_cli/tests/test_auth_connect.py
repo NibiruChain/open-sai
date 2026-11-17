@@ -8,6 +8,7 @@ is touched.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import pty
@@ -24,7 +25,7 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sai_cli.core import keeper, storage
+from sai_cli.core import keeper
 
 ADDRESS = "0x" + "b" * 40
 OTHER = "0x" + "c" * 40
@@ -280,117 +281,92 @@ def test_terminal_import_enter_reads_clipboard(env: Env) -> None:
     assert_connected(env, token, stdout)
 
 
-def test_file_backend_import_and_status_use_passphrase(env: Env) -> None:
-    token = make_token()
-    env.clipboard()
-    env.clip.write_text(token)
-    flags = ("--json", "--keyring-backend", "file")
-    code, stdout, stderr = env.run_tty(
-        *flags, "auth", "import", typed=["", "hunter22", "hunter22"]
-    )
-    assert code == 0, stderr
-    envelope = json.loads((env.home / "trader" / "session.json").read_text())
-    assert (envelope["version"], envelope["backend"]) == (2, "file")
-    # Copying a passphrase during the prompts must survive the clear.
-    env.clip.write_text(token)
-    code, _, stderr = env.run_tty(
-        *flags,
-        "auth",
-        "import",
-        typed=["", lambda: env.clip.write_text("hunter22"), "hunter22", "hunter22"],
-    )
-    assert code == 0, stderr
-    assert env.clip.read_text() == "hunter22"
-    code, stdout, stderr = env.run_tty(*flags, "auth", "status", typed=["hunter22"])
-    assert code == 0, stderr
-    assert json.loads(stdout)["address"] == ADDRESS
-    default = env.run("auth", "status")
-    assert default.returncode != 0
-    assert "--keyring-backend file" in default.stderr
-
-
-def test_keyring_backend_env_var(env: Env) -> None:
-    result = subprocess.run(
-        [sys.executable, "-m", "sai_cli", "auth", "status"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        text=True,
-        env={**env.vars(), "SAI_KEYRING_BACKEND": "nope"},
-        timeout=30,
-    )
-    assert result.returncode == 2
-    assert "'test', 'file'" in result.stderr or "test, file" in result.stderr
-
-
-def write_v1_session(home: Path, session: dict[str, str], password: str) -> None:
-    """Write the envelope format that shipped before keyring backends."""
-    salt, nonce = os.urandom(16), os.urandom(12)
-    key = storage._key(password, salt)
-    ciphertext = AESGCM(key).encrypt(
-        nonce, json.dumps(session).encode(), b"sai-session-v1"
-    )
-    root = home / "trader"
-    root.mkdir(parents=True)
-    (root / "session.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "salt": base64.b64encode(salt).decode(),
-                "nonce": base64.b64encode(nonce).decode(),
-                "ciphertext": base64.b64encode(ciphertext).decode(),
-            }
-        )
-    )
-
-
-def test_version_1_session_loads_under_file_backend(env: Env) -> None:
-    token = make_token()
-    session = {
+def session_for(token: str) -> dict[str, str]:
+    return {
         "token": token,
         "evmAddress": ADDRESS,
         "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         "endpoint": keeper.MAINNET_HTTP,
     }
-    write_v1_session(env.home, session, "old passphrase")
-    under_test = env.run("auth", "status")
-    assert under_test.returncode != 0
-    assert "passphrase-encrypted; pass --keyring-backend file" in under_test.stderr
-    read_fd, write_fd = os.pipe()
-    os.write(write_fd, b"old passphrase\n")
-    os.close(write_fd)
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "sai_cli", "--json", "--keyring-backend", "file"]
-            + ["--passphrase-fd", str(read_fd), "auth", "status"],
-            pass_fds=(read_fd,),
-            check=False,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            env=env.vars(),
-            timeout=30,
-        )
-    finally:
-        os.close(read_fd)
+
+
+def write_envelope(home: Path, envelope: dict[str, Any]) -> None:
+    root = home / "trader"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "session.json").write_text(json.dumps(envelope))
+
+
+def random_b64(size: int) -> str:
+    return base64.b64encode(os.urandom(size)).decode()
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        # Shipped before keyring backends: always passphrase-encrypted.
+        {"version": 1, "salt": random_b64(16)},
+        # Keyring backend `file`, removed with the session passphrase.
+        {"version": 2, "backend": "file", "salt": random_b64(16)},
+    ],
+)
+def test_passphrase_session_asks_to_sign_in_again(env: Env, envelope) -> None:
+    envelope |= {"nonce": random_b64(12), "ciphertext": random_b64(64)}
+    write_envelope(env.home, envelope)
+    # A terminal on stdin proves the CLI fails instead of prompting.
+    code, stdout, stderr = env.run_tty("auth", "status", typed=[])
+    assert code != 0
+    assert "passphrase-encrypted" in stderr
+    assert "run `sai auth import` or `sai auth login` again" in stderr
+    assert "assphrase:" not in stderr
+    assert stdout == ""
+
+
+def test_removed_passphrase_options_are_rejected(env: Env) -> None:
+    for flags in (["--keyring-backend", "file"], ["--passphrase-fd", "0"]):
+        result = env.run(*flags, "auth", "status")
+        assert result.returncode == 2
+        assert "No such option" in result.stderr
+
+
+def test_session_envelope_uses_the_built_in_key(env: Env) -> None:
+    token = make_token()
+    env.clipboard()
+    env.clip.write_text(token)
+    result = env.run("--json", "auth", "import")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["address"] == ADDRESS
-    assert token not in result.stdout + result.stderr
-
-
-def test_test_backend_envelope_is_bound_to_its_backend(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("SAI_HOME", str(tmp_path))
-    session = {"token": "t", "evmAddress": ADDRESS, "expiresAt": "x"}
-    storage.save_session(session)
-    path = storage.home() / "session.json"
+    path = env.home / "trader" / "session.json"
+    assert path.stat().st_mode & 0o777 == 0o600
     envelope = json.loads(path.read_text())
+    assert set(envelope) == {"version", "backend", "nonce", "ciphertext"}
     assert (envelope["version"], envelope["backend"]) == (2, "test")
-    assert storage.load_session() == session
-    envelope["backend"] = "file"
-    envelope["salt"] = base64.b64encode(b"0" * 16).decode()
+    # Sessions written by the old default backend `test` still load.
+    nonce = os.urandom(12)
+    key = hashlib.sha256(b"sai-cli keyring-backend test; not a secret").digest()
+    session = session_for(token)
+    ciphertext = AESGCM(key).encrypt(
+        nonce, json.dumps(session).encode(), b"sai-session-v2-test"
+    )
+    envelope["nonce"] = base64.b64encode(nonce).decode()
+    envelope["ciphertext"] = base64.b64encode(ciphertext).decode()
     path.write_text(json.dumps(envelope))
-    with pytest.raises(ValueError, match="Cannot unlock"):
-        storage.load_session("anything")
+    status = env.run("--json", "auth", "status")
+    assert status.returncode == 0, status.stderr
+    assert json.loads(status.stdout)["address"] == ADDRESS
+
+
+def test_tampered_session_cannot_be_unlocked(env: Env) -> None:
+    write_envelope(
+        env.home,
+        {
+            "version": 2,
+            "backend": "test",
+            "nonce": random_b64(12),
+            "ciphertext": random_b64(64),
+        },
+    )
+    result = env.run("auth", "status")
+    assert result.returncode != 0
+    assert "Cannot unlock session; run `sai auth import`" in result.stderr
 
 
 def typed_data(**overrides) -> dict:
@@ -557,9 +533,133 @@ def test_cast_login_refuses_foreign_typed_data(env: Env, keeper_auth) -> None:
 def test_login_requires_one_signer(env: Env) -> None:
     neither = env.run("auth", "login")
     both = env.run("auth", "login", "--account", "a", "--wallet", "b")
-    wallet_only = env.run("auth", "login", "--wallet", "b")
     for result in (neither, both):
         assert result.returncode == 2
         assert "exactly one of --account or --wallet" in result.stderr
-    assert wallet_only.returncode == 2
-    assert "--wallet requires --address" in wallet_only.stderr
+
+
+# Stand-in for a value that ud keeps in `pass` and must never reach output.
+UD_SECRET = "ud-keystore-password"
+
+
+def fake_ud(env: Env, known: str = "dev") -> None:
+    """A ud that knows wallet KNOWN and signs as `cast` would through it.
+
+    `show` prints a log line and a secret on stderr around its JSON, as a
+    noisy real tool might.
+    """
+    env.tool(
+        "ud",
+        "import json\n"
+        "args = sys.argv[1:]\n"
+        f"if args[:3] == ['evm', 'wallet', 'show'] and args[3] == {known!r}:\n"
+        f"    sys.stderr.write({UD_SECRET!r} + '\\n')\n"
+        "    print('Reading wallet document')\n"
+        "    print(json.dumps({'name': args[3], 'address': "
+        f"{ADDRESS.upper().replace('0X', '0x')!r}, 'cast': {{'synced': True}}}}))\n"
+        f"elif args[:4] == ['evm', 'wallet', 'run', {known!r}] and args[4:7] == "
+        "['--', 'wallet', 'sign']:\n"
+        "    assert args[7:9] == ['--data', '--from-file']\n"
+        "    data = json.load(open(args[-1]))\n"
+        "    assert data['primaryType'] == 'UserTradingSession'\n"
+        f"    print({SIGNATURE!r})\n"
+        "else:\n"
+        "    sys.exit(1)\n",
+    )
+
+
+def login(env: Env, keeper_auth, *args: str) -> subprocess.CompletedProcess[str]:
+    return env.run(
+        "--json", "--endpoint", keeper_auth["endpoint"], "auth", "login", *args
+    )
+
+
+def test_wallet_login_reads_address_from_ud(env: Env, keeper_auth) -> None:
+    fake_ud(env)
+    result = login(env, keeper_auth, "--wallet", "dev")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["address"] == ADDRESS
+    assert UD_SECRET not in result.stdout + result.stderr
+    assert keeper_auth["token"] not in result.stdout + result.stderr
+    calls = env.log.read_text().splitlines()
+    assert calls[0].endswith("ud evm wallet show dev")
+    assert " evm wallet run dev -- wallet sign --data --from-file " in calls[1]
+    assert keeper_auth["signatures"] == [{"signature": SIGNATURE, "challenge": NONCE}]
+    status = env.run("--json", "--endpoint", keeper_auth["endpoint"], "auth", "status")
+    assert status.returncode == 0, status.stderr
+
+
+def test_wallet_login_cross_checks_address(env: Env, keeper_auth) -> None:
+    fake_ud(env)
+    same = login(env, keeper_auth, "--wallet", "dev", "--address", ADDRESS.upper())
+    assert same.returncode == 0, same.stderr
+    env.log.write_text("")
+    other = login(env, keeper_auth, "--wallet", "dev", "--address", OTHER)
+    assert other.returncode != 0
+    assert "does not match the wallet address" in other.stderr
+    assert "wallet run" not in env.log.read_text()
+    assert len(keeper_auth["signatures"]) == 1
+
+
+def test_wallet_login_fails_when_ud_does_not_know_the_wallet(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env)
+    fake_cast(env)
+    result = login(env, keeper_auth, "--wallet", "other")
+    assert result.returncode != 0
+    assert "`ud evm wallet show other` failed" in result.stderr
+    assert "cast" not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+
+
+def test_account_login_signs_through_ud_when_it_knows_the_name(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env)
+    fake_cast(env)
+    result = login(env, keeper_auth, "--account", "dev")
+    assert result.returncode == 0, result.stderr
+    calls = env.log.read_text()
+    assert " evm wallet run dev -- wallet sign " in calls
+    assert "/cast " not in calls
+    assert len(keeper_auth["signatures"]) == 1
+
+
+def test_account_login_falls_back_to_cast(env: Env, keeper_auth) -> None:
+    fake_ud(env, known="someone-else")
+    fake_cast(env)
+    result = login(env, keeper_auth, "--account", "dev")
+    assert result.returncode == 0, result.stderr
+    calls = env.log.read_text().splitlines()
+    assert calls[0].endswith("ud evm wallet show dev")
+    assert calls[1].endswith("cast wallet address --account dev")
+    assert " wallet sign --account dev --data --from-file " in calls[2]
+
+
+def test_ud_login_refuses_foreign_typed_data(env: Env, keeper_auth) -> None:
+    fake_ud(env)
+    keeper_auth["typed"] = typed_data(primaryType="Permit")
+    result = login(env, keeper_auth, "--wallet", "dev")
+    assert result.returncode != 0
+    assert "not a Sai trading session request" in result.stderr
+    assert "wallet run" not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+
+
+@pytest.mark.parametrize(
+    "output, expected",
+    [
+        (json.dumps({"address": ADDRESS}), ADDRESS),
+        (
+            "note {not json}\n" + json.dumps({"x": {"address": 1}, "address": OTHER}),
+            OTHER,
+        ),
+        ('log line\n{"name": "a"}\n' + json.dumps({"address": ADDRESS}), ADDRESS),
+        (json.dumps({"address": "0x123"}), None),
+        (json.dumps({"address": "0x" + "g" * 40}), None),
+        ("", None),
+    ],
+)
+def test_parse_wallet_address(output: str, expected: str | None) -> None:
+    assert keeper.parse_wallet_address(output) == expected

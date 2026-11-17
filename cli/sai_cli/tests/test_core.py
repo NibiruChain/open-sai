@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -27,14 +26,12 @@ def session():
     }
 
 
-def test_encrypted_session_password_and_permissions(session):
-    storage.save_session(session, "long passphrase")
+def test_encrypted_session_and_permissions(session):
+    storage.save_session(session)
     path = storage.home() / "session.json"
     assert b"sensitive-token" not in path.read_bytes()
     assert path.stat().st_mode & 0o777 == 0o600
-    assert storage.load_session("long passphrase") == session
-    with pytest.raises(ValueError, match="Cannot unlock"):
-        storage.load_session("bad passphrase")
+    assert storage.load_session() == session
 
 
 def test_open_and_partial_close_payload():
@@ -141,50 +138,14 @@ def test_cli_dry_run_does_not_create_session_or_send():
     assert not storage.home().exists()
 
 
-# Scripts from before keyring backends pass --passphrase-fd alone.
-@pytest.mark.parametrize("backend", [["--keyring-backend", "file"], []])
-def test_passphrase_file_descriptor(session, backend):
-    storage.save_session(session, "secret")
-    read_fd, write_fd = os.pipe()
-    os.write(write_fd, b"secret\n")
-    os.close(write_fd)
-    try:
-        result = CliRunner().invoke(
-            main,
-            [*backend, "--passphrase-fd", str(read_fd), "auth", "status"],
-        )
-    finally:
-        os.close(read_fd)
-    assert result.exit_code == 0, result.output
-    assert "sensitive-token" not in result.output
-
-
-def test_passphrase_fd_conflicts_with_explicit_test_backend():
-    result = CliRunner().invoke(
-        main, ["--keyring-backend", "test", "--passphrase-fd", "0", "auth", "status"]
-    )
-    assert result.exit_code == 2
-    assert "requires --keyring-backend file" in result.output
-
-
 @pytest.mark.parametrize("failure", ["expired", "wrong_endpoint"])
 def test_session_refuses_expired_or_wrong_network(session, failure):
     if failure == "expired":
         session["expiresAt"] = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     else:
         session["endpoint"] = "https://other.example/query"
-    storage.save_session(session, "secret")
-    read_fd, write_fd = os.pipe()
-    os.write(write_fd, b"secret\n")
-    os.close(write_fd)
-    try:
-        result = CliRunner().invoke(
-            main,
-            ["--keyring-backend", "file", "--passphrase-fd", str(read_fd)]
-            + ["auth", "status"],
-        )
-    finally:
-        os.close(read_fd)
+    storage.save_session(session)
+    result = CliRunner().invoke(main, ["auth", "status"])
     assert result.exit_code != 0
     assert (
         "expired" if failure == "expired" else "another Keeper endpoint"

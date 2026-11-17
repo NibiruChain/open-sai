@@ -15,7 +15,6 @@ from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 
 def home() -> Path:
@@ -29,70 +28,34 @@ def directory() -> Path:
     return path
 
 
-BACKENDS = ("test", "file")
+# The session is encrypted with this fixed key, which ships in the source, like
+# the Cosmos SDK `test` keyring. It keeps the token out of plaintext files,
+# logs, and backups that grep for JWTs. It does not protect against anyone who
+# can read the file and this code; the file mode (0600) does that part.
+_SESSION_KEY = hashlib.sha256(b"sai-cli keyring-backend test; not a secret").digest()
+_VERSION = 2
+_BACKEND = "test"
+_AAD = b"sai-session-v2-test"
 
-# Backend `test` mirrors the Cosmos SDK `test` keyring: the session is
-# encrypted with this fixed key, which ships in the source. It keeps the token
-# out of plaintext files, logs, and backups that grep for JWTs. It does not
-# protect against anyone who can read the file and this code.
-_TEST_KEY = hashlib.sha256(b"sai-cli keyring-backend test; not a secret").digest()
-
-
-def _key(password: str, salt: bytes) -> bytes:
-    return Scrypt(salt=salt, length=32, n=2**15, r=8, p=1).derive(password.encode())
-
-
-def _aad(version: int, backend: str) -> bytes:
-    return b"sai-session-v1" if version == 1 else f"sai-session-v2-{backend}".encode()
+SIGN_IN_AGAIN = "run `sai auth import` or `sai auth login` again"
 
 
 def _session_path() -> Path:
     return directory() / "session.json"
 
 
-def stored_backend() -> str | None:
-    """Return the backend of the stored session, or None if there is none.
-
-    Version-1 envelopes predate backends and always used a passphrase.
-    """
-    try:
-        envelope = json.loads(_session_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        raise ValueError("Stored session is unreadable; sign in again") from exc
-    fields = envelope if isinstance(envelope, dict) else {}
-    if fields.get("version") == 1:
-        return "file"
-    backend = fields.get("backend")
-    if fields.get("version") != 2 or backend not in BACKENDS:
-        raise ValueError("Unsupported session version; sign in again")
-    return backend
-
-
-def save_session(session: dict[str, str], password: str | None = None) -> None:
-    """Encrypt and store the session.
-
-    With a passphrase, use backend `file` (scrypt-derived key). Without one,
-    use backend `test` (fixed key, no prompt).
-    """
-    backend = "test" if password is None else "file"
-    if backend == "file" and not password:
-        raise ValueError("Passphrase must not be empty")
-    salt, nonce = os.urandom(16), os.urandom(12)
-    key = _TEST_KEY if password is None else _key(password, salt)
-    ciphertext = AESGCM(key).encrypt(
-        nonce, json.dumps(session).encode(), _aad(2, backend)
-    )
+def save_session(session: dict[str, str]) -> None:
+    """Encrypt the session with the built-in key and store it at mode 0600."""
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(_SESSION_KEY).encrypt(nonce, json.dumps(session).encode(), _AAD)
     envelope = {
-        "version": 2,
-        "backend": backend,
+        "version": _VERSION,
+        "backend": _BACKEND,
         "nonce": base64.b64encode(nonce).decode(),
         "ciphertext": base64.b64encode(ciphertext).decode(),
     }
-    if backend == "file":
-        envelope["salt"] = base64.b64encode(salt).decode()
     root = directory()
+    # mkstemp creates the file with mode 0600.
     fd, temp = tempfile.mkstemp(dir=root, prefix=".session-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
@@ -102,46 +65,43 @@ def save_session(session: dict[str, str], password: str | None = None) -> None:
         Path(temp).unlink(missing_ok=True)
 
 
-def load_session(password: str | None = None) -> dict[str, str]:
-    """Decrypt the stored session with backend `test` (no passphrase) or
-    backend `file` (passphrase)."""
-    backend = stored_backend()
-    if backend is None:
-        raise ValueError("No Sai session; run `sai auth import` or `sai auth login`")
-    if password is None and backend == "file":
-        raise ValueError(
-            "Stored session is passphrase-encrypted; pass --keyring-backend file"
-            " or sign in again"
-        )
-    if password is not None and backend == "test":
-        raise ValueError(
-            "Stored session uses keyring backend test; drop --keyring-backend"
-            " file or sign in again"
-        )
+def load_session() -> dict[str, str]:
+    """Decrypt the stored session.
+
+    Sessions from older versions that used a passphrase (envelope version 1,
+    or version 2 with backend `file`) are refused, never prompted for.
+    """
     try:
         envelope = json.loads(_session_path().read_text(encoding="utf-8"))
-        version = envelope["version"]
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "No Sai session; run `sai auth import` or `sai auth login`"
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Stored session is unreadable; {SIGN_IN_AGAIN}") from exc
+    fields = envelope if isinstance(envelope, dict) else {}
+    if fields.get("version") == 1 or (
+        fields.get("version") == 2 and fields.get("backend") == "file"
+    ):
+        raise ValueError(
+            "Stored session is passphrase-encrypted, which sai no longer"
+            f" supports; {SIGN_IN_AGAIN}"
+        )
+    if fields.get("version") != _VERSION or fields.get("backend") != _BACKEND:
+        raise ValueError(f"Unsupported session version; {SIGN_IN_AGAIN}")
+    try:
         nonce, ciphertext = (
-            base64.b64decode(envelope[k], validate=True)
-            for k in ("nonce", "ciphertext")
+            base64.b64decode(fields[k], validate=True) for k in ("nonce", "ciphertext")
         )
-        key = (
-            _TEST_KEY
-            if password is None
-            else _key(password, base64.b64decode(envelope["salt"], validate=True))
-        )
-        session = json.loads(
-            AESGCM(key).decrypt(nonce, ciphertext, _aad(version, backend))
-        )
+        session = json.loads(AESGCM(_SESSION_KEY).decrypt(nonce, ciphertext, _AAD))
         if not isinstance(session, dict) or not all(
             isinstance(session.get(k), str)
             for k in ("token", "evmAddress", "expiresAt")
         ):
             raise ValueError("Invalid session")
         return session
-    except (OSError, ValueError, KeyError, InvalidTag) as exc:
-        hint = "check the passphrase or " if password is not None else ""
-        raise ValueError(f"Cannot unlock session; {hint}sign in again") from exc
+    except (ValueError, KeyError, TypeError, InvalidTag) as exc:
+        raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
 
 
 # Version 1 adds `created_at`, the Unix time when the CLI reserved the key.
