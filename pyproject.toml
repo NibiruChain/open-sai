@@ -8,10 +8,18 @@ version = "0.1.0"
 description = "Command-line access to Sai trading and market data"
 requires-python = ">=3.11"
 license = "Apache-2.0"
-dependencies = ["click>=8.1", "cryptography>=44", "httpx>=0.28", "prompt-toolkit>=3", "websockets>=14"]
+dependencies = [
+    "click>=8.1",
+    "cryptography>=44",
+    "httpx>=0.28",
+    "mcp>=1.22,<2",
+    "prompt-toolkit>=3",
+    "websockets>=14",
+]
 
 [project.scripts]
 sai = "sai_cli.sai_cli:main"
+sai-mcp = "sai_cli.mcp_server.server:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.11", "ty>=0.0.1a6"]

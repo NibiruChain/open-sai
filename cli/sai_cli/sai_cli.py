@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import shlex
 import shutil
 import sys
 import time
-from datetime import UTC, datetime
-from decimal import Decimal
 from importlib import metadata, resources
 from typing import Any
-from urllib.parse import urlsplit
 
 import click
-from websockets.exceptions import WebSocketException
-from websockets.sync.client import connect
-from websockets.typing import Subprotocol
 
-from .core import clipboard, intents, keeper, margin, storage
+from .core import clipboard, keeper, margin, reconcile, storage, stream, trading
+from .core import session as sessions
 from .utils.repl_skin import ReplSkin
 
 PACKAGE = "sai-cli"
@@ -67,37 +61,7 @@ def emit(ctx: click.Context, value: Any) -> None:
 
 
 def session(ctx: click.Context) -> dict[str, str]:
-    result = storage.load_session()
-    if result.get("endpoint") != ctx.obj["endpoint"]:
-        raise ValueError("Stored session belongs to another Keeper endpoint")
-    expiry = datetime.fromisoformat(result["expiresAt"])
-    if expiry <= datetime.now(UTC):
-        raise ValueError("Trading session expired; sign in again")
-    return result
-
-
-def import_session(token: str, endpoint: str) -> dict[str, str]:
-    try:
-        payload = token.split(".")[1]
-        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        address = data["sub"]
-        expires = datetime.fromtimestamp(data["exp"], UTC)
-        if (
-            not isinstance(address, str)
-            or not address.startswith("0x")
-            or len(address) != 42
-            or data.get("purpose") != "user_intent"
-            or expires <= datetime.now(UTC)
-        ):
-            raise ValueError
-    except (ValueError, KeyError, IndexError, TypeError, OverflowError) as exc:
-        raise ValueError("Invalid or expired Sai session token") from exc
-    return {
-        "token": token,
-        "evmAddress": address,
-        "expiresAt": expires.isoformat(),
-        "endpoint": endpoint,
-    }
+    return sessions.load_active_session(ctx.obj["endpoint"])
 
 
 @click.group(invoke_without_command=True)
@@ -219,14 +183,7 @@ def login(
         result = signed_login(ctx.obj["endpoint"], account, wallet, address)
         result["endpoint"] = ctx.obj["endpoint"]
         storage.save_session(result)
-        emit(
-            ctx,
-            {
-                "address": result["evmAddress"],
-                "expiresAt": result["expiresAt"],
-                "endpoint": result["endpoint"],
-            },
-        )
+        emit(ctx, sessions.summary(result))
     except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -328,21 +285,14 @@ def import_token(ctx: click.Context) -> None:
     """
     try:
         token = read_token()
-        result = import_session(token, ctx.obj["endpoint"])
+        result = sessions.import_session(token, ctx.obj["endpoint"])
         storage.save_session(result)
         # Re-read: the person may have copied something else since, and that
         # must survive.
         copied = clipboard.read()
         if copied is not None and copied[0] == token and not clipboard.clear(copied[1]):
             click.echo("Warning: could not clear the clipboard", err=True)
-        emit(
-            ctx,
-            {
-                "address": result["evmAddress"],
-                "expiresAt": result["expiresAt"],
-                "endpoint": result["endpoint"],
-            },
-        )
+        emit(ctx, sessions.summary(result))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -372,14 +322,7 @@ def auth_status(ctx: click.Context) -> None:
     """Show the account and expiration without showing the token."""
     try:
         result = session(ctx)
-        emit(
-            ctx,
-            {
-                "address": result["evmAddress"],
-                "expiresAt": result["expiresAt"],
-                "endpoint": result["endpoint"],
-            },
-        )
+        emit(ctx, sessions.summary(result))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -441,14 +384,18 @@ def history(ctx: click.Context, address: str) -> None:
 @click.pass_context
 def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Read one account balance snapshot from Keeper's subscription."""
-    query = "subscription($user:String!) { userBalances(where:{user:$user}) { amount usd_value token_info { name symbol decimals type } } }"
-    watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        query,
-        {"user": address},
-        once=True,
-        ctx=ctx,
-    )
+    try:
+        emit(
+            ctx,
+            stream.snapshot(
+                ws_url(ctx, ws_endpoint),
+                stream.BALANCES,
+                {"user": address},
+                notify=warn,
+            ),
+        )
+    except stream.StreamError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.group()
@@ -463,52 +410,7 @@ def intent() -> None:
 def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
     """Read Keeper's latest intent records; reconcile a known key."""
     try:
-        data = keeper.request(
-            ctx.obj["endpoint"], keeper.INTENTS, {"user": address, "key": key}
-        )
-        if key and data.get("userIntents"):
-            row = data["userIntents"][0]
-            step = row.get("lifecycleStep")
-            if (
-                row.get("intentKey") == key
-                and str(row.get("evmAddress") or "").lower() == address.lower()
-            ):
-                if row.get("execActor") == "server" and step in (
-                    "exec_fail",
-                    "exec_req_fail",
-                ):
-                    storage.set_status(key, ctx.obj["endpoint"], address, "terminal")
-                elif row.get("execActor") == "server" and step in (
-                    "jwt_pass",
-                    "exec_req_pass",
-                    "exec_pass",
-                ):
-                    storage.set_status(key, ctx.obj["endpoint"], address, "accepted")
-                if (
-                    step == "exec_pass" and row.get("execActor") == "server"
-                ) or step == "exec_finality_observed":
-                    history_data = keeper.request(
-                        ctx.obj["endpoint"], keeper.HISTORY, {"trader": address}
-                    )
-                    matches = [
-                        item
-                        for item in history_data["perp"]["tradeHistory"]
-                        if item.get("intentKey") == key and item.get("trade")
-                    ]
-                    data["matchedTradeHistory"] = matches
-                    if matches:
-                        storage.set_status(
-                            key, ctx.obj["endpoint"], address, "terminal"
-                        )
-        elif key and data.get("userIntents") == []:
-            # Keeper has no record. Past its admission expiry it never will,
-            # so the key no longer blocks new trades.
-            local = storage.mark_absent(
-                key, ctx.obj["endpoint"], address, keeper.ABSENT_AFTER_SECONDS
-            )
-            if local is not None:
-                data["localStatus"] = local
-        emit(ctx, data)
+        emit(ctx, reconcile.reconcile(ctx.obj["endpoint"], address, key))
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -526,14 +428,13 @@ def trade() -> None:
     """Submit authenticated trading intents."""
 
 
-def submit(ctx: click.Context, payload: dict[str, Any], dry_run: bool) -> None:
-    try:
-        if dry_run:
-            emit(ctx, {"dryRun": True, "intent": payload})
-            return
-        emit(ctx, intents.submit(ctx.obj["endpoint"], session(ctx), payload))
-    except (ValueError, keeper.KeeperError) as exc:
-        raise click.ClickException(str(exc)) from exc
+def loader(ctx: click.Context) -> trading.SessionLoader:
+    """Return a loader for the active session that prompts only when called."""
+    return lambda: session(ctx)
+
+
+def warn(message: str) -> None:
+    click.echo(message, err=True)
 
 
 @trade.command("open")
@@ -571,49 +472,24 @@ def trade_open(
 ) -> None:
     """Open a market, limit, or stop trade."""
     try:
-        payload = intents.open_intent(
-            market_id,
-            side,
-            order_type,
-            amount,
-            leverage,
-            price,
-            slippage,
-            take_profit,
-            stop_loss,
+        emit(
+            ctx,
+            trading.open_trade(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                market_id=market_id,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                leverage=leverage,
+                price=price,
+                slippage=slippage,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                dry_run=dry_run,
+                notify=warn,
+            ),
         )
-        if order_type == "market" and dry_run:
-            emit(
-                ctx,
-                {"dryRun": True, "requiresMarketPriceRefresh": True, "intent": payload},
-            )
-        elif order_type == "market":
-            active = session(ctx)
-            if price is not None:
-                click.echo(
-                    "Market orders use the refreshed Keeper price; --price is a dry-run reference.",
-                    err=True,
-                )
-            markets = keeper.request(ctx.obj["endpoint"], keeper.MARKETS)["perp"][
-                "borrowings"
-            ]
-            candidates = [
-                item
-                for item in markets
-                if item["marketId"] == market_id
-                and item["collateralToken"]["symbol"] == "USDC"
-                and item["isOpen"]
-            ]
-            if len(candidates) != 1:
-                raise ValueError("Current open USDC market data is unavailable")
-            current_price = format(Decimal(str(candidates[0]["price"])), "f")
-            intents.positive(current_price, "Current price")
-            payload["body"]["intentPrice"] = current_price
-            result = intents.submit(ctx.obj["endpoint"], active, payload)
-            result["referencePrice"] = current_price
-            emit(ctx, result)
-        else:
-            submit(ctx, payload, dry_run)
     except (ValueError, KeyError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -632,8 +508,17 @@ def trade_close(
 ) -> None:
     """Close a position or cancel a pending order."""
     try:
-        submit(ctx, intents.close_intent(trade_id, cancel_order), dry_run)
-    except ValueError as exc:
+        emit(
+            ctx,
+            trading.close_trade(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                cancel_order=cancel_order,
+                dry_run=dry_run,
+            ),
+        )
+    except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -656,14 +541,20 @@ def trade_tpsl(
 ) -> None:
     """Set or clear take-profit and stop-loss prices."""
     try:
-        submit(
+        emit(
             ctx,
-            intents.tpsl_intent(
-                trade_id, take_profit, stop_loss, clear_take_profit, clear_stop_loss
+            trading.set_tpsl(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                clear_take_profit=clear_take_profit,
+                clear_stop_loss=clear_stop_loss,
+                dry_run=dry_run,
             ),
-            dry_run,
         )
-    except ValueError as exc:
+    except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -677,8 +568,17 @@ def trade_leverage(
 ) -> None:
     """Set target leverage without changing TP or SL."""
     try:
-        submit(ctx, intents.leverage_intent(trade_id, leverage), dry_run)
-    except ValueError as exc:
+        emit(
+            ctx,
+            trading.set_leverage(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                leverage=leverage,
+                dry_run=dry_run,
+            ),
+        )
+    except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -711,40 +611,18 @@ def trade_margin(
     The amount is a quote, not a cap: collateral can change before execution.
     """
     try:
-        active = session(ctx)
-        raw, funds, market = margin.snapshot(
-            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+        emit(
+            ctx,
+            trading.change_margin(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                direction=direction,
+                amount=amount,
+                lcd_endpoint=lcd_endpoint,
+                dry_run=dry_run,
+            ),
         )
-        quoted = margin.margin_quote(raw, funds, market, direction, amount)
-        payload = intents.leverage_intent(trade_id, quoted["requestedLeverage"])
-        warning = "The request authorizes target leverage, not an amount cap; the actual margin change may differ if the position changes before execution."
-        if dry_run:
-            emit(
-                ctx,
-                {
-                    "dryRun": True,
-                    "quote": quoted,
-                    "intent": payload,
-                    "warning": warning,
-                },
-            )
-            return
-        fresh_raw, fresh_funds, fresh_market = margin.snapshot(
-            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
-        )
-        fresh_quote = margin.margin_quote(
-            fresh_raw, fresh_funds, fresh_market, direction, amount
-        )
-        if (
-            fresh_raw["collateral_amount"] != raw["collateral_amount"]
-            or fresh_raw["leverage"] != raw["leverage"]
-            or fresh_quote != quoted
-        ):
-            raise ValueError("Position changed; review the margin change again")
-        result = intents.submit(ctx.obj["endpoint"], active, payload)
-        result["quote"] = quoted
-        result["warning"] = warning
-        emit(ctx, result)
     except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -765,44 +643,17 @@ def partial_close(
 ) -> None:
     """Reduce an open USDC position by a whole percentage."""
     try:
-        active = session(ctx)
-        # The snapshot refuses when Keeper's index differs from the contract,
-        # so the reduction is never sized from a lagging collateral amount.
-        raw, _, borrowing = margin.snapshot(
-            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+        emit(
+            ctx,
+            trading.partial_close(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                percent=percent,
+                lcd_endpoint=lcd_endpoint,
+                dry_run=dry_run,
+            ),
         )
-        market_id = borrowing["marketId"]
-        markets = keeper.request(ctx.obj["endpoint"], keeper.MARKETS)["perp"][
-            "borrowings"
-        ]
-        candidates = [
-            item
-            for item in markets
-            if item["marketId"] == market_id
-            and item["collateralToken"]["symbol"] == "USDC"
-        ]
-        if len(candidates) != 1 or not candidates[0]["isOpen"]:
-            raise ValueError("Open market data not available")
-        position = {
-            "id": trade_id,
-            "collateralAmount": raw["collateral_amount"],
-            "leverage": raw["leverage"],
-        }
-        payload = intents.partial_intent(
-            position, percent, Decimal(str(candidates[0]["minPositionSizeUSD"]))
-        )
-        if dry_run:
-            emit(ctx, {"dryRun": True, "intent": payload})
-        else:
-            latest, _, _ = margin.snapshot(
-                ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
-            )
-            if (
-                latest["collateral_amount"] != raw["collateral_amount"]
-                or latest["leverage"] != raw["leverage"]
-            ):
-                raise ValueError("Position changed; review the reduction again")
-            emit(ctx, intents.submit(ctx.obj["endpoint"], active, payload))
     except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -819,8 +670,8 @@ def watch() -> None:
 def watch_positions(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Follow position snapshots for ADDRESS until interrupted."""
     watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        "subscription($user:String!) { perpTrades(where:{trader:$user}) { id trader isOpen isLong tradeType leverage openPrice tp sl } }",
+        ws_url(ctx, ws_endpoint),
+        stream.POSITIONS,
         {"user": address},
     )
 
@@ -832,8 +683,8 @@ def watch_positions(ctx: click.Context, address: str, ws_endpoint: str | None) -
 def watch_balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Follow balances, preserving Sai deposit and credit labels."""
     watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        "subscription($user:String!) { userBalances(where:{user:$user}) { amount usd_value token_info { name symbol decimals type } } }",
+        ws_url(ctx, ws_endpoint),
+        stream.BALANCES,
         {"user": address},
     )
 
@@ -845,97 +696,38 @@ def watch_balances(ctx: click.Context, address: str, ws_endpoint: str | None) ->
 def watch_price(ctx: click.Context, token_id: int, ws_endpoint: str | None) -> None:
     """Follow the current price of TOKEN_ID."""
     watch_stream(
-        ws_endpoint or derive_ws(ctx.obj["endpoint"]),
-        "subscription($id:Int!) { tokenPricesUsd(where:{tokenId:$id}) { priceUsd token { id symbol } lastUpdatedBlock { block block_ts } } }",
+        ws_url(ctx, ws_endpoint),
+        stream.PRICE,
         {"id": token_id},
     )
 
 
-def derive_ws(endpoint: str) -> str:
-    parsed = urlsplit(endpoint)
-    if parsed.scheme not in ("http", "https"):
-        raise click.ClickException("Cannot derive WebSocket endpoint")
-    return parsed._replace(scheme="wss" if parsed.scheme == "https" else "ws").geturl()
+def ws_url(ctx: click.Context, ws_endpoint: str | None) -> str:
+    try:
+        return ws_endpoint or stream.derive_ws(ctx.obj["endpoint"])
+    except stream.StreamError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
-def watch_stream(
-    ws_endpoint: str,
-    query: str,
-    variables: dict[str, Any],
-    once: bool = False,
-    ctx: click.Context | None = None,
-) -> None:
-    parsed = urlsplit(ws_endpoint)
-    if parsed.scheme != "wss" and not (
-        parsed.scheme == "ws" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-    ):
-        raise click.ClickException(
-            "WebSocket endpoint must use WSS, except on loopback"
-        )
-    while True:
-        try:
-            with connect(
-                ws_endpoint,
-                subprotocols=[Subprotocol("graphql-transport-ws")],
-                open_timeout=10,
-            ) as socket:
-                socket.send(json.dumps({"type": "connection_init"}))
-                message = json.loads(socket.recv(timeout=10))
-                if message.get("type") != "connection_ack":
-                    raise ValueError("Keeper did not acknowledge WebSocket connection")
-                socket.send(
-                    json.dumps(
-                        {
-                            "id": "1",
-                            "type": "subscribe",
-                            "payload": {"query": query, "variables": variables},
-                        }
-                    )
+def watch_stream(ws_endpoint: str, query: str, variables: dict[str, Any]) -> None:
+    """Print each snapshot as a JSON line, reconnecting until interrupted."""
+    try:
+        stream.check_ws(ws_endpoint)
+        while True:
+            try:
+                for payload in stream.payloads(
+                    ws_endpoint, query, variables, notify=warn
+                ):
+                    click.echo(json.dumps(payload, separators=(",", ":")))
+            except stream.DISCONNECTS as exc:
+                click.echo(
+                    f"Disconnected ({type(exc).__name__}); data may be stale;"
+                    " reconnecting in 2s",
+                    err=True,
                 )
-                click.echo("Connected; waiting for current snapshot", err=True)
-                while True:
-                    message = json.loads(socket.recv(timeout=20 if once else None))
-                    if message.get("type") == "ping":
-                        socket.send(json.dumps({"type": "pong"}))
-                    elif message.get("type") == "next":
-                        payload = message.get("payload")
-                        expected = next(
-                            (
-                                name
-                                for name in (
-                                    "userBalances",
-                                    "perpTrades",
-                                    "tokenPricesUsd",
-                                )
-                                if name in query
-                            ),
-                            None,
-                        )
-                        if (
-                            not isinstance(payload, dict)
-                            or payload.get("errors")
-                            or not isinstance(payload.get("data"), dict)
-                            or expected is None
-                            or not isinstance(payload["data"].get(expected), list)
-                        ):
-                            raise click.ClickException(
-                                "Keeper subscription returned incomplete data"
-                            )
-                        if once:
-                            if ctx is not None:
-                                emit(ctx, payload)
-                            return
-                        click.echo(json.dumps(payload, separators=(",", ":")))
-                    elif message.get("type") in ("error", "complete"):
-                        raise click.ClickException("Keeper subscription ended")
-        except (OSError, TimeoutError, WebSocketException) as exc:
-            if once:
-                raise click.ClickException("Could not read balance snapshot") from exc
-            click.echo(
-                f"Disconnected ({type(exc).__name__}); data may be stale; reconnecting in 2s",
-                err=True,
-            )
-            time.sleep(2)
+                time.sleep(2)
+    except stream.StreamError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

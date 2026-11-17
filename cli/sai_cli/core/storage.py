@@ -104,6 +104,11 @@ def load_session() -> dict[str, str]:
         raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
 
 
+def session_exists() -> bool:
+    """Report whether a session file is stored, without reading it."""
+    return (home() / "session.json").is_file()
+
+
 def delete_session() -> bool:
     """Delete the stored session file. Returns False when there was none."""
     try:
