@@ -15,14 +15,40 @@ balances ADDRESS`, and `account history ADDRESS` for data. Use `watch price
 TOKEN_ID`, `watch positions ADDRESS`, or `watch balances ADDRESS` for streams.
 Streams reconnect after transport interruptions and emit a new snapshot.
 
-Use `auth import` to provide an existing session through a hidden prompt.
+## Connect Sai
+
+When the person asks you to connect Sai:
+
+1. Ask them to copy their session token in Sai Web.
+2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
+   stores the token, clears the clipboard, and prints `evmAddress` and
+   `expiresAt`.
+3. If it says no clipboard command works (for example over SSH), ask the
+   person to run `sai auth import` in their own terminal, then continue.
+
+Never ask the person to paste the token into the chat, and never pass it as an
+argument, environment variable, or piped input. `auth import` does not accept
+those.
+
+People with a Foundry keystore can instead run `sai auth login --account NAME`
+in their own terminal; `cast` prompts for the keystore password.
 `auth login --address ADDRESS --wallet NAME` is experimental and works only on
 workstations with the private `ud` wallet manager.
-The encrypted local token expires according to Keeper's session. `auth status`
-shows the address and expiry without revealing credentials. Write commands ask
-for the local passphrase, or read it from an inherited file descriptor given to
-the global `--passphrase-fd` option. Never put a token or passphrase in command
-arguments, environment variables, output, or logs.
+
+Once connected, commands need no prompt until the session expires. `auth
+status` shows the address and expiry without revealing the token. Tell the
+person what the token is if they ask: it is their Sai Web browser session
+token, lasts as long as Keeper issues it (30 days in production), authorizes
+all trading on their deposited funds, and cannot be revoked yet. Signing out
+of Sai Web does not sign out the CLI.
+
+The default keyring backend `test` encrypts the stored session with a key
+built into the CLI and never prompts. If the person chose `--keyring-backend
+file`, commands ask for their passphrase or read it from an inherited file
+descriptor given to `--passphrase-fd`. Never put a passphrase in arguments,
+environment variables, output, or logs.
+
+## Trading
 
 Trade commands are `trade open`, `trade close`, `trade partial-close`, and
 `trade tpsl`, `trade leverage`, and `trade margin`. Use each command's `--help` for parameters. `--dry-run` prints

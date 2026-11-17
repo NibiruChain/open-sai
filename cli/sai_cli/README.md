@@ -5,14 +5,53 @@ The CLI connects to mainnet Keeper by default and accepts `--endpoint` for a
 different network. `account balances` and `watch` accept `--ws-endpoint` if the
 WebSocket service differs from the HTTP endpoint.
 
-`auth import` reads an existing session token from a hidden prompt. Public
-users should use it for now. `auth login --address ADDRESS --wallet NAME` is
-experimental and workstation-only: it signs a Keeper challenge with the private
-`ud` wallet manager, which is not publicly available. Both protect the session at rest with a passphrase. The session
-is scoped to its account and endpoint and expires; device-specific credentials
-and revocation are not implemented. For unattended processes, supply a private
-inherited file descriptor with `--passphrase-fd`; do not pass the secret itself
-as an argument or environment variable.
+## Connecting
+
+The CLI trades with a Keeper session token, the same HS256 JWT Sai Web keeps
+in the browser. Keeper issues it for 30 days in production. It authorizes
+every trade kind on the account's deposited funds, and Keeper cannot revoke it
+yet: signing out of Sai Web clears only the browser copy, not the CLI's.
+
+`auth import` stores a token copied from Sai Web:
+
+- With a terminal, it asks for the token at a hidden prompt. Press Enter
+  without typing to read the clipboard.
+- Without a terminal, as when an agent runs it, it reads the clipboard with the
+  first command that works: `pbpaste`, `wl-paste`, `xclip`, or `powershell.exe
+  Get-Clipboard` (WSL and Windows). If none works, as over SSH, it exits
+  non-zero and asks for the person to run `sai auth import` in their own
+  terminal.
+- It never reads the token from arguments, environment variables, or piped
+  stdin, and never prints it. It prints only `evmAddress` and `expiresAt`.
+- After storing the token, it clears the clipboard if the clipboard still holds
+  the token.
+
+`auth login --account NAME` signs Keeper's challenge with the Foundry keystore
+`NAME`. Before signing, the CLI checks that the typed data has primary type
+`UserTradingSession`, domain `Sai` version `1`, your address, and the issued
+challenge nonce. It then runs `cast wallet sign --account NAME --data
+--from-file PATH` on your terminal, so `cast` prompts for the keystore
+password. Without `--address`, the CLI first runs `cast wallet address
+--account NAME`, which prompts for the password too.
+`auth login --address ADDRESS --wallet NAME` is experimental and
+workstation-only: it signs with the private `ud` wallet manager.
+
+The session is bound to its account and Keeper endpoint and expires with the
+token. Global option `--keyring-backend` (environment variable
+`SAI_KEYRING_BACKEND`) chooses how `$SAI_HOME/trader/session.json` is
+encrypted:
+
+- `test` (default): AES-GCM with a fixed key built into the CLI, like the
+  Cosmos SDK `test` keyring. No prompt, so agents can run authenticated
+  commands. This only keeps the token out of plaintext; anyone who can read the
+  file and this source can decrypt it.
+- `file`: AES-GCM with a key derived from your passphrase by scrypt. Commands
+  that need the session prompt for it, or read it from an inherited file
+  descriptor given to `--passphrase-fd`. Sessions saved before keyring
+  backends existed load under `file`.
+
+
+## Commands
 
 Commands include `market list`, `market prices`, `account positions ADDRESS`,
 `account balances ADDRESS`, `account history ADDRESS`, `trade open`, `trade
