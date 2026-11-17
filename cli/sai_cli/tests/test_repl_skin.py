@@ -73,7 +73,10 @@ def test_repl_help_maps_to_click_help():
 
 def test_repl_writes_history_and_shows_help(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SAI_HOME", str(tmp_path))
-    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "json": True})
+    ctx = click.Context(
+        main,
+        obj={"endpoint": keeper.MAINNET_HTTP, "json": True, "keyring_backend": "test"},
+    )
     with create_pipe_input() as pipe:
         pipe.send_text("help\rhelp trade\r")
         pipe.close()

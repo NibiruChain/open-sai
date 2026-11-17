@@ -116,6 +116,8 @@ def partial_close(monkeypatch, indexed: int, contract: int, *args: str):
             main,
             [
                 "--json",
+                "--keyring-backend",
+                "file",
                 "--passphrase-fd",
                 str(read_fd),
                 "trade",

@@ -148,7 +148,9 @@ def test_passphrase_file_descriptor(session):
     os.close(write_fd)
     try:
         result = CliRunner().invoke(
-            main, ["--passphrase-fd", str(read_fd), "auth", "status"]
+            main,
+            ["--keyring-backend", "file", "--passphrase-fd", str(read_fd)]
+            + ["auth", "status"],
         )
     finally:
         os.close(read_fd)
@@ -168,7 +170,9 @@ def test_session_refuses_expired_or_wrong_network(session, failure):
     os.close(write_fd)
     try:
         result = CliRunner().invoke(
-            main, ["--passphrase-fd", str(read_fd), "auth", "status"]
+            main,
+            ["--keyring-backend", "file", "--passphrase-fd", str(read_fd)]
+            + ["auth", "status"],
         )
     finally:
         os.close(read_fd)
