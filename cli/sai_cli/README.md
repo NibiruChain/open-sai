@@ -36,20 +36,23 @@ signs, the CLI checks that the typed data has primary type
 `UserTradingSession`, domain `Sai` version `1`, your address, and the issued
 challenge nonce.
 
-- `auth login --wallet NAME` uses the `ud` wallet manager. The CLI reads the
-  address from `ud evm wallet show NAME`, then runs `ud evm wallet run NAME --
-  wallet sign --data --from-file PATH`. `ud` hands `cast` the keystore
-  password itself, so nothing prompts. If ud's Cast keystore for `NAME` is
-  `missing` or a `name-conflict`, login fails and names the state.
-- `auth login --account NAME` uses the Foundry keystore `NAME`. If `ud` is on
-  `PATH` and `ud evm wallet show NAME` reports Cast state `matching`, it signs
-  through `ud` as above. Otherwise it runs `cast wallet address --account
-  NAME` and `cast wallet sign --account NAME --data --from-file PATH` on your
-  terminal, and `cast` prompts for the keystore password.
+- `auth login --account NAME` uses the Foundry keystore `NAME`. It runs `cast
+  wallet address --account NAME` and `cast wallet sign --account NAME --data
+  --from-file PATH` on your terminal, and `cast` prompts for the keystore
+  password.
+- `auth login --wallet NAME` is for people who use the `ud` tool. The CLI
+  reads the address from `ud evm wallet show NAME` and signs with `ud evm
+  wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
+  prompt. Login fails unless ud reports the wallet's Cast keystore as
+  `matching`.
 
-`--address ADDRESS` is optional. With `ud`, the CLI refuses to sign when it
-differs from the wallet's address. With `cast`, it replaces `cast wallet
-address` and saves one password prompt.
+`--address ADDRESS` is optional. With `--account`, it replaces `cast wallet
+address` and saves one password prompt. With `--wallet`, the CLI refuses to
+sign when it differs from the wallet's address.
+
+`auth logout` deletes the stored session. It makes no network call, and since
+Keeper cannot revoke tokens yet, a copy of the token elsewhere, such as in Sai
+Web, stays valid until it expires.
 
 The session is bound to its account and Keeper endpoint and expires with the
 token. The CLI writes `$SAI_HOME/trader/session.json` with mode 0600,

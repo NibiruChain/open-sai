@@ -104,6 +104,15 @@ def load_session() -> dict[str, str]:
         raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
 
 
+def delete_session() -> bool:
+    """Delete the stored session file. Returns False when there was none."""
+    try:
+        _session_path().unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 # Version 1 adds `created_at`, the Unix time when the CLI reserved the key.
 SCHEMA_VERSION = 1
 
