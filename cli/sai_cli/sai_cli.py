@@ -7,7 +7,6 @@ import shlex
 import shutil
 import sys
 import time
-from decimal import Decimal
 from importlib import metadata, resources
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,7 +16,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect
 from websockets.typing import Subprotocol
 
-from .core import clipboard, intents, keeper, margin, reconcile, storage
+from .core import clipboard, keeper, margin, reconcile, storage, trading
 from .core import session as sessions
 from .utils.repl_skin import ReplSkin
 
@@ -429,14 +428,13 @@ def trade() -> None:
     """Submit authenticated trading intents."""
 
 
-def submit(ctx: click.Context, payload: dict[str, Any], dry_run: bool) -> None:
-    try:
-        if dry_run:
-            emit(ctx, {"dryRun": True, "intent": payload})
-            return
-        emit(ctx, intents.submit(ctx.obj["endpoint"], session(ctx), payload))
-    except (ValueError, keeper.KeeperError) as exc:
-        raise click.ClickException(str(exc)) from exc
+def loader(ctx: click.Context) -> trading.SessionLoader:
+    """Return a loader for the active session that prompts only when called."""
+    return lambda: session(ctx)
+
+
+def warn(message: str) -> None:
+    click.echo(message, err=True)
 
 
 @trade.command("open")
@@ -474,49 +472,24 @@ def trade_open(
 ) -> None:
     """Open a market, limit, or stop trade."""
     try:
-        payload = intents.open_intent(
-            market_id,
-            side,
-            order_type,
-            amount,
-            leverage,
-            price,
-            slippage,
-            take_profit,
-            stop_loss,
+        emit(
+            ctx,
+            trading.open_trade(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                market_id=market_id,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                leverage=leverage,
+                price=price,
+                slippage=slippage,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                dry_run=dry_run,
+                notify=warn,
+            ),
         )
-        if order_type == "market" and dry_run:
-            emit(
-                ctx,
-                {"dryRun": True, "requiresMarketPriceRefresh": True, "intent": payload},
-            )
-        elif order_type == "market":
-            active = session(ctx)
-            if price is not None:
-                click.echo(
-                    "Market orders use the refreshed Keeper price; --price is a dry-run reference.",
-                    err=True,
-                )
-            markets = keeper.request(ctx.obj["endpoint"], keeper.MARKETS)["perp"][
-                "borrowings"
-            ]
-            candidates = [
-                item
-                for item in markets
-                if item["marketId"] == market_id
-                and item["collateralToken"]["symbol"] == "USDC"
-                and item["isOpen"]
-            ]
-            if len(candidates) != 1:
-                raise ValueError("Current open USDC market data is unavailable")
-            current_price = format(Decimal(str(candidates[0]["price"])), "f")
-            intents.positive(current_price, "Current price")
-            payload["body"]["intentPrice"] = current_price
-            result = intents.submit(ctx.obj["endpoint"], active, payload)
-            result["referencePrice"] = current_price
-            emit(ctx, result)
-        else:
-            submit(ctx, payload, dry_run)
     except (ValueError, KeyError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -535,8 +508,17 @@ def trade_close(
 ) -> None:
     """Close a position or cancel a pending order."""
     try:
-        submit(ctx, intents.close_intent(trade_id, cancel_order), dry_run)
-    except ValueError as exc:
+        emit(
+            ctx,
+            trading.close_trade(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                cancel_order=cancel_order,
+                dry_run=dry_run,
+            ),
+        )
+    except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -559,14 +541,20 @@ def trade_tpsl(
 ) -> None:
     """Set or clear take-profit and stop-loss prices."""
     try:
-        submit(
+        emit(
             ctx,
-            intents.tpsl_intent(
-                trade_id, take_profit, stop_loss, clear_take_profit, clear_stop_loss
+            trading.set_tpsl(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                clear_take_profit=clear_take_profit,
+                clear_stop_loss=clear_stop_loss,
+                dry_run=dry_run,
             ),
-            dry_run,
         )
-    except ValueError as exc:
+    except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -580,8 +568,17 @@ def trade_leverage(
 ) -> None:
     """Set target leverage without changing TP or SL."""
     try:
-        submit(ctx, intents.leverage_intent(trade_id, leverage), dry_run)
-    except ValueError as exc:
+        emit(
+            ctx,
+            trading.set_leverage(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                leverage=leverage,
+                dry_run=dry_run,
+            ),
+        )
+    except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
@@ -614,40 +611,18 @@ def trade_margin(
     The amount is a quote, not a cap: collateral can change before execution.
     """
     try:
-        active = session(ctx)
-        raw, funds, market = margin.snapshot(
-            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+        emit(
+            ctx,
+            trading.change_margin(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                direction=direction,
+                amount=amount,
+                lcd_endpoint=lcd_endpoint,
+                dry_run=dry_run,
+            ),
         )
-        quoted = margin.margin_quote(raw, funds, market, direction, amount)
-        payload = intents.leverage_intent(trade_id, quoted["requestedLeverage"])
-        warning = "The request authorizes target leverage, not an amount cap; the actual margin change may differ if the position changes before execution."
-        if dry_run:
-            emit(
-                ctx,
-                {
-                    "dryRun": True,
-                    "quote": quoted,
-                    "intent": payload,
-                    "warning": warning,
-                },
-            )
-            return
-        fresh_raw, fresh_funds, fresh_market = margin.snapshot(
-            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
-        )
-        fresh_quote = margin.margin_quote(
-            fresh_raw, fresh_funds, fresh_market, direction, amount
-        )
-        if (
-            fresh_raw["collateral_amount"] != raw["collateral_amount"]
-            or fresh_raw["leverage"] != raw["leverage"]
-            or fresh_quote != quoted
-        ):
-            raise ValueError("Position changed; review the margin change again")
-        result = intents.submit(ctx.obj["endpoint"], active, payload)
-        result["quote"] = quoted
-        result["warning"] = warning
-        emit(ctx, result)
     except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -668,44 +643,17 @@ def partial_close(
 ) -> None:
     """Reduce an open USDC position by a whole percentage."""
     try:
-        active = session(ctx)
-        # The snapshot refuses when Keeper's index differs from the contract,
-        # so the reduction is never sized from a lagging collateral amount.
-        raw, _, borrowing = margin.snapshot(
-            ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
+        emit(
+            ctx,
+            trading.partial_close(
+                ctx.obj["endpoint"],
+                loader(ctx),
+                trade_id=trade_id,
+                percent=percent,
+                lcd_endpoint=lcd_endpoint,
+                dry_run=dry_run,
+            ),
         )
-        market_id = borrowing["marketId"]
-        markets = keeper.request(ctx.obj["endpoint"], keeper.MARKETS)["perp"][
-            "borrowings"
-        ]
-        candidates = [
-            item
-            for item in markets
-            if item["marketId"] == market_id
-            and item["collateralToken"]["symbol"] == "USDC"
-        ]
-        if len(candidates) != 1 or not candidates[0]["isOpen"]:
-            raise ValueError("Open market data not available")
-        position = {
-            "id": trade_id,
-            "collateralAmount": raw["collateral_amount"],
-            "leverage": raw["leverage"],
-        }
-        payload = intents.partial_intent(
-            position, percent, Decimal(str(candidates[0]["minPositionSizeUSD"]))
-        )
-        if dry_run:
-            emit(ctx, {"dryRun": True, "intent": payload})
-        else:
-            latest, _, _ = margin.snapshot(
-                ctx.obj["endpoint"], lcd_endpoint, active["evmAddress"], trade_id
-            )
-            if (
-                latest["collateral_amount"] != raw["collateral_amount"]
-                or latest["leverage"] != raw["leverage"]
-            ):
-                raise ValueError("Position changed; review the reduction again")
-            emit(ctx, intents.submit(ctx.obj["endpoint"], active, payload))
     except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
