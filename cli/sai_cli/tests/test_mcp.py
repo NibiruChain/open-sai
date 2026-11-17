@@ -16,7 +16,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
-from sai_cli.core import keeper, storage, stream
+from sai_cli.core import keeper, margin, storage, stream
 from sai_cli.mcp_server import server, tools
 
 ADDRESS = "0x" + "b" * 40
@@ -289,27 +289,248 @@ OPEN_ARGS = {
 }
 
 
+def markets(price: float = 100.5) -> dict[str, Any]:
+    return {
+        "perp": {
+            "borrowings": [
+                {
+                    "marketId": 0,
+                    "price": price,
+                    "isOpen": True,
+                    "minPositionSizeUSD": 1,
+                    "collateralToken": {"id": 1, "symbol": "USDC"},
+                }
+            ]
+        }
+    }
+
+
+def snapshots(monkeypatch, *collaterals: str) -> None:
+    """Make margin.snapshot return one position state per call, in order."""
+    states = iter(
+        (
+            {"collateral_amount": amount, "leverage": "2"},
+            {"available_to_trade": "10000000"},
+            {"marketId": 0, "minLeverage": 1.1, "maxLeverage": 100},
+        )
+        for amount in collaterals
+    )
+    monkeypatch.setattr(margin, "snapshot", lambda *args: next(states))
+
+
+def confirm(
+    mcp: FastMCP, preview_tool: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Preview, and return the trade arguments that bind to the preview."""
+    preview = invoke(mcp, preview_tool, arguments)
+    assert preview["dryRun"] is True
+    return {**arguments, "preview_digest": preview["previewDigest"]}
+
+
 def test_preview_open_is_exactly_what_trade_open_submits(mcp, monkeypatch):
     storage.save_session(stored_session())
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
     preview = invoke(mcp, "preview_open", OPEN_ARGS)
     assert preview["dryRun"] is True
+    assert preview["previewDigest"] == tools.preview_digest(preview)
     assert fake.submitted == []
 
-    result = invoke(mcp, "trade_open", OPEN_ARGS)
+    result = invoke(
+        mcp, "trade_open", {**OPEN_ARGS, "preview_digest": preview["previewDigest"]}
+    )
     assert result["status"] == "accepted"
     assert "not yet confirmed" in result["message"]
     assert fake.intent() == preview["intent"]
     assert fake.submitted[-1]["intentKey"] == result["intentKey"]
 
 
-def test_market_preview_needs_no_session_and_validation_comes_first(mcp):
-    preview = invoke(
-        mcp, "preview_open", {**OPEN_ARGS, "order_type": "market", "price": None}
+def test_digest_is_canonical_and_ignores_the_market_price():
+    preview = {"intent": {"kind": "OPEN_TRADE", "body": {"orderType": "market"}}}
+    priced = {
+        "referencePrice": "1",
+        "intent": {
+            "body": {"intentPrice": "5", "orderType": "market"},
+            "kind": "OPEN_TRADE",
+        },
+    }
+    assert tools.preview_digest(preview) == tools.preview_digest(priced)
+    limit = {"intent": {"kind": "OPEN_TRADE", "body": {"orderType": "limit"}}}
+    assert tools.preview_digest(limit) != tools.preview_digest(
+        {
+            "intent": {
+                "kind": "OPEN_TRADE",
+                "body": {"orderType": "limit", "intentPrice": "5"},
+            }
+        }
     )
+    assert len(tools.preview_digest(limit)) == 64
+
+
+def test_trades_require_the_preview_digest(mcp):
+    for name in TRADE_TOOLS:
+        tool = mcp._tool_manager.get_tool(name)
+        assert tool is not None
+        assert "preview_digest" in tool.parameters["required"], name
+    error = invoke(mcp, "trade_close", {"trade_id": 1, "preview_digest": ""})
+    assert error["code"] == "INVALID_REQUEST"
+    assert "previewDigest" in error["error"]
+
+
+PREVIEWS = (
+    ("preview_open", OPEN_ARGS),
+    ("preview_open", {**OPEN_ARGS, "order_type": "market", "price": None}),
+    ("preview_close", {"trade_id": 7}),
+    ("preview_close", {"trade_id": 7, "cancel_order": True}),
+    ("preview_tpsl", {"trade_id": 7, "take_profit": "120"}),
+    ("preview_leverage", {"trade_id": 7, "leverage": "3"}),
+    ("preview_margin", {"trade_id": 7, "direction": "add", "amount": "1"}),
+    ("preview_partial_close", {"trade_id": 7, "percent": 50}),
+)
+
+
+@pytest.mark.parametrize(("name", "arguments"), PREVIEWS)
+def test_previews_never_submit(mcp, monkeypatch, name, arguments):
+    storage.save_session(stored_session())
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    snapshots(monkeypatch, "4000000")
+    preview = invoke(mcp, name, arguments)
+    assert preview["dryRun"] is True
+    assert len(preview["previewDigest"]) == 64
+    assert all(query != keeper.SUBMIT for query, _ in fake.calls)
+    assert storage.list_pending(ENDPOINT, ADDRESS) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "preview_args", "trade_args"),
+    [
+        ("close", {"trade_id": 7}, {"trade_id": 8}),
+        ("close", {"trade_id": 7}, {"trade_id": 7, "cancel_order": True}),
+        (
+            "leverage",
+            {"trade_id": 7, "leverage": "3"},
+            {"trade_id": 7, "leverage": "4"},
+        ),
+        (
+            "tpsl",
+            {"trade_id": 7, "take_profit": "120"},
+            {"trade_id": 7, "take_profit": "121"},
+        ),
+        ("open", OPEN_ARGS, {**OPEN_ARGS, "amount": "11"}),
+    ],
+)
+def test_trade_that_differs_from_its_preview_is_refused(
+    mcp, monkeypatch, name, preview_args, trade_args
+):
+    storage.save_session(stored_session())
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    digest = confirm(mcp, f"preview_{name}", preview_args)["preview_digest"]
+    error = invoke(mcp, f"trade_{name}", {**trade_args, "preview_digest": digest})
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert "confirmation again" in error["error"]
+    fresh = invoke(mcp, f"preview_{name}", trade_args)
+    assert error["preview"] == fresh
+    assert fake.submitted == []
+    assert storage.list_pending(ENDPOINT, ADDRESS) == []
+
+
+MARKET_ARGS = {**OPEN_ARGS, "order_type": "market", "price": None}
+
+
+def test_market_open_binds_to_the_reference_price(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    fake = FakeKeeper({keeper.MARKETS: markets(price=100)})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_ARGS)
     assert preview["requiresMarketPriceRefresh"] is True
-    error = invoke(mcp, "trade_open", {**OPEN_ARGS, "amount": "-1"})
+    assert preview["referencePrice"] == "100"
+    trade = {
+        **MARKET_ARGS,
+        "preview_digest": preview["previewDigest"],
+        "reference_price": preview["referencePrice"],
+    }
+
+    missing = invoke(mcp, "trade_open", {**trade, "reference_price": None})
+    assert missing["code"] == "INVALID_REQUEST"
+    assert "referencePrice" in missing["error"]
+
+    # Slippage is 1%: a 1.5% move is refused with a fresh preview.
+    fake.answers[keeper.MARKETS] = markets(price=101.5)
+    moved = invoke(mcp, "trade_open", trade)
+    assert moved["code"] == "PRICE_MOVED"
+    assert "1.5000%" in moved["error"]
+    assert moved["preview"]["referencePrice"] == "101.5"
+    assert moved["preview"]["previewDigest"] == preview["previewDigest"]
+    assert fake.submitted == []
+
+    # A 0.5% move is within slippage and submits the refreshed price.
+    fake.answers[keeper.MARKETS] = markets(price=100.5)
+    result = invoke(mcp, "trade_open", trade)
+    assert result["status"] == "accepted"
+    assert result["referencePrice"] == "100.5"
+    assert fake.intent()["body"]["intentPrice"] == "100.5"
+
+
+def test_reference_price_is_only_for_market_orders(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    monkeypatch.setattr(keeper, "request", FakeKeeper())
+    trade = confirm(mcp, "preview_open", OPEN_ARGS)
+    error = invoke(mcp, "trade_open", {**trade, "reference_price": "100"})
+    assert error["code"] == "INVALID_REQUEST"
+
+
+def test_margin_trade_binds_to_the_confirmed_quote(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    args = {"trade_id": 7, "direction": "add", "amount": "1"}
+    snapshots(monkeypatch, "2000000")
+    preview = invoke(mcp, "preview_margin", args)
+    trade = {**args, "preview_digest": preview["previewDigest"]}
+
+    # The position changed after the user confirmed: a fresh, consistent
+    # pair of snapshots still differs from the confirmed quote.
+    snapshots(monkeypatch, "2500000", "2500000")
+    error = invoke(mcp, "trade_margin", trade)
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["quote"]["collateralBefore"] == "2500000"
+    assert fake.submitted == []
+
+    snapshots(monkeypatch, "2000000", "2000000")
+    result = invoke(mcp, "trade_margin", trade)
+    assert result["status"] == "accepted"
+    assert result["quote"] == preview["quote"]
+    assert fake.intent() == preview["intent"]
+
+
+def test_partial_close_trade_binds_to_the_confirmed_size(mcp, monkeypatch):
+    storage.save_session(stored_session())
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    args = {"trade_id": 7, "percent": 50}
+    snapshots(monkeypatch, "4000000")
+    preview = invoke(mcp, "preview_partial_close", args)
+    assert preview["intent"]["body"]["collateral"]["amountUsdc"] == "2000000"
+    trade = {**args, "preview_digest": preview["previewDigest"]}
+
+    snapshots(monkeypatch, "3000000", "3000000")
+    error = invoke(mcp, "trade_partial_close", trade)
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["intent"]["body"]["collateral"]["amountUsdc"] == "1500000"
+    assert fake.submitted == []
+
+    snapshots(monkeypatch, "4000000", "4000000")
+    result = invoke(mcp, "trade_partial_close", trade)
+    assert result["status"] == "accepted"
+    assert fake.intent() == preview["intent"]
+
+
+def test_validation_comes_before_the_session(mcp):
+    error = invoke(
+        mcp, "trade_open", {**OPEN_ARGS, "amount": "-1", "preview_digest": "0" * 64}
+    )
     assert error["code"] == "INVALID_REQUEST"
     assert "Amount" in error["error"]
 
@@ -318,7 +539,7 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
     storage.save_session(stored_session())
     fake = FakeKeeper(lose_ack=True)
     monkeypatch.setattr(keeper, "request", fake)
-    error = invoke(mcp, "trade_close", {"trade_id": 7})
+    error = invoke(mcp, "trade_close", confirm(mcp, "preview_close", {"trade_id": 7}))
     key = fake.submitted[-1]["intentKey"]
     assert error["code"] == "OUTCOME_UNKNOWN"
     assert error["intentKey"] == key
@@ -327,7 +548,7 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
         {"intentKey": key, "kind": "CLOSE_POSITION", "status": "unknown"}
     ]
 
-    blocked = invoke(mcp, "trade_close", {"trade_id": 8})
+    blocked = invoke(mcp, "trade_close", confirm(mcp, "preview_close", {"trade_id": 8}))
     assert blocked["code"] == "INVALID_REQUEST"
     assert key in blocked["error"]
 
@@ -355,7 +576,7 @@ def test_file_backend_session_is_refused_without_a_passphrase(mcp, monkeypatch):
     for name, arguments in (
         ("preview_margin", {"trade_id": 1, "direction": "add", "amount": "5"}),
         ("preview_partial_close", {"trade_id": 1, "percent": 50}),
-        ("trade_close", {"trade_id": 1}),
+        ("trade_close", {"trade_id": 1, "preview_digest": "0" * 64}),
         ("auth_status", {}),
     ):
         error = invoke(mcp, name, arguments)

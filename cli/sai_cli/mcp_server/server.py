@@ -43,7 +43,11 @@ Sai perpetuals trading on Nibiru through Sai Keeper.
 whether a usable session exists.
 - Before any trade, call the matching preview_* tool, show the user the \
 preview, and get their explicit confirmation. Only then call the trade_* \
-tool with the same arguments.
+tool with the same arguments plus the preview's previewDigest, and for a \
+market open also its referencePrice.
+- If a trade_* tool returns PREVIEW_MISMATCH or PRICE_MOVED, nothing was \
+submitted: show the user the new preview in the result, get confirmation \
+again, and retry with the new previewDigest (and referencePrice).
 - "accepted" means Keeper admitted the intent. It does not mean the trade \
 executed. Use intent_status with the intent key to follow it.
 - If a trade returns code OUTCOME_UNKNOWN, call intent_status with its \
@@ -176,8 +180,10 @@ async def preview_open(
 ) -> str:
     """Preview opening a market, limit, or stop trade without submitting.
 
-    A market order preview sets requiresMarketPriceRefresh: the submit uses
-    Keeper's current price.
+    Show the user the result and get confirmation; trade_open then needs its
+    previewDigest. A market order preview sets requiresMarketPriceRefresh
+    and reports Keeper's current price as referencePrice: the submit uses
+    the price current at that time, and trade_open needs referencePrice too.
 
     Args:
         market_id: Market id from market_list.
@@ -213,13 +219,21 @@ async def trade_open(
     amount: str,
     leverage: str,
     slippage: str,
+    preview_digest: str,
     price: str | None = None,
     take_profit: str | None = None,
     stop_loss: str | None = None,
+    reference_price: str | None = None,
 ) -> str:
-    """Submit an open-trade intent. Call preview_open and get the user's
-    explicit confirmation first. `accepted` means Keeper admitted the intent,
-    not that it executed.
+    """Submit an open-trade intent. Call preview_open with the same
+    arguments, show the user the preview, and get their explicit
+    confirmation first. `accepted` means Keeper admitted the intent, not
+    that it executed.
+
+    Refuses without submitting: PREVIEW_MISMATCH when the intent differs
+    from the confirmed preview, and, for a market order, PRICE_MOVED when
+    Keeper's current price moved from reference_price by more than the
+    slippage percent. Both return a new preview to show the user.
 
     Args:
         market_id: Market id from market_list.
@@ -232,10 +246,15 @@ async def trade_open(
             submits Keeper's current price instead.
         take_profit: Optional take-profit price.
         stop_loss: Optional stop-loss price.
+        preview_digest: previewDigest from the confirmed preview_open.
+        reference_price: referencePrice from the confirmed preview_open;
+            required for market orders only.
     """
     return await call(
         tools.open_trade,
         dry_run=False,
+        preview_digest=preview_digest,
+        reference_price=reference_price,
         market_id=market_id,
         side=side,
         order_type=order_type,
@@ -249,7 +268,8 @@ async def trade_open(
 
 
 async def preview_close(trade_id: int, cancel_order: bool = False) -> str:
-    """Preview closing a position or cancelling a pending order.
+    """Preview closing a position or cancelling a pending order. Show the
+    user the result; trade_close needs its previewDigest.
 
     Args:
         trade_id: Trade id from account_positions.
@@ -260,15 +280,24 @@ async def preview_close(trade_id: int, cancel_order: bool = False) -> str:
     )
 
 
-async def trade_close(trade_id: int, cancel_order: bool = False) -> str:
-    """Submit a close or cancel intent. Preview and confirm first.
+async def trade_close(
+    trade_id: int, preview_digest: str, cancel_order: bool = False
+) -> str:
+    """Submit a close or cancel intent. Call preview_close, show the user the
+    preview, and get confirmation first. Refuses with PREVIEW_MISMATCH and a
+    new preview if the intent differs from the confirmed one.
 
     Args:
         trade_id: Trade id from account_positions.
+        preview_digest: previewDigest from the confirmed preview_close.
         cancel_order: True to cancel a pending order instead of closing.
     """
     return await call(
-        tools.close_trade, dry_run=False, trade_id=trade_id, cancel_order=cancel_order
+        tools.close_trade,
+        dry_run=False,
+        trade_id=trade_id,
+        cancel_order=cancel_order,
+        preview_digest=preview_digest,
     )
 
 
@@ -279,7 +308,8 @@ async def preview_tpsl(
     clear_take_profit: bool = False,
     clear_stop_loss: bool = False,
 ) -> str:
-    """Preview setting or clearing take-profit and stop-loss prices.
+    """Preview setting or clearing take-profit and stop-loss prices. Show the
+    user the result; trade_tpsl needs its previewDigest.
 
     Args:
         trade_id: Trade id from account_positions.
@@ -301,15 +331,19 @@ async def preview_tpsl(
 
 async def trade_tpsl(
     trade_id: int,
+    preview_digest: str,
     take_profit: str | None = None,
     stop_loss: str | None = None,
     clear_take_profit: bool = False,
     clear_stop_loss: bool = False,
 ) -> str:
-    """Submit a take-profit and stop-loss change. Preview and confirm first.
+    """Submit a take-profit and stop-loss change. Call preview_tpsl, show the
+    user the preview, and get confirmation first. Refuses with
+    PREVIEW_MISMATCH and a new preview if the intent differs.
 
     Args:
         trade_id: Trade id from account_positions.
+        preview_digest: previewDigest from the confirmed preview_tpsl.
         take_profit: New take-profit price as a decimal string.
         stop_loss: New stop-loss price as a decimal string.
         clear_take_profit: True to remove the take-profit.
@@ -318,6 +352,7 @@ async def trade_tpsl(
     return await call(
         tools.set_tpsl,
         dry_run=False,
+        preview_digest=preview_digest,
         trade_id=trade_id,
         take_profit=take_profit,
         stop_loss=stop_loss,
@@ -327,7 +362,8 @@ async def trade_tpsl(
 
 
 async def preview_leverage(trade_id: int, leverage: str) -> str:
-    """Preview setting target leverage without changing TP or SL.
+    """Preview setting target leverage without changing TP or SL. Show the
+    user the result; trade_leverage needs its previewDigest.
 
     Args:
         trade_id: Trade id from account_positions.
@@ -338,15 +374,22 @@ async def preview_leverage(trade_id: int, leverage: str) -> str:
     )
 
 
-async def trade_leverage(trade_id: int, leverage: str) -> str:
-    """Submit a target-leverage change. Preview and confirm first.
+async def trade_leverage(trade_id: int, leverage: str, preview_digest: str) -> str:
+    """Submit a target-leverage change. Call preview_leverage, show the user
+    the preview, and get confirmation first. Refuses with PREVIEW_MISMATCH
+    and a new preview if the intent differs.
 
     Args:
         trade_id: Trade id from account_positions.
         leverage: Target leverage as a decimal string.
+        preview_digest: previewDigest from the confirmed preview_leverage.
     """
     return await call(
-        tools.set_leverage, dry_run=False, trade_id=trade_id, leverage=leverage
+        tools.set_leverage,
+        dry_run=False,
+        trade_id=trade_id,
+        leverage=leverage,
+        preview_digest=preview_digest,
     )
 
 
@@ -355,7 +398,8 @@ async def preview_margin(trade_id: int, direction: Direction, amount: str) -> st
 
     The change is a target-leverage intent: the amount is a quote, not a
     cap, and the actual change may differ if the position moves first.
-    Needs a signed-in session to read the position.
+    Needs a signed-in session to read the position. Show the user the quote;
+    trade_margin needs its previewDigest.
 
     Args:
         trade_id: Trade id from account_positions.
@@ -371,16 +415,21 @@ async def preview_margin(trade_id: int, direction: Direction, amount: str) -> st
     )
 
 
-async def trade_margin(trade_id: int, direction: Direction, amount: str) -> str:
-    """Submit a margin change. Preview and confirm first.
+async def trade_margin(
+    trade_id: int, direction: Direction, amount: str, preview_digest: str
+) -> str:
+    """Submit a margin change. Call preview_margin, show the user the quote,
+    and get confirmation first.
 
-    Refuses if the position changed since a fresh quote. The amount is a
-    quote, not a cap.
+    The digest covers the intent and the quote, so it refuses with
+    PREVIEW_MISMATCH and a new preview if the position changed since the
+    confirmed quote. The amount is a quote, not a cap.
 
     Args:
         trade_id: Trade id from account_positions.
         direction: add or remove.
         amount: USDC amount to quote, as a decimal string.
+        preview_digest: previewDigest from the confirmed preview_margin.
     """
     return await call(
         tools.change_margin,
@@ -388,6 +437,7 @@ async def trade_margin(trade_id: int, direction: Direction, amount: str) -> str:
         trade_id=trade_id,
         direction=direction,
         amount=amount,
+        preview_digest=preview_digest,
     )
 
 
@@ -395,7 +445,8 @@ async def preview_partial_close(trade_id: int, percent: int) -> str:
     """Preview reducing an open USDC position by a whole percentage.
 
     Sized from contract state and checked against the market minimum.
-    Needs a signed-in session to read the position.
+    Needs a signed-in session to read the position. Show the user the
+    result; trade_partial_close needs its previewDigest.
 
     Args:
         trade_id: Trade id from account_positions.
@@ -406,17 +457,24 @@ async def preview_partial_close(trade_id: int, percent: int) -> str:
     )
 
 
-async def trade_partial_close(trade_id: int, percent: int) -> str:
-    """Submit a partial close. Preview and confirm first.
+async def trade_partial_close(trade_id: int, percent: int, preview_digest: str) -> str:
+    """Submit a partial close. Call preview_partial_close, show the user the
+    preview, and get confirmation first.
 
-    Refuses if the position changed since the reduction was sized.
+    Refuses with PREVIEW_MISMATCH and a new preview if the position changed
+    since the confirmed reduction was sized.
 
     Args:
         trade_id: Trade id from account_positions.
         percent: Whole percentage to close, 1 to 99.
+        preview_digest: previewDigest from the confirmed preview_partial_close.
     """
     return await call(
-        tools.partial_close, dry_run=False, trade_id=trade_id, percent=percent
+        tools.partial_close,
+        dry_run=False,
+        trade_id=trade_id,
+        percent=percent,
+        preview_digest=preview_digest,
     )
 
 
