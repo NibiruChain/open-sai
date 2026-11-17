@@ -56,6 +56,9 @@ intentKey. Never resubmit blindly; the first request may have gone through.
 retrying. trade_open refuses with RECENT_OPEN_PENDING while a recent open \
 is unknown or accepted; check those intents with intent_status, and pass \
 allow_concurrent_open=true only if the user wants another open position.
+- Account reads report the address they read. With addressSource \
+"session", the address came from the stored sign-in; say so to the user, \
+and pass address explicitly to read any other account.
 - Never ask the user for a session token or passphrase. They sign in \
 themselves by running `sai auth login` or `sai auth import` in a terminal.
 - Never read MCP client config files to learn about this server; call \
@@ -119,8 +122,11 @@ async def market_prices() -> str:
 async def account_positions(address: str | None = None) -> str:
     """List open positions and pending orders.
 
+    The result names the `address` read and its `addressSource`.
+
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account.
+        address: EVM address (0x...). Defaults to the signed-in account,
+            unless its session is for another Keeper endpoint.
     """
     return await call(tools.account_positions, address)
 
@@ -128,8 +134,11 @@ async def account_positions(address: str | None = None) -> str:
 async def account_history(address: str | None = None) -> str:
     """Read the latest 50 trade history rows.
 
+    The result names the `address` read and its `addressSource`.
+
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account.
+        address: EVM address (0x...). Defaults to the signed-in account,
+            unless its session is for another Keeper endpoint.
     """
     return await call(tools.account_history, address)
 
@@ -137,8 +146,11 @@ async def account_history(address: str | None = None) -> str:
 async def account_balances(address: str | None = None) -> str:
     """Read one balance snapshot, including Sai deposits and credits.
 
+    The result names the `address` read and its `addressSource`.
+
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account.
+        address: EVM address (0x...). Defaults to the signed-in account,
+            unless its session is for another Keeper endpoint.
     """
     return await call(tools.account_balances, address)
 
@@ -147,9 +159,11 @@ async def intent_local(address: str | None = None) -> str:
     """List intents this machine recorded, with their local status.
 
     Status `unknown` blocks new trades until intent_status reconciles it.
+    The result names the `address` read and its `addressSource`.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account.
+        address: EVM address (0x...). Defaults to the signed-in account,
+            unless its session is for another Keeper endpoint.
     """
     return await call(tools.intent_local, address)
 
@@ -157,12 +171,15 @@ async def intent_local(address: str | None = None) -> str:
 async def intent_status(address: str | None = None, key: str | None = None) -> str:
     """Read Keeper's latest intent records; with KEY, reconcile that intent.
 
-    Reconciling updates only the local record: a server failure or matched
+    With KEY this also writes: it updates this machine's local intent cache,
+    the record intent_local lists and trades check. It never changes
+    anything on Keeper. Reconciling updates only the local record: a server failure or matched
     trade history is final, a server acceptance is accepted, and a key
     Keeper never recorded past its admission window stops blocking trades.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account.
+        address: EVM address (0x...). Defaults to the signed-in account,
+            unless its session is for another Keeper endpoint.
         key: Intent key from a trade result or an OUTCOME_UNKNOWN error.
     """
     return await call(tools.intent_status, address, key)

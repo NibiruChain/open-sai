@@ -42,6 +42,11 @@ FILE_BACKEND_ADDRESS = (
     "No address given, and the stored session uses keyring backend file, so"
     " the MCP server cannot read its address. Pass address."
 )
+OTHER_ENDPOINT = (
+    "No address given, and the stored session belongs to a different Keeper"
+    " endpoint than this server's SAI_ENDPOINT, so its address may not be the"
+    " account meant here. Pass address explicitly."
+)
 INTERNAL = "Unexpected error in the Sai MCP server; see its stderr log"
 NEEDS_DIGEST = (
     "preview_digest is required: call the matching preview_* tool, show the"
@@ -197,24 +202,35 @@ def session_loader(config: Config) -> trading.SessionLoader:
     return load
 
 
-def resolve_address(address: str | None) -> str:
-    """Return ADDRESS, or the stored session's account when it is omitted.
+def resolve_address(config: Config, address: str | None) -> dict[str, Any]:
+    """Return ADDRESS, or the stored session's account when it is omitted,
+    with where it came from.
 
-    Reads need only the address, so an expired session still supplies it.
+    Reads need only the address, so an expired session still supplies it,
+    flagged with `sessionExpired`. A session for another endpoint does not.
     """
     if address:
-        return address
+        return {"address": address, "addressSource": "argument"}
     try:
         backend = storage.stored_backend()
         if backend is None:
             raise SessionUnavailable(NO_ADDRESS)
         if backend == "file":
             raise SessionUnavailable(FILE_BACKEND_ADDRESS)
-        return storage.load_session()["evmAddress"]
+        stored = storage.load_session()
+        expiry = datetime.fromisoformat(stored["expiresAt"])
     except SessionUnavailable:
         raise
     except ValueError as exc:
         raise SessionUnavailable(f"{exc}. Or pass address.") from exc
+    if stored.get("endpoint") != config.endpoint:
+        raise SessionUnavailable(OTHER_ENDPOINT)
+    return {
+        "address": stored["evmAddress"],
+        "addressSource": "session",
+        "sessionExpired": expiry <= datetime.now(UTC),
+        "endpointMatches": True,
+    }
 
 
 def session_state(config: Config) -> dict[str, Any]:
@@ -268,28 +284,40 @@ def market_prices(config: Config) -> dict[str, Any]:
 
 
 def account_positions(config: Config, address: str | None) -> dict[str, Any]:
-    trader = resolve_address(address)
-    return keeper.request(config.endpoint, keeper.POSITIONS, {"trader": trader})
+    account = resolve_address(config, address)
+    variables = {"trader": account["address"]}
+    return {**account, **keeper.request(config.endpoint, keeper.POSITIONS, variables)}
 
 
 def account_history(config: Config, address: str | None) -> dict[str, Any]:
-    trader = resolve_address(address)
-    return keeper.request(config.endpoint, keeper.HISTORY, {"trader": trader})
+    account = resolve_address(config, address)
+    variables = {"trader": account["address"]}
+    return {**account, **keeper.request(config.endpoint, keeper.HISTORY, variables)}
 
 
 def account_balances(config: Config, address: str | None) -> dict[str, Any]:
-    user = resolve_address(address)
-    return stream.snapshot(config.ws_endpoint, stream.BALANCES, {"user": user})
+    account = resolve_address(config, address)
+    variables = {"user": account["address"]}
+    return {
+        **account,
+        **stream.snapshot(config.ws_endpoint, stream.BALANCES, variables),
+    }
 
 
-def intent_local(config: Config, address: str | None) -> list[dict[str, Any]]:
-    return storage.list_pending(config.endpoint, resolve_address(address))
+def intent_local(config: Config, address: str | None) -> dict[str, Any]:
+    account = resolve_address(config, address)
+    pending = storage.list_pending(config.endpoint, account["address"])
+    return {**account, "intents": pending}
 
 
 def intent_status(
     config: Config, address: str | None, key: str | None
 ) -> dict[str, Any]:
-    return reconcile.reconcile(config.endpoint, resolve_address(address), key)
+    account = resolve_address(config, address)
+    return {
+        **account,
+        **reconcile.reconcile(config.endpoint, account["address"], key),
+    }
 
 
 # Preview binding

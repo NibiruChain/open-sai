@@ -253,11 +253,54 @@ def test_account_positions_defaults_to_the_session_address(mcp, monkeypatch):
     assert fake.calls == []
 
     storage.save_session(stored_session())
-    assert invoke(mcp, "account_positions") == {"perp": {"trades": []}}
+    assert invoke(mcp, "account_positions") == {
+        "address": ADDRESS,
+        "addressSource": "session",
+        "sessionExpired": False,
+        "endpointMatches": True,
+        "perp": {"trades": []},
+    }
     assert fake.calls[-1] == (keeper.POSITIONS, {"trader": ADDRESS})
     other = "0x" + "c" * 40
-    invoke(mcp, "account_positions", {"address": other})
+    assert invoke(mcp, "account_positions", {"address": other}) == {
+        "address": other,
+        "addressSource": "argument",
+        "perp": {"trades": []},
+    }
     assert fake.calls[-1] == (keeper.POSITIONS, {"trader": other})
+
+
+def test_expired_session_still_supplies_the_address_flagged(mcp, monkeypatch):
+    storage.save_session(stored_session(hours=-1))
+    fake = FakeKeeper({keeper.HISTORY: {"perp": {"tradeHistory": []}}})
+    monkeypatch.setattr(keeper, "request", fake)
+    result = invoke(mcp, "account_history")
+    assert result["address"] == ADDRESS
+    assert result["addressSource"] == "session"
+    assert result["sessionExpired"] is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "account_positions",
+        "account_history",
+        "account_balances",
+        "intent_local",
+        "intent_status",
+    ],
+)
+def test_session_for_another_endpoint_is_refused_for_the_default_address(
+    mcp, monkeypatch, name
+):
+    storage.save_session(stored_session(endpoint="http://127.0.0.1:1/query"))
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    monkeypatch.setattr(stream, "snapshot", fake)
+    error = invoke(mcp, name)
+    assert error["code"] == "SESSION_UNAVAILABLE"
+    assert "Pass address explicitly" in error["error"]
+    assert fake.calls == []
 
 
 def test_account_balances_reads_one_snapshot(mcp, monkeypatch):
@@ -270,7 +313,11 @@ def test_account_balances_reads_one_snapshot(mcp, monkeypatch):
 
     monkeypatch.setattr(stream, "snapshot", snapshot)
     result = invoke(mcp, "account_balances", {"address": ADDRESS})
-    assert result == {"data": {"userBalances": []}}
+    assert result == {
+        "address": ADDRESS,
+        "addressSource": "argument",
+        "data": {"userBalances": []},
+    }
     assert seen == [(keeper.MAINNET_WS, {"user": ADDRESS})]
 
 
@@ -596,7 +643,9 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
     assert error["code"] == "OUTCOME_UNKNOWN"
     assert error["intentKey"] == key
     assert "intent_status" in error["next"]
-    assert invoke(mcp, "intent_local") == [
+    local = invoke(mcp, "intent_local")
+    assert local["address"] == ADDRESS and local["addressSource"] == "session"
+    assert local["intents"] == [
         {"intentKey": key, "kind": "CLOSE_POSITION", "status": "unknown"}
     ]
 
@@ -618,7 +667,8 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
     status = invoke(mcp, "intent_status", {"key": key})
     assert status["matchedTradeHistory"] == [trade]
     assert fake.calls[-2] == (keeper.INTENTS, {"user": ADDRESS, "key": key})
-    assert invoke(mcp, "intent_local")[0]["status"] == "terminal"
+    assert status["address"] == ADDRESS
+    assert invoke(mcp, "intent_local")["intents"][0]["status"] == "terminal"
 
 
 def test_file_backend_session_is_refused_without_a_passphrase(mcp, monkeypatch):
@@ -636,8 +686,8 @@ def test_file_backend_session_is_refused_without_a_passphrase(mcp, monkeypatch):
         assert "keyring backend file" in error["error"]
         assert "sai auth login" in error["error"]
     assert invoke(mcp, "account_positions")["code"] == "SESSION_UNAVAILABLE"
-    assert invoke(mcp, "account_positions", {"address": ADDRESS}) == {
-        "perp": {"trades": []}
+    assert invoke(mcp, "account_positions", {"address": ADDRESS})["perp"] == {
+        "trades": []
     }
     info = invoke(mcp, "mcp_info")["session"]
     assert info["backend"] == "file" and info["usable"] is False
