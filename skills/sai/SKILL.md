@@ -64,6 +64,18 @@ prompts for a passphrase. If it reports a passphrase-encrypted session from an
 older version, ask the person to sign in again with `sai auth import` or `sai
 auth login`.
 
+## MCP Server
+
+If Sai tools such as `mcp_info` and `market_prices` are available, prefer
+them over shell commands. Call `mcp_info` first. Trade tools exist only when
+the server runs with `SAI_MCP_EXPOSED_TOOLS=all`. Before any trade, call the
+matching `preview_*` tool, show the person the result, and wait for explicit
+confirmation. Then call the `trade_*` tool with the preview's `previewDigest`
+(and `referencePrice` for a market open). On `PREVIEW_MISMATCH` or
+`PRICE_MOVED`, show the fresh preview and confirm again. After a timeout or
+unknown outcome, call `intent_local` and `intent_status`; never resubmit
+blindly.
+
 ## Trading
 
 Trade commands are `trade open`, `trade close`, `trade partial-close`, and
