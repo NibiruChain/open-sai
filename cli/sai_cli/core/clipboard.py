@@ -28,7 +28,17 @@ TOOLS = (
         clear=("xclip", "-selection", "clipboard"),
     ),
     Tool(
-        read=("powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"),
+        # Windows PowerShell writes the console code page unless told to
+        # use UTF-8; -Raw keeps line breaks instead of an array of lines.
+        read=(
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            (
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
+                " Get-Clipboard -Raw"
+            ),
+        ),
         clear=(
             "powershell.exe",
             "-NoProfile",
@@ -49,7 +59,8 @@ def read() -> tuple[str, Tool] | None:
     """Return the clipboard text and the tool that read it.
 
     Tries each installed tool in order and skips one that fails, such as
-    `wl-paste` without a Wayland display. Returns None when none works.
+    `wl-paste` without a Wayland display, or whose output is not UTF-8
+    text, such as a copied image. Returns None when none works.
     """
     for tool in available():
         try:
@@ -57,13 +68,13 @@ def read() -> tuple[str, Tool] | None:
                 tool.read,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
                 timeout=10,
                 check=True,
             )
-        except (OSError, subprocess.SubprocessError):
+            text = proc.stdout.decode("utf-8-sig")
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
             continue
-        return proc.stdout.strip(), tool
+        return text.strip(), tool
     return None
 
 
