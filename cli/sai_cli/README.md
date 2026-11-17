@@ -38,9 +38,13 @@ The CLI refuses the quote if the indexed position and contract disagree. Wait
 for the index to synchronize and retry; no margin intent has been submitted.
 
 The CLI persists non-secret request identities under `$SAI_HOME/trader` or
-`~/.sai/trader`. A network error after submission leaves the outcome unknown.
-Reconcile the original intent before trying another action. Keeper admission
-does not establish execution or finality.
+`~/.sai/trader`. A network error after submission leaves the outcome unknown,
+and an unknown intent blocks new trades on the account. Reconcile it with
+`intent status ADDRESS --key KEY`. If Keeper has no record of the key five
+minutes after submission, past Keeper's two-minute admission expiry, the CLI
+marks it `absent` and trading resumes. A connection that fails before the
+request is sent marks the intent `not_sent`, which does not block. Keeper
+admission does not establish execution or finality.
 
 `utils/repl_skin.py` is adapted from CLI-Anything
 (https://github.com/HKUDS/CLI-Anything) under the Apache License 2.0. See the

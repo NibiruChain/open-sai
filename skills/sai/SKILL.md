@@ -29,7 +29,10 @@ Trade commands are `trade open`, `trade close`, `trade partial-close`, and
 the local request without submitting an intent. Accepted means Keeper admitted
 the request; it does not mean the trade executed. Use `intent local ADDRESS`
 and `intent status ADDRESS --key KEY` to inspect and reconcile. If the outcome
-is unknown, retain its intent key and do not blindly submit again.
+is unknown, retain its intent key and do not blindly submit again. An unknown
+intent blocks new trades until `intent status --key` resolves it; when Keeper
+has no record five minutes after submission, the CLI marks it `absent` and
+trading resumes.
 
 ## Examples
 

@@ -7,6 +7,8 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -81,15 +83,42 @@ def load_session(password: str) -> dict[str, str]:
         ) from exc
 
 
+# Version 1 adds `created_at`, the Unix time when the CLI reserved the key.
+SCHEMA_VERSION = 1
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        raise ValueError("Intent database was written by a newer sai version")
+    if version == SCHEMA_VERSION:
+        return
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version < 1:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS intents (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, account TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, entity TEXT NOT NULL DEFAULT '', created_at REAL)"
+            )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(intents)")
+            }
+            if "created_at" not in columns:
+                connection.execute("ALTER TABLE intents ADD COLUMN created_at REAL")
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
 def db() -> sqlite3.Connection:
     path = directory() / "intents.sqlite3"
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
     path.chmod(0o600)
     connection = sqlite3.connect(path, timeout=10)
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS intents (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, account TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, entity TEXT NOT NULL DEFAULT '')"
-    )
+    _migrate(connection)
     return connection
 
 
@@ -105,8 +134,8 @@ def pending(key: str, endpoint: str, account: str, kind: str, entity: str) -> No
                 f"Reconcile uncertain intent {unresolved[0]} before submitting another trade"
             )
         connection.execute(
-            "INSERT INTO intents VALUES (?, ?, ?, ?, 'unknown', ?)",
-            (key, endpoint, account.lower(), kind, entity),
+            "INSERT INTO intents (id, endpoint, account, kind, status, entity, created_at) VALUES (?, ?, ?, ?, 'unknown', ?, ?)",
+            (key, endpoint, account.lower(), kind, entity, time.time()),
         )
 
 
@@ -125,3 +154,44 @@ def list_pending(endpoint: str, account: str) -> list[dict[str, Any]]:
             (endpoint, account.lower()),
         ).fetchall()
     return [{"intentKey": row[0], "kind": row[1], "status": row[2]} for row in rows]
+
+
+def _key_time(key: str) -> float | None:
+    """Read the reservation time embedded in an intent key, if it has one."""
+    try:
+        stamp = datetime.strptime(key[:18], "%Y%m%dT%H%M%S%f")
+    except ValueError:
+        return None
+    return stamp.replace(tzinfo=UTC).timestamp()
+
+
+def mark_absent(
+    key: str, endpoint: str, account: str, older_than: float, now: float | None = None
+) -> str | None:
+    """Mark an unknown intent `absent` once Keeper can no longer admit it.
+
+    Call this only after Keeper returned no record for the key. Returns the
+    local status after the check, or None when the key is not recorded here.
+    """
+    current = time.time() if now is None else now
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT status, created_at FROM intents WHERE id=? AND endpoint=? AND account=?",
+            (key, endpoint, account.lower()),
+        ).fetchone()
+        if row is None:
+            return None
+        status, created = row
+        created = created if created is not None else _key_time(key)
+        if (
+            status == "unknown"
+            and created is not None
+            and current - created > older_than
+        ):
+            connection.execute(
+                "UPDATE intents SET status='absent' WHERE id=? AND endpoint=? AND account=?",
+                (key, endpoint, account.lower()),
+            )
+            return "absent"
+        return status

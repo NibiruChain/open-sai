@@ -10,12 +10,13 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from sai_cli.core import storage
+from sai_cli.core import keeper, storage
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 from websockets.typing import Subprotocol
@@ -486,4 +487,102 @@ def test_balance_snapshot_fails_on_graphql_errors():
         assert not result.stdout.strip()
     finally:
         server.shutdown()
+        thread.join()
+
+
+def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
+    """Keeper answers 401 and never records the key; the CLI recovers."""
+    address = "0x" + "a" * 40
+    monkeypatch.setenv("SAI_HOME", str(tmp_path))
+    recorded = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            query = request["query"]
+            if "recordUserIntent" in query:
+                recorded.append(request["variables"]["input"])
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            assert "userIntents" in query, query
+            encoded = json.dumps({"data": {"userIntents": []}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}/query"
+    storage.save_session(
+        {
+            "token": "fake-token",
+            "evmAddress": address,
+            "endpoint": endpoint,
+            "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        },
+        "test-passphrase",
+    )
+
+    def invoke(*args, unlock=False):
+        command = [*_resolve_cli(), "--endpoint", endpoint, "--json"]
+        if not unlock:
+            return subprocess.run(
+                [*command, *args],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+            )
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"test-passphrase\n")
+        os.close(write_fd)
+        try:
+            return subprocess.run(
+                [*command, "--passphrase-fd", str(read_fd), *args],
+                pass_fds=(read_fd,),
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=10,
+            )
+        finally:
+            os.close(read_fd)
+
+    try:
+        first = invoke("trade", "tpsl", "7", "--take-profit", "100", unlock=True)
+        assert "Outcome unknown" in first.stderr
+        key = recorded[0]["intentKey"]
+
+        # Inside Keeper's admission window the key still blocks trading.
+        fresh = invoke("intent", "status", address, "--key", key)
+        assert json.loads(fresh.stdout)["localStatus"] == "unknown"
+        blocked = invoke("trade", "close", "7", unlock=True)
+        assert "Reconcile" in blocked.stderr
+        assert len(recorded) == 1
+
+        # Age the reservation past the admission expiry plus margin.
+        with storage.db() as connection:
+            connection.execute(
+                "UPDATE intents SET created_at=? WHERE id=?",
+                (time.time() - keeper.ABSENT_AFTER_SECONDS - 1, key),
+            )
+        expired = invoke("intent", "status", address, "--key", key)
+        assert expired.returncode == 0
+        assert json.loads(expired.stdout)["localStatus"] == "absent"
+
+        allowed = invoke("trade", "close", "7", unlock=True)
+        assert "Reconcile" not in allowed.stderr
+        assert len(recorded) == 2
+        assert recorded[1]["intent"]["kind"] == "CLOSE_POSITION"
+    finally:
+        server.shutdown()
+        server.server_close()
         thread.join()

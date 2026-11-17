@@ -187,6 +187,9 @@ def submit(
     except keeper.AdmissionRejected:
         storage.set_status(key, endpoint, account, "rejected")
         raise
+    except keeper.NotSent:
+        storage.set_status(key, endpoint, account, "not_sent")
+        raise
     except (keeper.KeeperError, KeyError, TypeError, AttributeError) as exc:
         raise keeper.OutcomeUnknown(
             f"Outcome unknown for intent {key}; reconcile before another trade"

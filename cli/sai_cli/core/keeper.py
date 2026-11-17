@@ -39,6 +39,17 @@ class OutcomeUnknown(KeeperError):
     """The server may have accepted the request."""
 
 
+class NotSent(KeeperError):
+    """The connection failed before the request reached Keeper."""
+
+
+# Keeper fails a recorded intent that waits this long without execution
+# (`expireQueued` in sai-keeper). A key that Keeper has not recorded by then,
+# plus a margin for clock skew and slow requests, was never admitted.
+ADMISSION_EXPIRY_SECONDS = 120
+ABSENT_AFTER_SECONDS = ADMISSION_EXPIRY_SECONDS + 180
+
+
 def request(
     endpoint: str,
     query: str,
@@ -62,6 +73,8 @@ def request(
         )
         response.raise_for_status()
         result = response.json()
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        raise NotSent("Could not connect to Keeper; the request was not sent") from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise KeeperError("Keeper request failed or returned invalid JSON") from exc
     if not isinstance(result, dict):

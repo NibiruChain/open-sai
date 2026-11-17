@@ -316,6 +316,14 @@ def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
                         storage.set_status(
                             key, ctx.obj["endpoint"], address, "terminal"
                         )
+        elif key and data.get("userIntents") == []:
+            # Keeper has no record. Past its admission expiry it never will,
+            # so the key no longer blocks new trades.
+            local = storage.mark_absent(
+                key, ctx.obj["endpoint"], address, keeper.ABSENT_AFTER_SECONDS
+            )
+            if local is not None:
+                data["localStatus"] = local
         emit(ctx, data)
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
