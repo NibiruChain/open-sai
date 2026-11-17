@@ -10,8 +10,10 @@ permissions:
   contents: read
 
 # A new push to a pull request cancels its older runs. Runs on main finish.
+# The PR number keeps fork branches with the same name from cancelling each
+# other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The job names are the required check names on main. Rename them together
@@ -19,6 +21,9 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite takes under a minute; a hung test must not hold a required
+    # check for GitHub's six-hour default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,6 +42,9 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
+    # The suite takes under a minute; a hung test must not hold a required
+    # check for GitHub's six-hour default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
