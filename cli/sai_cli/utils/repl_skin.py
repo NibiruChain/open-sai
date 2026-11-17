@@ -473,6 +473,9 @@ class ReplSkin:
             from prompt_toolkit.formatted_text import FormattedText
 
             style = self.get_prompt_style()
+            history = Path(self.history_file)
+            history.touch(mode=0o600, exist_ok=True)
+            history.chmod(0o600)
 
             session = PromptSession(
                 history=FileHistory(self.history_file),

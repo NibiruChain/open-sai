@@ -87,3 +87,14 @@ def test_repl_writes_history_and_shows_help(tmp_path, monkeypatch, capsys):
     history = (tmp_path / "trader" / "history").read_text(encoding="utf-8")
     assert "+help\n" in history
     assert "+help trade\n" in history
+
+
+def test_history_file_is_private(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAI_HOME", str(tmp_path))
+    history = tmp_path / "trader" / "history"
+    history.parent.mkdir(parents=True)
+    history.write_text("", encoding="utf-8")
+    history.chmod(0o644)
+    with create_pipe_input() as pipe:
+        ReplSkin("sai").create_prompt_session(input=pipe, output=DummyOutput())
+    assert history.stat().st_mode & 0o777 == 0o600
