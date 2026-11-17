@@ -1,0 +1,26 @@
+# Keeper Test Fixtures
+
+`mainnet_markets_http.json` and `mainnet_prices_http.json` contain the complete
+public GraphQL responses from `sai --json market list` and `sai --json market
+prices` on 2026-11-13 at about 06:24 UTC. The `data` envelope was restored
+because the CLI emits its contents. These include public market data only.
+
+`mainnet_price_ws_payload.json` is a public BTC subscription payload observed
+with `sai --json watch price 3` at the same time. It is the decoded GraphQL
+payload printed by the CLI, not the WebSocket transport frame. Values and
+timestamps are historical observations and must not be used as current quotes.
+
+`synthetic_protocol.json` is independently authored from the Keeper schema and
+the protocol shape exercised by the CLI. It is not a network capture. Its
+address, account data, signature placeholder, session token, and transaction
+hash are synthetic. Intent examples describe the inputs validated by the
+local implementation and the known Keeper protocol; they are not an independent
+guarantee that every example was accepted by a live deployment.
+
+The tests replay these fixtures with in-process HTTP stubs and local loopback
+WebSocket servers. They do not reach a live HTTP or WebSocket service. The
+stored examples contain no real JWT or private key.
+
+An autouse fixture blocks external TCP connections in the pytest process.
+It does not affect spawned CLI processes, whose integration tests explicitly
+select loopback endpoints.

@@ -1,0 +1,1040 @@
+{
+  "data": {
+    "oracle": {
+      "tokenPricesUsd": [
+        {
+          "priceUsd": 1.0008,
+          "token": {
+            "id": 1,
+            "symbol": "USDC",
+            "name": "usdc"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.00063727873,
+          "token": {
+            "id": 2,
+            "symbol": "stNIBI",
+            "name": "stnibi"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 68624.01,
+          "token": {
+            "id": 3,
+            "symbol": "BTC",
+            "name": "btc"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 1930.09,
+          "token": {
+            "id": 4,
+            "symbol": "ETH",
+            "name": "eth"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 1.391,
+          "token": {
+            "id": 5,
+            "symbol": "ATOM",
+            "name": "atom"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 4990.23,
+          "token": {
+            "id": 6,
+            "symbol": null,
+            "name": "dubai"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 600.22,
+          "token": {
+            "id": 7,
+            "symbol": null,
+            "name": "los-angeles"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 466,
+          "token": {
+            "id": 8,
+            "symbol": null,
+            "name": "new-york"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 214.4,
+          "token": {
+            "id": 9,
+            "symbol": null,
+            "name": "chicago"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 275.98,
+          "token": {
+            "id": 10,
+            "symbol": null,
+            "name": "washington"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 186.15,
+          "token": {
+            "id": 11,
+            "symbol": null,
+            "name": "pittsburgh"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 399.44,
+          "token": {
+            "id": 12,
+            "symbol": null,
+            "name": "miami-beach"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 695.83,
+          "token": {
+            "id": 13,
+            "symbol": null,
+            "name": "boston"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 785.12,
+          "token": {
+            "id": 14,
+            "symbol": null,
+            "name": "brooklyn"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 187.59,
+          "token": {
+            "id": 15,
+            "symbol": null,
+            "name": "austin"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 364.03,
+          "token": {
+            "id": 16,
+            "symbol": null,
+            "name": "denver"
+          },
+          "lastUpdatedBlock": {
+            "block": 49507916,
+            "block_ts": "2026-11-12T12:55:12.61895Z"
+          }
+        },
+        {
+          "priceUsd": 79.4,
+          "token": {
+            "id": 17,
+            "symbol": "SOL",
+            "name": "sol"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 1.0229,
+          "token": {
+            "id": 18,
+            "symbol": "XRP",
+            "name": "xrp"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.7891,
+          "token": {
+            "id": 19,
+            "symbol": "SUI",
+            "name": "sui"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.1374,
+          "token": {
+            "id": 20,
+            "symbol": "ENA",
+            "name": "ena"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.1456,
+          "token": {
+            "id": 21,
+            "symbol": "ARB",
+            "name": "arb"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.3112,
+          "token": {
+            "id": 22,
+            "symbol": "TRX",
+            "name": "trx"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.5385,
+          "token": {
+            "id": 23,
+            "symbol": "APT",
+            "name": "apt"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.087,
+          "token": {
+            "id": 24,
+            "symbol": "POL",
+            "name": "pol"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 1.148,
+          "token": {
+            "id": 25,
+            "symbol": "GRAM",
+            "name": "ton"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.1699,
+          "token": {
+            "id": 26,
+            "symbol": "ADA",
+            "name": "ada"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 48.58,
+          "token": {
+            "id": 27,
+            "symbol": "LTC",
+            "name": "ltc"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.0642,
+          "token": {
+            "id": 28,
+            "symbol": "DOGE",
+            "name": "doge"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.6515,
+          "token": {
+            "id": 29,
+            "symbol": "ASTER",
+            "name": "aster"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 631.35,
+          "token": {
+            "id": 30,
+            "symbol": "BNB",
+            "name": "bnb"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.003382,
+          "token": {
+            "id": 31,
+            "symbol": "PUMP",
+            "name": "pump"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 8.176,
+          "token": {
+            "id": 32,
+            "symbol": "AVAX",
+            "name": "avax"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 111.31,
+          "token": {
+            "id": 33,
+            "symbol": "AAVE",
+            "name": "aave"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.006028,
+          "token": {
+            "id": 34,
+            "symbol": "PENGU",
+            "name": "pengu"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 9.829,
+          "token": {
+            "id": 35,
+            "symbol": "LINK",
+            "name": "link"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 2.655e-06,
+          "token": {
+            "id": 36,
+            "symbol": "BONK",
+            "name": "bonk"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 4.251e-06,
+          "token": {
+            "id": 37,
+            "symbol": "SHIB",
+            "name": "shib"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 1.074,
+          "token": {
+            "id": 38,
+            "symbol": "TRUMP",
+            "name": "trump"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 3.431,
+          "token": {
+            "id": 39,
+            "symbol": "NEAR",
+            "name": "near"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.2018,
+          "token": {
+            "id": 40,
+            "symbol": "KAITO",
+            "name": "kaito"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.4045,
+          "token": {
+            "id": 41,
+            "symbol": "MNT",
+            "name": "mnt"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.3171,
+          "token": {
+            "id": 42,
+            "symbol": "IP",
+            "name": "ip"
+          },
+          "lastUpdatedBlock": {
+            "block": 42937824,
+            "block_ts": "2026-07-06T07:54:16.79876Z"
+          }
+        },
+        {
+          "priceUsd": 0.5114,
+          "token": {
+            "id": 43,
+            "symbol": "VIRTUAL",
+            "name": "virtual"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 71.593,
+          "token": {
+            "id": 44,
+            "symbol": "HYPE",
+            "name": "hype"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 943.61,
+          "token": {
+            "id": 45,
+            "symbol": "ZEC",
+            "name": "zec"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 0.8454,
+          "token": {
+            "id": 46,
+            "symbol": "PURR",
+            "name": "purr"
+          },
+          "lastUpdatedBlock": {
+            "block": 33571896,
+            "block_ts": "2025-12-12T13:09:58.809278Z"
+          }
+        },
+        {
+          "priceUsd": 29.79,
+          "token": {
+            "id": 47,
+            "symbol": "MON",
+            "name": "mon"
+          },
+          "lastUpdatedBlock": {
+            "block": 33571896,
+            "block_ts": "2025-12-12T13:09:58.809278Z"
+          }
+        },
+        {
+          "priceUsd": 459.99,
+          "token": {
+            "id": 48,
+            "symbol": "FARTCOIN",
+            "name": "fartcoin"
+          },
+          "lastUpdatedBlock": {
+            "block": 33571896,
+            "block_ts": "2025-12-12T13:09:58.809278Z"
+          }
+        },
+        {
+          "priceUsd": 0.0003876,
+          "token": {
+            "id": 49,
+            "symbol": "NIBI",
+            "name": "nibi"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 656760.23,
+          "token": {
+            "id": 50,
+            "symbol": "POKEMON",
+            "name": "pokemon-card-index"
+          },
+          "lastUpdatedBlock": {
+            "block": 48818640,
+            "block_ts": "2026-10-31T08:18:59.407034Z"
+          }
+        },
+        {
+          "priceUsd": 1482,
+          "token": {
+            "id": 51,
+            "symbol": null,
+            "name": "watch-index"
+          },
+          "lastUpdatedBlock": {
+            "block": 48270207,
+            "block_ts": "2026-10-21T18:41:36.421727Z"
+          }
+        },
+        {
+          "priceUsd": 1584,
+          "token": {
+            "id": 52,
+            "symbol": null,
+            "name": "rolex"
+          },
+          "lastUpdatedBlock": {
+            "block": 49452944,
+            "block_ts": "2026-11-11T13:31:30.758378Z"
+          }
+        },
+        {
+          "priceUsd": 2139,
+          "token": {
+            "id": 53,
+            "symbol": null,
+            "name": "patek-phillippe"
+          },
+          "lastUpdatedBlock": {
+            "block": 49452944,
+            "block_ts": "2026-11-11T13:31:30.758378Z"
+          }
+        },
+        {
+          "priceUsd": 1938,
+          "token": {
+            "id": 54,
+            "symbol": "AUDEMARS",
+            "name": "audemars-piguet"
+          },
+          "lastUpdatedBlock": {
+            "block": 49452944,
+            "block_ts": "2026-11-11T13:31:30.758378Z"
+          }
+        },
+        {
+          "priceUsd": 1377,
+          "token": {
+            "id": 55,
+            "symbol": null,
+            "name": "omega"
+          },
+          "lastUpdatedBlock": {
+            "block": 49452944,
+            "block_ts": "2026-11-11T13:31:30.758378Z"
+          }
+        },
+        {
+          "priceUsd": 1687,
+          "token": {
+            "id": 56,
+            "symbol": null,
+            "name": "cartier"
+          },
+          "lastUpdatedBlock": {
+            "block": 49452944,
+            "block_ts": "2026-11-11T13:31:30.758378Z"
+          }
+        },
+        {
+          "priceUsd": 1097,
+          "token": {
+            "id": 57,
+            "symbol": null,
+            "name": "breitling"
+          },
+          "lastUpdatedBlock": {
+            "block": 48660079,
+            "block_ts": "2026-10-28T13:31:26.105092Z"
+          }
+        },
+        {
+          "priceUsd": 936,
+          "token": {
+            "id": 58,
+            "symbol": null,
+            "name": "tudor"
+          },
+          "lastUpdatedBlock": {
+            "block": 48660079,
+            "block_ts": "2026-10-28T13:31:26.105092Z"
+          }
+        },
+        {
+          "priceUsd": 688.245,
+          "token": {
+            "id": 59,
+            "symbol": "QQQ",
+            "name": "qqq"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526797,
+            "block_ts": "2026-11-12T20:59:53.871411Z"
+          }
+        },
+        {
+          "priceUsd": 756.93,
+          "token": {
+            "id": 60,
+            "symbol": "SPY",
+            "name": "spy"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526800,
+            "block_ts": "2026-11-12T20:59:58.523547Z"
+          }
+        },
+        {
+          "priceUsd": 166.065,
+          "token": {
+            "id": 61,
+            "symbol": "NVDA",
+            "name": "nvda"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526800,
+            "block_ts": "2026-11-12T20:59:58.523547Z"
+          }
+        },
+        {
+          "priceUsd": 585.69,
+          "token": {
+            "id": 62,
+            "symbol": "AMD",
+            "name": "amd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526793,
+            "block_ts": "2026-11-12T20:59:47.77893Z"
+          }
+        },
+        {
+          "priceUsd": 61.17,
+          "token": {
+            "id": 63,
+            "symbol": "INTC",
+            "name": "intc"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526802,
+            "block_ts": "2026-11-12T21:00:01.650619Z"
+          }
+        },
+        {
+          "priceUsd": 522.9,
+          "token": {
+            "id": 64,
+            "symbol": "MSFT",
+            "name": "msft"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526799,
+            "block_ts": "2026-11-12T20:59:57.061589Z"
+          }
+        },
+        {
+          "priceUsd": 354.755,
+          "token": {
+            "id": 65,
+            "symbol": "AAPL",
+            "name": "aapl"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526794,
+            "block_ts": "2026-11-12T20:59:49.28504Z"
+          }
+        },
+        {
+          "priceUsd": 298.805,
+          "token": {
+            "id": 66,
+            "symbol": "GOOGL",
+            "name": "googl"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526797,
+            "block_ts": "2026-11-12T20:59:53.871411Z"
+          }
+        },
+        {
+          "priceUsd": 267.41,
+          "token": {
+            "id": 67,
+            "symbol": "AMZN",
+            "name": "amzn"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526797,
+            "block_ts": "2026-11-12T20:59:53.871411Z"
+          }
+        },
+        {
+          "priceUsd": 623.4,
+          "token": {
+            "id": 68,
+            "symbol": "META",
+            "name": "meta"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526799,
+            "block_ts": "2026-11-12T20:59:57.061589Z"
+          }
+        },
+        {
+          "priceUsd": 363.94,
+          "token": {
+            "id": 69,
+            "symbol": "AVGO",
+            "name": "avgo"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526799,
+            "block_ts": "2026-11-12T20:59:57.061589Z"
+          }
+        },
+        {
+          "priceUsd": 397.465,
+          "token": {
+            "id": 70,
+            "symbol": "TSLA",
+            "name": "tsla"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526798,
+            "block_ts": "2026-11-12T20:59:55.452492Z"
+          }
+        },
+        {
+          "priceUsd": 589.3,
+          "token": {
+            "id": 71,
+            "symbol": "BRK.B",
+            "name": "brk-b"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526798,
+            "block_ts": "2026-11-12T20:59:55.452492Z"
+          }
+        },
+        {
+          "priceUsd": 130.64,
+          "token": {
+            "id": 72,
+            "symbol": "COIN",
+            "name": "coin"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526797,
+            "block_ts": "2026-11-12T20:59:53.871411Z"
+          }
+        },
+        {
+          "priceUsd": 342.895,
+          "token": {
+            "id": 73,
+            "symbol": "JPM",
+            "name": "jpm"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526799,
+            "block_ts": "2026-11-12T20:59:57.061589Z"
+          }
+        },
+        {
+          "priceUsd": 171.61,
+          "token": {
+            "id": 74,
+            "symbol": "PLTR",
+            "name": "pltr"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526800,
+            "block_ts": "2026-11-12T20:59:58.523547Z"
+          }
+        },
+        {
+          "priceUsd": 9.84,
+          "token": {
+            "id": 75,
+            "symbol": "QBTS",
+            "name": "qbts"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526799,
+            "block_ts": "2026-11-12T20:59:57.061589Z"
+          }
+        },
+        {
+          "priceUsd": 5.825,
+          "token": {
+            "id": 76,
+            "symbol": "QUBT",
+            "name": "qubt"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526798,
+            "block_ts": "2026-11-12T20:59:55.452492Z"
+          }
+        },
+        {
+          "priceUsd": 3899.39559,
+          "token": {
+            "id": 77,
+            "symbol": "XAU",
+            "name": "xau-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548840,
+            "block_ts": "2026-11-13T06:23:45.774447Z"
+          }
+        },
+        {
+          "priceUsd": 50.04254,
+          "token": {
+            "id": 78,
+            "symbol": "XAG",
+            "name": "xag-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548840,
+            "block_ts": "2026-11-13T06:23:45.774447Z"
+          }
+        },
+        {
+          "priceUsd": 1526.57772,
+          "token": {
+            "id": 79,
+            "symbol": "XPT",
+            "name": "xpt-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548840,
+            "block_ts": "2026-11-13T06:23:45.774447Z"
+          }
+        },
+        {
+          "priceUsd": 1007.66836,
+          "token": {
+            "id": 80,
+            "symbol": "XPD",
+            "name": "xpd-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548842,
+            "block_ts": "2026-11-13T06:23:48.81473Z"
+          }
+        },
+        {
+          "priceUsd": 84.837,
+          "token": {
+            "id": 81,
+            "symbol": "WTI",
+            "name": "wti-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 43777523,
+            "block_ts": "2026-07-31T11:36:13.252236Z"
+          }
+        },
+        {
+          "priceUsd": 96.03,
+          "token": {
+            "id": 82,
+            "symbol": "XBR",
+            "name": "xbr-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548843,
+            "block_ts": "1970-01-01T00:00:00Z"
+          }
+        },
+        {
+          "priceUsd": 3.30514074,
+          "token": {
+            "id": 83,
+            "symbol": "NG",
+            "name": "ng-usd"
+          },
+          "lastUpdatedBlock": {
+            "block": 49548718,
+            "block_ts": "2026-11-13T06:20:38.477784Z"
+          }
+        },
+        {
+          "priceUsd": 25.645,
+          "token": {
+            "id": 84,
+            "symbol": "GME",
+            "name": "gme"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526800,
+            "block_ts": "2026-11-12T20:59:58.523547Z"
+          }
+        },
+        {
+          "priceUsd": 2183.43,
+          "token": {
+            "id": 85,
+            "symbol": null,
+            "name": "pokemon-psa-10-index"
+          },
+          "lastUpdatedBlock": {
+            "block": 48268587,
+            "block_ts": "2026-10-21T18:00:09.234607Z"
+          }
+        },
+        {
+          "priceUsd": 140.17,
+          "token": {
+            "id": 86,
+            "symbol": "SPCX",
+            "name": "spcx"
+          },
+          "lastUpdatedBlock": {
+            "block": 49526795,
+            "block_ts": "2026-11-12T20:59:50.762644Z"
+          }
+        }
+      ]
+    }
+  }
+}
