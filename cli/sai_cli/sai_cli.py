@@ -18,7 +18,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect
 from websockets.typing import Subprotocol
 
-from .core import intents, keeper, margin, storage
+from .core import clipboard, intents, keeper, margin, storage
 from .utils.repl_skin import ReplSkin
 
 
@@ -26,14 +26,39 @@ def emit(ctx: click.Context, value: Any) -> None:
     click.echo(json.dumps(value, indent=None if ctx.obj["json"] else 2, default=str))
 
 
-def session(ctx: click.Context) -> dict[str, str]:
+def read_passphrase(ctx: click.Context, *, new: bool = False) -> str:
+    """Read the backend `file` passphrase from --passphrase-fd or a prompt."""
     fd = ctx.obj.get("passphrase_fd")
-    password = (
-        os.read(fd, 4096).decode().rstrip("\r\n")
-        if fd is not None
-        else click.prompt("Session passphrase", hide_input=True, err=True)
+    if fd is not None:
+        return os.read(fd, 4096).decode().rstrip("\r\n")
+    return click.prompt(
+        "New session passphrase" if new else "Session passphrase",
+        hide_input=True,
+        confirmation_prompt=new,
+        err=True,
     )
-    result = storage.load_session(password)
+
+
+def save(ctx: click.Context, result: dict[str, str]) -> None:
+    """Store RESULT with the selected keyring backend."""
+    if ctx.obj["keyring_backend"] == "file":
+        storage.save_session(result, read_passphrase(ctx, new=True))
+    else:
+        storage.save_session(result)
+
+
+def session(ctx: click.Context) -> dict[str, str]:
+    # Check the stored backend first so a mismatch fails before any prompt.
+    stored = storage.stored_backend()
+    if ctx.obj["keyring_backend"] == "file" and stored == "test":
+        raise ValueError(
+            "Stored session uses keyring backend test; drop --keyring-backend"
+            " file or sign in again"
+        )
+    if ctx.obj["keyring_backend"] == "file" and stored == "file":
+        result = storage.load_session(read_passphrase(ctx))
+    else:
+        result = storage.load_session()
     if result.get("endpoint") != ctx.obj["endpoint"]:
         raise ValueError("Stored session belongs to another Keeper endpoint")
     expiry = datetime.fromisoformat(result["expiresAt"])
@@ -77,17 +102,41 @@ def import_session(token: str, endpoint: str) -> dict[str, str]:
     "--json", "json_output", is_flag=True, help="Compact machine-readable JSON."
 )
 @click.option(
+    "--keyring-backend",
+    type=click.Choice(storage.BACKENDS),
+    default="test",
+    show_default=True,
+    envvar="SAI_KEYRING_BACKEND",
+    help="Session storage. test: encrypted with a built-in key, no prompt."
+    " file: encrypted with your passphrase.",
+)
+@click.option(
     "--passphrase-fd",
     type=click.IntRange(0),
-    help="Read the session passphrase from an inherited file descriptor.",
+    help="Keyring backend file: read the passphrase from an inherited file descriptor.",
 )
 @click.pass_context
 def main(
-    ctx: click.Context, endpoint: str, json_output: bool, passphrase_fd: int | None
+    ctx: click.Context,
+    endpoint: str,
+    json_output: bool,
+    keyring_backend: str,
+    passphrase_fd: int | None,
 ) -> None:
     """Inspect Sai markets and account data, and submit trading intents."""
     ctx.ensure_object(dict)
-    ctx.obj.update(endpoint=endpoint, json=json_output, passphrase_fd=passphrase_fd)
+    if passphrase_fd is not None and keyring_backend != "file":
+        # Scripts written before keyring backends pass only --passphrase-fd.
+        source = ctx.get_parameter_source("keyring_backend")
+        if source is not click.core.ParameterSource.DEFAULT:
+            raise click.UsageError("--passphrase-fd requires --keyring-backend file")
+        keyring_backend = "file"
+    ctx.obj.update(
+        endpoint=endpoint,
+        json=json_output,
+        keyring_backend=keyring_backend,
+        passphrase_fd=passphrase_fd,
+    )
     if ctx.invoked_subcommand is None:
         repl(ctx)
 
@@ -133,6 +182,8 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
                         "--endpoint",
                         ctx.obj["endpoint"],
                         *(["--json"] if ctx.obj["json"] else []),
+                        "--keyring-backend",
+                        ctx.obj["keyring_backend"],
                         *args,
                     ],
                     prog_name="sai",
@@ -151,24 +202,40 @@ def auth() -> None:
 
 @auth.command("login")
 @click.option(
-    "--address", required=True, help="Public EVM address associated with the wallet."
+    "--account",
+    help="Foundry keystore name (~/.foundry/keystores). cast prompts for its password.",
 )
 @click.option(
-    "--wallet", required=True, help="Wallet name in the local ud wallet manager."
+    "--address",
+    help="EVM address of the account. With --account, defaults to"
+    " `cast wallet address`, which prompts for the password a second time.",
+)
+@click.option(
+    "--wallet",
+    help="Experimental: wallet name in the local ud wallet manager.",
 )
 @click.pass_context
-def login(ctx: click.Context, address: str, wallet: str) -> None:
-    """Sign Keeper's challenge using a protected local ud wallet."""
+def login(
+    ctx: click.Context, account: str | None, address: str | None, wallet: str | None
+) -> None:
+    """Sign Keeper's trading-session challenge with a local key.
+
+    Use --account for a Foundry keystore. The CLI checks that the challenge
+    is a Sai `UserTradingSession` for this address before cast signs it.
+    """
+    if bool(account) == bool(wallet):
+        raise click.UsageError("Pass exactly one of --account or --wallet")
+    if wallet and not address:
+        raise click.UsageError("--wallet requires --address")
     try:
-        result = keeper.wallet_session(ctx.obj["endpoint"], address, wallet)
+        if account:
+            address = address or keeper.cast_address(account)
+            result = keeper.cast_session(ctx.obj["endpoint"], address, account)
+        else:
+            assert wallet and address
+            result = keeper.wallet_session(ctx.obj["endpoint"], address, wallet)
         result["endpoint"] = ctx.obj["endpoint"]
-        password = click.prompt(
-            "New session passphrase",
-            hide_input=True,
-            confirmation_prompt=True,
-            err=True,
-        )
-        storage.save_session(result, password)
+        save(ctx, result)
         emit(
             ctx,
             {
@@ -181,20 +248,56 @@ def login(ctx: click.Context, address: str, wallet: str) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+NO_CLIPBOARD = (
+    "No terminal and no working clipboard command ({names}). Ask the person"
+    " to run `sai auth import` in their own terminal."
+)
+
+
+def read_token() -> str:
+    """Read the token from a hidden prompt or, without a terminal, the
+    clipboard. Never from arguments, the environment, or piped stdin."""
+    if sys.stdin.isatty():
+        token = click.prompt(
+            "Paste the Sai session token (Enter reads the clipboard)",
+            hide_input=True,
+            default="",
+            show_default=False,
+            err=True,
+        ).strip()
+        if token:
+            return token
+    copied = clipboard.read()
+    if copied is None:
+        if sys.stdin.isatty():
+            raise ValueError(f"No working clipboard command ({clipboard.NAMES})")
+        raise ValueError(NO_CLIPBOARD.format(names=clipboard.NAMES))
+    if not copied[0]:
+        raise ValueError(
+            "Clipboard is empty; copy the session token from Sai Web and retry"
+        )
+    return copied[0]
+
+
 @auth.command("import")
 @click.pass_context
 def import_token(ctx: click.Context) -> None:
-    """Import an existing session token through a hidden prompt."""
+    """Connect with a session token copied from Sai Web.
+
+    In a terminal, paste the token at the hidden prompt or press Enter to read
+    the clipboard. Without a terminal, as when an agent runs this, read the
+    clipboard. After storing the token, clear the clipboard if it still holds
+    the token. Prints the address, expiry, and endpoint, never the token.
+    """
     try:
-        token = click.prompt("Sai session token", hide_input=True, err=True)
+        token = read_token()
         result = import_session(token, ctx.obj["endpoint"])
-        password = click.prompt(
-            "New session passphrase",
-            hide_input=True,
-            confirmation_prompt=True,
-            err=True,
-        )
-        storage.save_session(result, password)
+        save(ctx, result)
+        # Re-read: with backend file, the person may have copied a passphrase
+        # since, and that must survive.
+        copied = clipboard.read()
+        if copied is not None and copied[0] == token and not clipboard.clear(copied[1]):
+            click.echo("Warning: could not clear the clipboard", err=True)
         emit(
             ctx,
             {

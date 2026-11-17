@@ -282,6 +282,8 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
                     "--endpoint",
                     endpoint,
                     "--json",
+                    "--keyring-backend",
+                    "file",
                     "--passphrase-fd",
                     str(read_fd),
                     *args,
@@ -546,7 +548,8 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
         os.close(write_fd)
         try:
             return subprocess.run(
-                [*command, "--passphrase-fd", str(read_fd), *args],
+                [*command, "--keyring-backend", "file"]
+                + ["--passphrase-fd", str(read_fd), *args],
                 pass_fds=(read_fd,),
                 capture_output=True,
                 check=False,
@@ -588,9 +591,19 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
         thread.join()
 
 
-def test_repl_survives_an_aborted_command_and_shows_help(tmp_path):
-    env = {**os.environ, "SAI_HOME": str(tmp_path)}
+def test_repl_survives_an_aborted_command_and_shows_help(tmp_path, monkeypatch):
+    env = {**os.environ, "SAI_HOME": str(tmp_path), "SAI_KEYRING_BACKEND": "file"}
     env.pop("TELEGRAM_PASSWORD", None)
+    monkeypatch.setenv("SAI_HOME", str(tmp_path))
+    storage.save_session(
+        {
+            "token": "fake-token",
+            "evmAddress": "0x" + "a" * 40,
+            "endpoint": keeper.MAINNET_HTTP,
+            "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        },
+        "secret",
+    )
     # The passphrase prompt reaches end of input, which Click reports as an
     # abort. A new session has no terminal, so getpass reads stdin.
     aborted = subprocess.run(

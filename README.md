@@ -22,18 +22,44 @@ uv run sai --json market prices
 To install the command into your user tool directory from the checkout, run
 `uv tool install .`. Then run `sai --help` without `uv run`.
 
-To trade, use `sai auth import` to enter an existing Keeper session through a
-hidden prompt. `sai auth login --wallet` is experimental and works only on
-workstations with the private `ud` wallet manager; public users should use
-`sai auth import` for now. The CLI encrypts the session locally with a
-passphrase. Sessions expire; browser-to-device API credential provisioning and
-per-device revocation are not implemented here.
-
 For command examples, setup details, and recovery behavior, read the
 [CLI guide](cli/sai_cli/README.md) and the
 [agent skill](skills/sai/SKILL.md). A trade accepted by Keeper is
 still pending until its outcome is observed. Use `--dry-run` to inspect a local
 trade request without submitting it.
+
+### Connect to Sai
+
+Trading needs a Sai session. There are two ways to get one:
+
+- **From Sai Web.** A **Connect Sai CLI / MCP** button that copies your
+  session token is coming to Sai Web
+  ([sai-web#1591](https://github.com/SaiDotFun/sai-web/pull/1591)). Once it
+  ships, copy the token and run `sai auth import`. In a terminal, paste the
+  token at the hidden prompt or press Enter to read the clipboard. You can
+  also tell your agent "connect Sai"; it runs `sai auth import`, which reads
+  the clipboard when there is no terminal.
+- **With a Foundry keystore.** This works today. Run
+  `sai auth login --account NAME`. The CLI
+  fetches Keeper's sign-in challenge, checks that it is a Sai trading-session
+  request for your address, and runs `cast wallet sign`, which asks for the
+  keystore password. Pass `--address` to skip the extra password prompt from
+  `cast wallet address`.
+
+After connecting, commands run without prompts until the session expires. Know
+what the token is:
+
+- It is the same session token Sai Web uses in your browser.
+- It lasts as long as Keeper issues it: 30 days in production.
+- It authorizes all trading on the funds deposited in your Sai account.
+  Withdrawals still need your wallet.
+- It cannot be revoked yet. Signing out of Sai Web does not sign out the CLI.
+
+By default (`--keyring-backend test`), the CLI stores the session encrypted
+with a key built into the CLI, like the Cosmos SDK `test` keyring. That keeps
+the token out of plaintext files but does not protect it from anyone who can
+read your files. Use `--keyring-backend file` (or set `SAI_KEYRING_BACKEND`)
+to encrypt it with a passphrase instead.
 
 ## Development
 

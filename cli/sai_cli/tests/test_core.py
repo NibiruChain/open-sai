@@ -141,19 +141,30 @@ def test_cli_dry_run_does_not_create_session_or_send():
     assert not storage.home().exists()
 
 
-def test_passphrase_file_descriptor(session):
+# Scripts from before keyring backends pass --passphrase-fd alone.
+@pytest.mark.parametrize("backend", [["--keyring-backend", "file"], []])
+def test_passphrase_file_descriptor(session, backend):
     storage.save_session(session, "secret")
     read_fd, write_fd = os.pipe()
     os.write(write_fd, b"secret\n")
     os.close(write_fd)
     try:
         result = CliRunner().invoke(
-            main, ["--passphrase-fd", str(read_fd), "auth", "status"]
+            main,
+            [*backend, "--passphrase-fd", str(read_fd), "auth", "status"],
         )
     finally:
         os.close(read_fd)
     assert result.exit_code == 0, result.output
     assert "sensitive-token" not in result.output
+
+
+def test_passphrase_fd_conflicts_with_explicit_test_backend():
+    result = CliRunner().invoke(
+        main, ["--keyring-backend", "test", "--passphrase-fd", "0", "auth", "status"]
+    )
+    assert result.exit_code == 2
+    assert "requires --keyring-backend file" in result.output
 
 
 @pytest.mark.parametrize("failure", ["expired", "wrong_endpoint"])
@@ -168,7 +179,9 @@ def test_session_refuses_expired_or_wrong_network(session, failure):
     os.close(write_fd)
     try:
         result = CliRunner().invoke(
-            main, ["--passphrase-fd", str(read_fd), "auth", "status"]
+            main,
+            ["--keyring-backend", "file", "--passphrase-fd", str(read_fd)]
+            + ["auth", "status"],
         )
     finally:
         os.close(read_fd)
