@@ -19,7 +19,7 @@ exercise recovery after a lost admission response across CLI restarts,
 concurrent position reservations, a WebSocket disconnect and fresh snapshot,
 and refusal of partial GraphQL errors. These fixtures do not prove a live
 trade. `just check` runs Ruff and ty.
-On 2026-11-13, `CLI_ANYTHING_FORCE_INSTALLED=1 uv run pytest -q` passed 40 tests.
+On 2026-11-13, `SAI_FORCE_INSTALLED=1 uv run pytest -q` passed 40 tests.
 Routine tests use in-process stubs or local loopback HTTP and WebSocket servers;
 they do not require an external Keeper connection or real credentials. A guard
 blocks external TCP connections in the pytest process; subprocess fixtures use

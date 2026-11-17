@@ -31,7 +31,7 @@ def _resolve_cli() -> list[str]:
     path = shutil.which("sai")
     if path:
         return [path]
-    if os.environ.get("CLI_ANYTHING_FORCE_INSTALLED") == "1":
+    if os.environ.get("SAI_FORCE_INSTALLED") == "1":
         raise RuntimeError("Installed sai command is required")
     import sys
 
