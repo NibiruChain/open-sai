@@ -1,0 +1,64 @@
+name: "CI"
+
+# No paths filter: the required checks must report on every pull request.
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older runs. Runs on main finish.
+# The PR number keeps fork branches with the same name from cancelling each
+# other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The job names are the required check names on main. Rename them together
+# with the "Required checks" ruleset.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite takes under a minute; a hung test must not hold a required
+    # check for GitHub's six-hour default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 3.11 is the minimum version in pyproject's requires-python.
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked --all-groups
+
+      - run: uv run pytest
+
+  check:
+    runs-on: ubuntu-latest
+    # The suite takes under a minute; a hung test must not hold a required
+    # check for GitHub's six-hour default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked --all-groups
+
+      # Same commands as "just check".
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check cli/sai_cli
