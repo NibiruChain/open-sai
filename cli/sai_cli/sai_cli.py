@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from importlib import metadata, resources
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +21,25 @@ from websockets.typing import Subprotocol
 
 from .core import clipboard, intents, keeper, margin, storage
 from .utils.repl_skin import ReplSkin
+
+PACKAGE = "sai-cli"
+
+
+def package_version() -> str:
+    """Return the installed package version; pyproject.toml sets it."""
+    return metadata.version(PACKAGE)
+
+
+def skill_bytes() -> bytes:
+    """Return the agent skill packaged with this version of the CLI."""
+    return resources.files("sai_cli").joinpath("skills/SKILL.md").read_bytes()
+
+
+def print_skill(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(skill_bytes(), nl=False)
+    ctx.exit()
 
 
 def emit(ctx: click.Context, value: Any) -> None:
@@ -92,6 +112,15 @@ def import_session(token: str, endpoint: str) -> dict[str, str]:
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(package_name=PACKAGE, prog_name="sai")
+@click.option(
+    "--skill",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=print_skill,
+    help="Print the agent skill file and exit.",
+)
 @click.option(
     "--endpoint",
     default=keeper.MAINNET_HTTP,
@@ -156,7 +185,7 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
     prompt_toolkit input is supplied. Ctrl-C cancels the current line or
     command and returns to the prompt; Ctrl-D or `exit` leaves.
     """
-    skin = ReplSkin("sai", version="0.1.0")
+    skin = ReplSkin("sai", version=package_version())
     skin.print_banner()
     click.echo("Enter a command, 'help', or 'exit'.")
     pt_session = (

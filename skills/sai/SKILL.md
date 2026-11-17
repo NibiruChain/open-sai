@@ -1,9 +1,15 @@
 ---
 name: sai
 description: Inspect Sai markets and positions, follow live updates, and submit authenticated trading intents using the Sai CLI.
+metadata:
+  cli-version: "0.1.0"
 ---
 
 # Sai CLI
+
+`sai --skill` prints this file as shipped with the installed CLI; run it if
+your copy may be older or newer than `sai --version`. The installed
+`sai --help` is the authority for commands and options.
 
 Use `sai --help` to inspect commands. Add `--json` before the
 command for machine-readable output. Mainnet is the default. Override the
