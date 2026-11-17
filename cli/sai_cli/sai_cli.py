@@ -188,7 +188,7 @@ def auth() -> None:
 @click.option(
     "--account",
     help="Foundry keystore name (~/.foundry/keystores). Signs through ud when"
-    " ud knows the wallet; otherwise cast may prompt for the keystore password.",
+    " ud manages a matching keystore; otherwise cast may prompt for the keystore password.",
 )
 @click.option(
     "--wallet",
@@ -205,8 +205,8 @@ def login(
     """Sign Keeper's trading-session challenge with a local key.
 
     Use --wallet for a ud wallet or --account for a Foundry keystore. With
-    --account, sai signs through ud when `ud evm wallet show` knows the name,
-    so ud supplies the keystore password; otherwise it falls back to cast,
+    --account, sai signs through ud when `ud evm wallet show` reports a matching
+    keystore by that name, so ud supplies the keystore password; otherwise it falls back to cast,
     which may prompt. The CLI checks that the challenge is a Sai
     `UserTradingSession` for this address before anything signs it.
     """

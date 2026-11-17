@@ -17,7 +17,7 @@ valid for 30 days in production, with no scopes and no revocation. The CLI
 uses that same token. `auth import` takes it from Sai Web through a hidden
 prompt or the clipboard. `auth login --wallet` signs the challenge through the
 `ud` wallet manager, and `auth login --account` signs it with a Foundry
-keystore, through `ud` when it knows the name and `cast` otherwise. The CLI
+keystore, through `ud` when `ud` reports a matching keystore and `cast` otherwise. The CLI
 stores the session under `$SAI_HOME/trader` at mode 0600, encrypted with a
 fixed built-in key, so no command prompts for a passphrase.
 Per-device credentials are not yet part of this repository.

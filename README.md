@@ -57,7 +57,7 @@ Trading needs a Sai session. There are two ways to get one:
   `sai auth login --wallet NAME` for a wallet in the `ud` wallet manager.
   The CLI fetches Keeper's sign-in challenge, checks that it is a Sai
   trading-session request for your address, and only then has the wallet
-  sign it. When `ud` knows the name, `ud` supplies the keystore password and
+  sign it. When `ud` manages a matching keystore by that name, `ud` supplies the keystore password and
   nothing prompts. Otherwise `--account` signs with `cast wallet sign`, which
   asks for the keystore password.
 

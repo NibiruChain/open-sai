@@ -48,8 +48,8 @@ People with a local key can instead sign in from their own terminal:
 - `sai auth login --wallet NAME` signs with a wallet in the `ud` wallet
   manager. It reads the address from `ud` and does not prompt.
 - `sai auth login --account NAME` signs with a Foundry keystore. It goes
-  through `ud` without a prompt when `ud` knows the name; otherwise `cast`
-  prompts for the keystore password.
+  through `ud` without a prompt when `ud` manages a matching keystore by that
+  name; otherwise `cast` prompts for the keystore password.
 
 `--address` is an optional cross-check; leave it out unless the person gives
 one.
