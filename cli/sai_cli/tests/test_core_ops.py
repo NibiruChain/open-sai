@@ -290,6 +290,52 @@ def test_preview_is_exactly_what_is_submitted(
     assert fake.intent() == preview["intent"]
 
 
+class Refused(Exception):
+    pass
+
+
+def test_before_submit_sees_the_submitted_intent_and_can_refuse(monkeypatch):
+    fake = FakeKeeper({keeper.MARKETS: markets(price=101.25)})
+    monkeypatch.setattr(keeper, "request", fake)
+    seen: list[dict[str, Any]] = []
+    trading.open_trade(
+        ENDPOINT,
+        session_for,
+        **open_args(dry_run=False),
+        before_submit=seen.append,
+    )
+    assert seen[0]["referencePrice"] == "101.25"
+    assert fake.intent() == seen[0]["intent"]
+
+    def refuse(_preview: dict[str, Any]) -> None:
+        raise Refused
+
+    with pytest.raises(Refused):
+        trading.close_trade(
+            ENDPOINT,
+            session_for,
+            trade_id=3,
+            cancel_order=False,
+            dry_run=False,
+            before_submit=refuse,
+        )
+    with pytest.raises(Refused):
+        trading.set_leverage(
+            ENDPOINT,
+            session_for,
+            trade_id=3,
+            leverage="4",
+            dry_run=False,
+            before_submit=refuse,
+        )
+    with pytest.raises(Refused):
+        trading.open_trade(
+            ENDPOINT, session_for, **open_args(dry_run=False), before_submit=refuse
+        )
+    assert len(fake.submitted) == 1
+    assert storage.list_pending(ENDPOINT, ADDRESS)[0]["status"] == "accepted"
+
+
 def snapshots(
     monkeypatch, *collaterals: str
 ) -> Iterator[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
@@ -309,7 +355,7 @@ def snapshots(
 def test_margin_preview_matches_the_submitted_leverage(monkeypatch):
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
-    args = {
+    args: dict[str, Any] = {
         "trade_id": 7,
         "direction": "add",
         "amount": "1",
@@ -344,7 +390,11 @@ def test_margin_refuses_a_position_that_changed(monkeypatch):
 def test_partial_close_preview_matches_submission_and_rechecks(monkeypatch):
     fake = FakeKeeper({keeper.MARKETS: markets()})
     monkeypatch.setattr(keeper, "request", fake)
-    args = {"trade_id": 7, "percent": 50, "lcd_endpoint": margin.MAINNET_LCD}
+    args: dict[str, Any] = {
+        "trade_id": 7,
+        "percent": 50,
+        "lcd_endpoint": margin.MAINNET_LCD,
+    }
     snapshots(monkeypatch, "4000000")
     preview = trading.partial_close(ENDPOINT, session_for, dry_run=True, **args)
     assert preview["intent"]["body"]["collateral"]["amountUsdc"] == "2000000"

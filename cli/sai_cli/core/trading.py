@@ -2,7 +2,8 @@
 
 Each action builds its intent once. With `dry_run`, it returns that intent as
 a preview; otherwise it submits the same intent, so a preview is exactly what
-would be submitted. Actions take a session loader and call it only when they
+would be submitted. A `before_submit` check sees the preview of the exact
+intent object about to be submitted and can refuse it by raising. Actions take a session loader and call it only when they
 need the session, so validation errors come first and a dry run that needs no
 account never reads the stored session.
 """
@@ -17,6 +18,9 @@ from . import intents, keeper, margin
 
 SessionLoader = Callable[[], dict[str, str]]
 Notify = Callable[[str], None]
+# Called with the preview of the exact intent about to be submitted, after
+# every refresh and recheck; raising stops the submission.
+SubmitCheck = Callable[[dict[str, Any]], None]
 
 MARGIN_WARNING = (
     "The request authorizes target leverage, not an amount cap; the actual"
@@ -31,16 +35,24 @@ def _ignore(_message: str) -> None:
     return None
 
 
+def _accept(_preview: dict[str, Any]) -> None:
+    return None
+
+
 def preview_or_submit(
     endpoint: str,
     get_session: SessionLoader,
     payload: dict[str, Any],
     dry_run: bool,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
-    """Return the dry-run preview of PAYLOAD, or submit it."""
+    """Return the dry-run preview of PAYLOAD, or check and submit it."""
+    preview = {"dryRun": True, "intent": payload}
     if dry_run:
-        return {"dryRun": True, "intent": payload}
-    return intents.submit(endpoint, get_session(), payload)
+        return preview
+    active = get_session()
+    before_submit(preview)
+    return intents.submit(endpoint, active, payload)
 
 
 def open_usdc_market(endpoint: str, market_id: int) -> dict[str, Any]:
@@ -73,6 +85,7 @@ def open_trade(
     stop_loss: str | None,
     dry_run: bool,
     notify: Notify = _ignore,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
     """Open a market, limit, or stop trade.
 
@@ -92,7 +105,7 @@ def open_trade(
         stop_loss,
     )
     if order_type != "market":
-        return preview_or_submit(endpoint, get_session, payload, dry_run)
+        return preview_or_submit(endpoint, get_session, payload, dry_run, before_submit)
     if dry_run:
         return {"dryRun": True, "requiresMarketPriceRefresh": True, "intent": payload}
     active = get_session()
@@ -102,6 +115,14 @@ def open_trade(
     current_price = format(Decimal(str(current["price"])), "f")
     intents.positive(current_price, "Current price")
     payload["body"]["intentPrice"] = current_price
+    before_submit(
+        {
+            "dryRun": True,
+            "requiresMarketPriceRefresh": True,
+            "intent": payload,
+            "referencePrice": current_price,
+        }
+    )
     result = intents.submit(endpoint, active, payload)
     result["referencePrice"] = current_price
     return result
@@ -114,10 +135,11 @@ def close_trade(
     trade_id: int,
     cancel_order: bool,
     dry_run: bool,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
     """Close a position or cancel a pending order."""
     payload = intents.close_intent(trade_id, cancel_order)
-    return preview_or_submit(endpoint, get_session, payload, dry_run)
+    return preview_or_submit(endpoint, get_session, payload, dry_run, before_submit)
 
 
 def set_tpsl(
@@ -130,12 +152,13 @@ def set_tpsl(
     clear_take_profit: bool,
     clear_stop_loss: bool,
     dry_run: bool,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
     """Set or clear take-profit and stop-loss prices."""
     payload = intents.tpsl_intent(
         trade_id, take_profit, stop_loss, clear_take_profit, clear_stop_loss
     )
-    return preview_or_submit(endpoint, get_session, payload, dry_run)
+    return preview_or_submit(endpoint, get_session, payload, dry_run, before_submit)
 
 
 def set_leverage(
@@ -145,10 +168,11 @@ def set_leverage(
     trade_id: int,
     leverage: str,
     dry_run: bool,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
     """Set target leverage without changing TP or SL."""
     payload = intents.leverage_intent(trade_id, leverage)
-    return preview_or_submit(endpoint, get_session, payload, dry_run)
+    return preview_or_submit(endpoint, get_session, payload, dry_run, before_submit)
 
 
 def change_margin(
@@ -160,6 +184,7 @@ def change_margin(
     amount: str,
     lcd_endpoint: str,
     dry_run: bool,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
     """Add or remove margin through a target-leverage intent.
 
@@ -172,13 +197,14 @@ def change_margin(
     )
     quoted = margin.margin_quote(raw, funds, market, direction, amount)
     payload = intents.leverage_intent(trade_id, quoted["requestedLeverage"])
+    preview = {
+        "dryRun": True,
+        "quote": quoted,
+        "intent": payload,
+        "warning": MARGIN_WARNING,
+    }
     if dry_run:
-        return {
-            "dryRun": True,
-            "quote": quoted,
-            "intent": payload,
-            "warning": MARGIN_WARNING,
-        }
+        return preview
     fresh_raw, fresh_funds, fresh_market = margin.snapshot(
         endpoint, lcd_endpoint, active["evmAddress"], trade_id
     )
@@ -191,6 +217,7 @@ def change_margin(
         or fresh_quote != quoted
     ):
         raise ValueError("Position changed; review the margin change again")
+    before_submit(preview)
     result = intents.submit(endpoint, active, payload)
     result["quote"] = quoted
     result["warning"] = MARGIN_WARNING
@@ -205,6 +232,7 @@ def partial_close(
     percent: int,
     lcd_endpoint: str,
     dry_run: bool,
+    before_submit: SubmitCheck = _accept,
 ) -> dict[str, Any]:
     """Reduce an open USDC position by a whole percentage.
 
@@ -234,8 +262,9 @@ def partial_close(
     payload = intents.partial_intent(
         position, percent, Decimal(str(candidates[0]["minPositionSizeUSD"]))
     )
+    preview = {"dryRun": True, "intent": payload}
     if dry_run:
-        return {"dryRun": True, "intent": payload}
+        return preview
     latest, _, _ = margin.snapshot(
         endpoint, lcd_endpoint, active["evmAddress"], trade_id
     )
@@ -244,4 +273,5 @@ def partial_close(
         or latest["leverage"] != raw["leverage"]
     ):
         raise ValueError("Position changed; review the reduction again")
+    before_submit(preview)
     return intents.submit(endpoint, active, payload)
