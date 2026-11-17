@@ -63,6 +63,17 @@ def check_payload(payload: Any, query: str) -> dict[str, Any]:
     return payload
 
 
+def decode(raw: str | bytes) -> dict[str, Any]:
+    """Parse one protocol message, refusing anything but a JSON object."""
+    try:
+        message = json.loads(raw)
+    except ValueError as exc:
+        raise StreamError("Keeper sent an invalid WebSocket message") from exc
+    if not isinstance(message, dict):
+        raise StreamError("Keeper sent an invalid WebSocket message")
+    return message
+
+
 def payloads(
     ws_endpoint: str,
     query: str,
@@ -72,8 +83,8 @@ def payloads(
 ) -> Generator[dict[str, Any]]:
     """Connect once and yield each checked snapshot payload.
 
-    Raises ValueError when Keeper does not acknowledge the connection,
-    StreamError when the subscription fails or ends, and one of DISCONNECTS
+    Raises StreamError when Keeper does not acknowledge the connection, sends
+    an invalid message, or fails or ends the subscription, and one of DISCONNECTS
     when the connection drops or a read exceeds TIMEOUT seconds.
     """
     with connect(
@@ -82,9 +93,9 @@ def payloads(
         open_timeout=10,
     ) as socket:
         socket.send(json.dumps({"type": "connection_init"}))
-        message = json.loads(socket.recv(timeout=10))
+        message = decode(socket.recv(timeout=10))
         if message.get("type") != "connection_ack":
-            raise ValueError("Keeper did not acknowledge WebSocket connection")
+            raise StreamError("Keeper did not acknowledge WebSocket connection")
         socket.send(
             json.dumps(
                 {
@@ -96,7 +107,7 @@ def payloads(
         )
         notify(CONNECTED)
         while True:
-            message = json.loads(socket.recv(timeout=timeout))
+            message = decode(socket.recv(timeout=timeout))
             if message.get("type") == "ping":
                 socket.send(json.dumps({"type": "pong"}))
             elif message.get("type") == "next":

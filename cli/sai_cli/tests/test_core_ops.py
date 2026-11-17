@@ -379,17 +379,24 @@ def test_check_payload_requires_the_subscribed_list():
 
 
 def ws_server(
-    replies: list[dict[str, Any]],
+    replies: list[dict[str, Any] | str],
+    ack: str = json.dumps({"type": "connection_ack"}),
 ) -> tuple[str, Callable[[], None], list[dict[str, Any]]]:
-    """Serve one graphql-transport-ws session on loopback."""
+    """Serve one graphql-transport-ws session on loopback.
+
+    ACK is the raw first reply; a string reply is sent as-is.
+    """
     received: list[dict[str, Any]] = []
 
     def handler(connection: ServerConnection) -> None:
         received.append(json.loads(connection.recv()))
-        connection.send(json.dumps({"type": "connection_ack"}))
+        connection.send(ack)
+        if ack != json.dumps({"type": "connection_ack"}):
+            time.sleep(0.2)
+            return
         received.append(json.loads(connection.recv()))
         for reply in replies:
-            connection.send(json.dumps(reply))
+            connection.send(reply if isinstance(reply, str) else json.dumps(reply))
         time.sleep(0.2)
 
     server = serve(
@@ -440,3 +447,23 @@ def test_snapshot_reports_an_unreachable_endpoint():
     stop()
     with pytest.raises(stream.StreamError, match="Could not read balance snapshot"):
         stream.snapshot(url, stream.BALANCES, {"user": ADDRESS})
+
+
+@pytest.mark.parametrize(
+    ("ack", "replies"),
+    [
+        (json.dumps({"type": "connection_error"}), []),
+        ("not json", []),
+        (json.dumps({"type": "connection_ack"}), ["{broken"]),
+        (json.dumps({"type": "connection_ack"}), ["[1, 2]"]),
+    ],
+)
+def test_snapshot_reports_a_bad_handshake_or_message_as_a_stream_error(
+    ack: str, replies: list[dict[str, Any] | str]
+):
+    url, stop, _ = ws_server(replies, ack=ack)
+    try:
+        with pytest.raises(stream.StreamError):
+            stream.snapshot(url, stream.BALANCES, {"user": ADDRESS})
+    finally:
+        stop()
