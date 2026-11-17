@@ -52,8 +52,9 @@ encrypted:
   file and this source can decrypt it.
 - `file`: AES-GCM with a key derived from your passphrase by scrypt. Commands
   that need the session prompt for it, or read it from an inherited file
-  descriptor given to `--passphrase-fd`. Sessions saved before keyring
-  backends existed load under `file`.
+  descriptor given to `--passphrase-fd`, which selects `file` unless `test`
+  is set explicitly. Sessions saved before keyring backends existed load under
+  `file`.
 
 
 ## Commands

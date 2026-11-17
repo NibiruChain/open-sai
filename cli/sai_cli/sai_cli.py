@@ -126,7 +126,11 @@ def main(
     """Inspect Sai markets and account data, and submit trading intents."""
     ctx.ensure_object(dict)
     if passphrase_fd is not None and keyring_backend != "file":
-        raise click.UsageError("--passphrase-fd requires --keyring-backend file")
+        # Scripts written before keyring backends pass only --passphrase-fd.
+        source = ctx.get_parameter_source("keyring_backend")
+        if source is not click.core.ParameterSource.DEFAULT:
+            raise click.UsageError("--passphrase-fd requires --keyring-backend file")
+        keyring_backend = "file"
     ctx.obj.update(
         endpoint=endpoint,
         json=json_output,
