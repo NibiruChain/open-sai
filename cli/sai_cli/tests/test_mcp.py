@@ -17,6 +17,7 @@ from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 from sai_cli.core import keeper, margin, storage, stream
+from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 
 ADDRESS = "0x" + "b" * 40
@@ -735,6 +736,44 @@ def test_unexpected_errors_are_generic_and_logged(mcp, monkeypatch, caplog):
         result = invoke(mcp, "market_list")
     assert result == {"error": tools.INTERNAL, "code": "INTERNAL_ERROR"}
     assert "RuntimeError" in caplog.text
+
+
+def test_logged_and_returned_errors_redact_the_session_token(mcp, monkeypatch, caplog):
+    storage.save_session(stored_session())
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(f"boom {TOKEN}")
+
+    monkeypatch.setattr(keeper, "request", fail)
+    with caplog.at_level("ERROR", logger="sai_cli.mcp_server"):
+        assert invoke(mcp, "market_list")["code"] == "INTERNAL_ERROR"
+    assert "RuntimeError: boom" in caplog.text
+    assert tools.REDACTED in caplog.text
+    assert TOKEN not in caplog.text
+
+    def known(*_args: Any, **_kwargs: Any) -> Any:
+        raise keeper.KeeperError(f"failed {TOKEN}")
+
+    monkeypatch.setattr(keeper, "request", known)
+    error = invoke(mcp, "market_list")
+    assert error["error"] == f"failed {tools.REDACTED}"
+
+
+def test_mcp_info_strips_credentials_from_endpoints(monkeypatch):
+    monkeypatch.setenv("SAI_ENDPOINT", "https://user:pw@k.example:8443/query?key=s#f")
+    monkeypatch.setenv("SAI_LCD_ENDPOINT", "https://lcd.example/?apikey=s")
+    storage.save_session(stored_session(endpoint="https://u:p@k.example/q?t=s"))
+    info = invoke(server.create_server(), "mcp_info")
+    assert info["endpoints"] == {
+        "keeper": "https://k.example:8443/query",
+        "websocket": "wss://k.example:8443/query",
+        "lcd": "https://lcd.example/",
+    }
+    assert info["session"]["endpoint"] == "https://k.example/q"
+    text = json.dumps(info)
+    for secret in ("user:pw", "key=", "apikey", "u:p@", "t=s"):
+        assert secret not in text
+    assert sai_info.public_url("http://[::1]:9/q?x=1") == "http://[::1]:9/q"
 
 
 def test_session_reports_never_include_the_token(mcp):

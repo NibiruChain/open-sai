@@ -567,9 +567,9 @@ def create_server(mode: str = "read-only") -> FastMCP:
                 "mcpVersion": info.version("mcp"),
                 "provenance": info.provenance(),
                 "endpoints": {
-                    "keeper": config.endpoint,
-                    "websocket": ws,
-                    "lcd": config.lcd_endpoint,
+                    "keeper": info.public_url(config.endpoint),
+                    "websocket": info.public_url(ws),
+                    "lcd": info.public_url(config.lcd_endpoint),
                 },
                 "exposedTools": mode,
                 "tools": names,

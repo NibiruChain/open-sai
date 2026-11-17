@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from typing import Any
 
 from ..core import intents, keeper, margin, reconcile, storage, stream, trading
 from ..core import session as sessions
+from . import info
 
 log = logging.getLogger("sai_cli.mcp_server")
 
@@ -166,8 +168,25 @@ def describe(exc: Exception) -> dict[str, Any]:
             f"Keeper or contract data was missing or malformed ({type(exc).__name__})",
             "INCOMPLETE_DATA",
         )
-    log.error("Unexpected error in Sai MCP tool", exc_info=exc)
+    trace = "".join(traceback.format_exception(exc))
+    log.error("Unexpected error in Sai MCP tool\n%s", redact(trace))
     return error(INTERNAL, "INTERNAL_ERROR")
+
+
+REDACTED = "[redacted session token]"
+
+
+def redact(text: str) -> str:
+    """Remove the stored session token from TEXT, if one can be read."""
+    try:
+        token = (
+            storage.load_session()["token"]
+            if storage.stored_backend() == "test"
+            else None
+        )
+    except (ValueError, KeyError):
+        token = None
+    return text.replace(token, REDACTED) if token else text
 
 
 def run(action: Callable[[], Any]) -> str:
@@ -176,6 +195,7 @@ def run(action: Callable[[], Any]) -> str:
         value = action()
     except Exception as exc:  # noqa: BLE001 - tools must not raise
         value = describe(exc)
+        value["error"] = redact(value["error"])
     return json.dumps(value, default=str)
 
 
@@ -262,14 +282,18 @@ def session_state(config: Config) -> dict[str, Any]:
         "address": stored["evmAddress"],
         "expiresAt": stored["expiresAt"],
         "expired": expired,
-        "endpoint": stored.get("endpoint"),
+        "endpoint": info.public_url(stored.get("endpoint")),
         "endpointMatches": matches,
     }
 
 
 def auth_status(config: Config) -> dict[str, Any]:
     result = sessions.summary(session_loader(config)())
-    return {**result, "backend": "test"}
+    return {
+        **result,
+        "endpoint": info.public_url(result["endpoint"]),
+        "backend": "test",
+    }
 
 
 # Reads
