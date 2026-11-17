@@ -30,11 +30,15 @@ per-device revocation are not implemented here.
 
 For command examples, setup details, and recovery behavior, read the
 [CLI guide](cli/sai_cli/README.md) and the
-[agent skill](skills/cli-anything-sai/SKILL.md). A trade accepted by Keeper is
+[agent skill](skills/sai/SKILL.md). A trade accepted by Keeper is
 still pending until its outcome is observed. Use `--dry-run` to inspect a local
 trade request without submitting it.
 
 ## Development
 
-Run `just install`, `just test`, and `just check`. The CLI follows the
-CLI-Anything package conventions and includes its Apache-licensed REPL skin.
+Run `just install`, `just test`, and `just check`.
+
+Install the agent skill with
+`npx skills add SaiDotFun/open-sai --skill sai -g -y`. The repository copy at
+`skills/sai/SKILL.md` is the source; the package ships it through the symlink
+`cli/sai_cli/skills/SKILL.md`.

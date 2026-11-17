@@ -1,5 +1,5 @@
 ---
-name: cli-anything-sai
+name: sai
 description: Inspect Sai markets and positions, follow live updates, and submit authenticated trading intents using the Sai CLI.
 ---
 
