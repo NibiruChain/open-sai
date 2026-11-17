@@ -391,7 +391,7 @@ def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
                 ws_url(ctx, ws_endpoint),
                 stream.BALANCES,
                 {"user": address},
-                notify=warn_connected,
+                notify=warn,
             ),
         )
     except stream.StreamError as exc:
@@ -709,10 +709,6 @@ def ws_url(ctx: click.Context, ws_endpoint: str | None) -> str:
         raise click.ClickException(str(exc)) from exc
 
 
-def warn_connected(message: str) -> None:
-    click.echo(message, err=True)
-
-
 def watch_stream(ws_endpoint: str, query: str, variables: dict[str, Any]) -> None:
     """Print each snapshot as a JSON line, reconnecting until interrupted."""
     try:
@@ -720,7 +716,7 @@ def watch_stream(ws_endpoint: str, query: str, variables: dict[str, Any]) -> Non
         while True:
             try:
                 for payload in stream.payloads(
-                    ws_endpoint, query, variables, notify=warn_connected
+                    ws_endpoint, query, variables, notify=warn
                 ):
                     click.echo(json.dumps(payload, separators=(",", ":")))
             except stream.DISCONNECTS as exc:
