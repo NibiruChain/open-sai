@@ -17,7 +17,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect
 from websockets.typing import Subprotocol
 
-from .core import clipboard, intents, keeper, margin, storage
+from .core import clipboard, intents, keeper, margin, reconcile, storage
 from .core import session as sessions
 from .utils.repl_skin import ReplSkin
 
@@ -411,52 +411,7 @@ def intent() -> None:
 def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
     """Read Keeper's latest intent records; reconcile a known key."""
     try:
-        data = keeper.request(
-            ctx.obj["endpoint"], keeper.INTENTS, {"user": address, "key": key}
-        )
-        if key and data.get("userIntents"):
-            row = data["userIntents"][0]
-            step = row.get("lifecycleStep")
-            if (
-                row.get("intentKey") == key
-                and str(row.get("evmAddress") or "").lower() == address.lower()
-            ):
-                if row.get("execActor") == "server" and step in (
-                    "exec_fail",
-                    "exec_req_fail",
-                ):
-                    storage.set_status(key, ctx.obj["endpoint"], address, "terminal")
-                elif row.get("execActor") == "server" and step in (
-                    "jwt_pass",
-                    "exec_req_pass",
-                    "exec_pass",
-                ):
-                    storage.set_status(key, ctx.obj["endpoint"], address, "accepted")
-                if (
-                    step == "exec_pass" and row.get("execActor") == "server"
-                ) or step == "exec_finality_observed":
-                    history_data = keeper.request(
-                        ctx.obj["endpoint"], keeper.HISTORY, {"trader": address}
-                    )
-                    matches = [
-                        item
-                        for item in history_data["perp"]["tradeHistory"]
-                        if item.get("intentKey") == key and item.get("trade")
-                    ]
-                    data["matchedTradeHistory"] = matches
-                    if matches:
-                        storage.set_status(
-                            key, ctx.obj["endpoint"], address, "terminal"
-                        )
-        elif key and data.get("userIntents") == []:
-            # Keeper has no record. Past its admission expiry it never will,
-            # so the key no longer blocks new trades.
-            local = storage.mark_absent(
-                key, ctx.obj["endpoint"], address, keeper.ABSENT_AFTER_SECONDS
-            )
-            if local is not None:
-                data["localStatus"] = local
-        emit(ctx, data)
+        emit(ctx, reconcile.reconcile(ctx.obj["endpoint"], address, key))
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
 
