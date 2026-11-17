@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import shlex
+import shutil
 import sys
 import time
 from datetime import UTC, datetime
@@ -181,18 +182,19 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
 
 @main.group()
 def auth() -> None:
-    """Connect and manage a local encrypted trading session."""
+    """Sign in, check, and remove the local trading session."""
 
 
 @auth.command("login")
 @click.option(
     "--account",
-    help="Foundry keystore name (~/.foundry/keystores). Signs through ud when"
-    " ud manages a matching keystore; otherwise cast may prompt for the keystore password.",
+    help="Foundry keystore name (~/.foundry/keystores). cast may prompt for"
+    " the keystore password.",
 )
 @click.option(
     "--wallet",
-    help="Wallet name in the local ud wallet manager. Signs without a prompt.",
+    help="Wallet name for people who use the `ud` tool. Requires `ud`; signs"
+    " through `ud evm wallet run` without a prompt.",
 )
 @click.option(
     "--address",
@@ -204,11 +206,11 @@ def login(
 ) -> None:
     """Sign Keeper's trading-session challenge with a local key.
 
-    Use --wallet for a ud wallet or --account for a Foundry keystore. With
-    --account, sai signs through ud when `ud evm wallet show` reports a matching
-    keystore by that name, so ud supplies the keystore password; otherwise it falls back to cast,
-    which may prompt. The CLI checks that the challenge is a Sai
-    `UserTradingSession` for this address before anything signs it.
+    Use --account for a Foundry keystore: sai runs `cast wallet address` and
+    `cast wallet sign`, and cast may prompt for the keystore password. If you
+    use the `ud` tool, --wallet signs with a ud wallet instead. The CLI checks
+    that the challenge is a Sai `UserTradingSession` for this address before
+    anything signs it.
     """
     if bool(account) == bool(wallet):
         raise click.UsageError("Pass exactly one of --account or --wallet")
@@ -253,29 +255,31 @@ def ud_state_hint(wallet: str, state: str | None) -> str:
 def signed_login(
     endpoint: str, account: str | None, wallet: str | None, address: str | None
 ) -> dict[str, str]:
-    """Sign in with a ud wallet when possible, else with cast.
+    """Sign in with a Foundry keystore (--account) or a ud wallet (--wallet).
 
-    --account uses ud only when ud's Cast keystore for the name matches the
-    wallet, since `ud evm wallet run` refuses otherwise; a Foundry keystore
-    that merely shares a name with a ud wallet still signs through cast.
+    --account never looks for ud: it signs with cast even when ud is
+    installed and knows a wallet by the same name.
     """
-    name = wallet or account
-    assert name
-    found = keeper.ud_wallet(name)
-    if found is not None and found.can_sign:
-        address = checked_address(found.address, address)
-        return keeper.wallet_session(endpoint, address, name)
-    if wallet:
-        if found is None:
-            raise ValueError(
-                f"`ud evm wallet show {wallet}` failed or printed no address;"
-                " check that ud is installed and knows this wallet"
-            )
+    if account:
+        if address is None:
+            address = keeper.cast_address(account)
+        return keeper.cast_session(endpoint, address, account)
+    assert wallet
+    if shutil.which("ud") is None:
+        raise ValueError(
+            "--wallet needs the `ud` tool on PATH; use --account NAME with a"
+            " Foundry keystore, or `sai auth import`"
+        )
+    found = keeper.ud_wallet(wallet)
+    if found is None:
+        raise ValueError(
+            f"`ud evm wallet show {wallet}` failed or printed no address;"
+            " check that ud knows this wallet"
+        )
+    if not found.can_sign:
         raise ValueError(ud_state_hint(wallet, found.cast_state))
-    assert account
-    if address is None:
-        address = keeper.cast_address(account)
-    return keeper.cast_session(endpoint, address, account)
+    address = checked_address(found.address, address)
+    return keeper.wallet_session(endpoint, address, wallet)
 
 
 NO_CLIPBOARD = (
@@ -338,6 +342,25 @@ def import_token(ctx: click.Context) -> None:
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@auth.command("logout")
+@click.pass_context
+def logout(ctx: click.Context) -> None:
+    """Delete the stored session from this machine.
+
+    Makes no network call. Keeper cannot revoke session tokens yet, so a
+    token copied elsewhere stays valid until it expires.
+    """
+    removed = storage.delete_session()
+    emit(
+        ctx,
+        {
+            "removed": removed,
+            "note": "Keeper cannot revoke session tokens yet; the token stays"
+            " valid until it expires.",
+        },
+    )
 
 
 @auth.command("status")

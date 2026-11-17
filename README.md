@@ -52,14 +52,14 @@ Trading needs a Sai session. There are two ways to get one:
   token at the hidden prompt or press Enter to read the clipboard. You can
   also tell your agent "connect Sai"; it runs `sai auth import`, which reads
   the clipboard when there is no terminal.
-- **With a local key.** This works today. Run
-  `sai auth login --account NAME` for a Foundry keystore, or
-  `sai auth login --wallet NAME` for a wallet in the `ud` wallet manager.
-  The CLI fetches Keeper's sign-in challenge, checks that it is a Sai
-  trading-session request for your address, and only then has the wallet
-  sign it. When `ud` manages a matching keystore by that name, `ud` supplies the keystore password and
-  nothing prompts. Otherwise `--account` signs with `cast wallet sign`, which
-  asks for the keystore password.
+- **With a Foundry keystore.** This works today. Run
+  `sai auth login --account NAME`, where `NAME` is a keystore in
+  `~/.foundry/keystores`. The CLI fetches Keeper's sign-in challenge, checks
+  that it is a Sai trading-session request for your address, and only then
+  runs `cast wallet sign`, which asks for the keystore password.
+
+If you use the `ud` tool, `sai auth login --wallet NAME` signs with a ud
+wallet instead, without a prompt. `sai auth logout` deletes the stored session.
 
 After connecting, commands run without prompts until the session expires. Know
 what the token is:
@@ -68,7 +68,8 @@ what the token is:
 - It lasts as long as Keeper issues it: 30 days in production.
 - It authorizes all trading on the funds deposited in your Sai account.
   Withdrawals still need your wallet.
-- It cannot be revoked yet. Signing out of Sai Web does not sign out the CLI.
+- It cannot be revoked yet. Signing out of Sai Web does not sign out the CLI,
+  and `sai auth logout` only deletes the local copy.
 
 The CLI stores the session in `~/.sai/trader/session.json` with mode 0600,
 encrypted with a key built into the CLI, like the Cosmos SDK `test` keyring.
