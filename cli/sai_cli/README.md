@@ -12,7 +12,10 @@ in the browser. Keeper issues it for 30 days in production. It authorizes
 every trade kind on the account's deposited funds, and Keeper cannot revoke it
 yet: signing out of Sai Web clears only the browser copy, not the CLI's.
 
-`auth import` stores a token copied from Sai Web:
+`auth import` stores a token copied from Sai Web. The **Connect Sai CLI /
+MCP** button that copies it is in review
+(https://github.com/SaiDotFun/sai-web/pull/1591); until it ships, use
+`auth login --account` below.
 
 - With a terminal, it asks for the token at a hidden prompt. Press Enter
   without typing to read the clipboard.
@@ -22,9 +25,11 @@ yet: signing out of Sai Web clears only the browser copy, not the CLI's.
   non-zero and asks for the person to run `sai auth import` in their own
   terminal.
 - It never reads the token from arguments, environment variables, or piped
-  stdin, and never prints it. It prints only `evmAddress` and `expiresAt`.
-- After storing the token, it clears the clipboard if the clipboard still holds
-  the token.
+  stdin, and never prints it. Like `auth login` and `auth status`, it prints
+  only `address`, `expiresAt`, and `endpoint`.
+- After storing the token, it reads the clipboard again and clears it only if
+  it still holds the token. Anything copied in the meantime, such as a
+  passphrase, stays.
 
 `auth login --account NAME` signs Keeper's challenge with the Foundry keystore
 `NAME`. Before signing, the CLI checks that the typed data has primary type

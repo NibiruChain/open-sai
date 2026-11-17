@@ -19,11 +19,16 @@ Streams reconnect after transport interruptions and emit a new snapshot.
 
 When the person asks you to connect Sai:
 
-1. Ask them to copy their session token in Sai Web.
+1. Ask them to copy their session token with the **Connect Sai CLI / MCP**
+   button in Sai Web. If their Sai Web has no such button yet, ask them to
+   run `sai auth login --account NAME` in their own terminal instead (below).
 2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
-   stores the token, clears the clipboard, and prints `evmAddress` and
-   `expiresAt`.
-3. If it says no clipboard command works (for example over SSH), ask the
+   stores the token, clears the clipboard, and prints `address`,
+   `expiresAt`, and `endpoint`.
+3. If your commands run in a pseudo-terminal, `auth import` shows a hidden
+   prompt instead. Send only an empty line (Enter), which makes it read the
+   clipboard. Never type, paste, or echo the token yourself.
+4. If it says no clipboard command works (for example over SSH), ask the
    person to run `sai auth import` in their own terminal, then continue.
 
 Never ask the person to paste the token into the chat, and never pass it as an

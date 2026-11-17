@@ -32,12 +32,15 @@ trade request without submitting it.
 
 Trading needs a Sai session. There are two ways to get one:
 
-- **From Sai Web.** Copy your session token in Sai Web (a **Connect Sai CLI /
-  MCP** button is planned), then run `sai auth import`. In a terminal, paste
-  the token at the hidden prompt or press Enter to read the clipboard. You can
+- **From Sai Web.** A **Connect Sai CLI / MCP** button that copies your
+  session token is coming to Sai Web
+  ([sai-web#1591](https://github.com/SaiDotFun/sai-web/pull/1591)). Once it
+  ships, copy the token and run `sai auth import`. In a terminal, paste the
+  token at the hidden prompt or press Enter to read the clipboard. You can
   also tell your agent "connect Sai"; it runs `sai auth import`, which reads
   the clipboard when there is no terminal.
-- **With a Foundry keystore.** Run `sai auth login --account NAME`. The CLI
+- **With a Foundry keystore.** This works today. Run
+  `sai auth login --account NAME`. The CLI
   fetches Keeper's sign-in challenge, checks that it is a Sai trading-session
   request for your address, and runs `cast wallet sign`, which asks for the
   keystore password. Pass `--address` to skip the extra password prompt from
