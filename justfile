@@ -1,4 +1,6 @@
-default:
+# Wrapper that makes calling `just` show the command list
+[private]
+list:
     @just --list
 
 install:
