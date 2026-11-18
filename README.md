@@ -83,25 +83,25 @@ your files can decrypt it. There is no session passphrase.
 
 ## Use Sai From Your Agent (MCP)
 
-The `sai-mcp` server gives MCP clients such as Claude Code the same reads,
-previews, and trades as the CLI. Connect to Sai with the CLI first. The
-server reads the stored session without a prompt, never asks for the token,
-and never returns it.
+`sai mcp serve` runs an MCP server that gives agent clients such as Claude
+Code the same reads, previews, and trades as the CLI. Install `sai` on your
+`PATH` first, then register it:
 
 ```bash
-claude mcp add sai -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp
+claude mcp add sai -- sai mcp serve
 ```
 
-From a checkout, use `uv run --directory /path/to/open-sai sai-mcp` as the
-command instead.
+From a checkout, use `uv run --directory /path/to/open-sai sai mcp serve` as
+the command instead. An entry registered before `sai mcp serve` existed no
+longer starts; run `claude mcp remove sai` and add it again.
 
-The server starts read-only: market data, account reads, intent status, and
-trade previews. To let the agent submit trades, set
-`SAI_MCP_EXPOSED_TOOLS=all` before the `--`:
-
-```bash
-claude mcp add sai -e SAI_MCP_EXPOSED_TOOLS=all -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp
-```
+The server lists every tool, trades included, whether or not you are signed in.
+Trading follows sign-in on each call. Sign in with `sai auth login` or `sai
+auth import` in a terminal, and the agent can submit trades; sign out with `sai
+auth logout`, and every `trade_*` call returns `SIGNED_OUT` without touching
+Keeper. An expired session returns `SESSION_EXPIRED`. The server reads the
+stored session without a prompt, never asks for the token, and never returns
+it.
 
 Each preview names the signed-in `account`, and each trade must carry the
 `previewDigest` from a preview the user confirmed. Before submitting, the
@@ -117,16 +117,20 @@ longer matches:
 - `trade_close`, `trade_tpsl`, and `trade_leverage`: nothing beyond the
   account and arguments.
 
-Ask the agent to call `mcp_info` to see the version, endpoints, mode, and
-active account.
+Ask the agent to call `mcp_info` to see the version, endpoints, active
+account, and `trading`, which reports whether trades can submit and why not
+(`signed-out`, `expired`, or `other-endpoint`).
 
 With several accounts connected, `auth_list` shows them, `auth_use` switches
 the active one (for the CLI too), and preview and trade tools take an
 optional `address` to act as another connected account. A preview names its
-account, and a trade refuses if the account changed after the preview.
+account, and a trade refuses if the account changed after the preview. A
+trade for an account that is not signed in for this server's endpoint is
+refused the same way.
 
-The server reads the same settings as the CLI when it starts:
-`SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
+The server reads the same settings as the CLI once, when it starts: the
+`--endpoint`, `--ws-endpoint`, and `--lcd-endpoint` flags after `sai mcp
+serve`, then `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
 `~/.sai/config.toml`, which `sai config set` edits. See
 [Settings](cli/sai_cli/README.md#settings).
 

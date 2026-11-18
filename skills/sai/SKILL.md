@@ -82,8 +82,15 @@ auth login`.
 ## MCP Server
 
 If Sai tools such as `mcp_info` and `market_prices` are available, prefer
-them over shell commands. Call `mcp_info` first. Trade tools exist only when
-the server runs with `SAI_MCP_EXPOSED_TOOLS=all`. Before any trade, call the
+them over shell commands. To register them with Claude Code, run `claude mcp
+add sai -- sai mcp serve`; `sai mcp serve` is meant for an agent client to
+launch, not for a person to run. Call `mcp_info` first. Every tool is listed
+at all times, but trades submit only while someone is signed in:
+`mcp_info.trading.available` says whether they can, and its `reason` is
+`signed-in`, `signed-out`, `expired`, or `other-endpoint`. A signed-out
+`trade_*` call returns `SIGNED_OUT` (or `SESSION_EXPIRED`, or
+`SESSION_UNAVAILABLE`) and submits nothing; ask the person to run `sai auth
+login` or `sai auth import` in their own terminal. Before any trade, call the
 matching `preview_*` tool, show the person the result, and wait for explicit
 confirmation. Then call the `trade_*` tool with the preview's `previewDigest`
 (and `referencePrice` for a market open). On `PREVIEW_MISMATCH` or
