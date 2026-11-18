@@ -517,7 +517,8 @@ def loader(ctx: click.Context) -> PinnedSession:
 def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
     """Print a trade result with the account it used or would use.
 
-    A dry run without a usable session names no account.
+    A dry run without a usable session names no account, unless --as asked
+    for one, which then must be connected.
     """
     load = loader(ctx)
     account = load.address
@@ -525,6 +526,9 @@ def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
         try:
             account = load()["evmAddress"]
         except ValueError:
+            # A dry run needs no session, but a requested account must exist.
+            if ctx.obj["as_address"]:
+                raise
             account = None
     emit(ctx, {"account": account, **result})
 

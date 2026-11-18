@@ -149,6 +149,9 @@ def test_cli_dry_run_names_the_account_it_would_use(session):
     chosen = CliRunner().invoke(main, ["--as", session["evmAddress"], *args])
     assert json.loads(chosen.output)["account"] == session["evmAddress"]
     assert "token" not in active.output + chosen.output
+    missing = CliRunner().invoke(main, ["--as", "0x" + "d" * 40, *args])
+    assert missing.exit_code != 0
+    assert "is not connected" in missing.output
 
 
 def test_trade_session_stays_on_the_account_it_first_loaded(session):
