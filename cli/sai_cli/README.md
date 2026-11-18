@@ -2,9 +2,42 @@
 
 Install `sai` as the [root README](../../README.md) shows. From a checkout, run
 `uv sync`, then `uv run sai --help`.
-The CLI connects to mainnet Keeper by default and accepts `--endpoint` for a
-different network. `account balances` and `watch` accept `--ws-endpoint` if the
-WebSocket service differs from the HTTP endpoint.
+The CLI connects to mainnet Keeper by default.
+
+## Settings
+
+`$SAI_HOME/config.toml` (default `~/.sai/config.toml`) holds settings for both
+the CLI and `sai-mcp`. Each setting comes from the first of these that sets
+it: a flag, an environment variable, the file, the mainnet default.
+
+| Key                  | Flag             | Variable           | Default                 |
+| -------------------- | ---------------- | ------------------ | ----------------------- |
+| `keeper.endpoint`    | `--endpoint`     | `SAI_ENDPOINT`     | mainnet Keeper GraphQL  |
+| `keeper.ws_endpoint` | `--ws-endpoint`  | `SAI_WS_ENDPOINT`  | derived from the above  |
+| `lcd.endpoint`       | `--lcd-endpoint` | `SAI_LCD_ENDPOINT` | `https://lcd.nibiru.fi` |
+| `update.auto`        |                  | `SAI_UPDATE_AUTO`  | `true`                  |
+
+```bash
+sai config list                      # every key, its value, and its source
+sai config get keeper.endpoint       # the exact value
+sai config set keeper.endpoint URL
+sai config unset keeper.endpoint
+```
+
+`config list --json` returns `{"path", "settings": {KEY: {"value",
+"source", "env", "default"}}}`, where `source` is `flag`, `env`, `file`,
+`default`, or `derived`. `list` drops credentials from URLs; `get` prints the
+exact value. An unknown key or invalid value exits 2 and lists the valid keys.
+
+The first `set` or `unset` writes the whole file with every key commented out
+and explained, at mode 0600 in a 0700 directory. Later edits keep your
+comments. Keys the CLI does not know produce a warning and are ignored.
+
+A `keeper.ws_endpoint` from a lower layer than `keeper.endpoint` is ignored,
+and the CLI derives the WebSocket from the Keeper endpoint instead. So
+`sai --endpoint URL` never pairs `URL` with the WebSocket of the Keeper in the
+file. The per-command `--ws-endpoint` and `--lcd-endpoint` options still
+work and override the setting for that command.
 
 ## Connecting
 
