@@ -118,7 +118,12 @@ longer matches:
   account and arguments.
 
 Ask the agent to call `mcp_info` to see the version, endpoints, mode, and
-signed-in account. `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`
+active account.
+
+With several accounts connected, `auth_list` shows them, `auth_use` switches
+the active one (for the CLI too), and preview and trade tools take an
+optional `address` to act as another connected account. A preview names its
+account, and a trade refuses if the account changed after the preview. `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`
 select another network.
 
 ## Development

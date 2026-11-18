@@ -168,12 +168,15 @@ REDACTED = "[redacted session token]"
 
 
 def redact(text: str) -> str:
-    """Remove the stored session token from TEXT, if one can be read."""
+    """Remove every connected account's session token from TEXT."""
     try:
-        token = storage.load_session()["token"]
+        stored = storage.load_accounts()["sessions"].values()
     except (ValueError, KeyError):
-        token = None
-    return text.replace(token, REDACTED) if token else text
+        return text
+    for result in stored:
+        if token := result.get("token"):
+            text = text.replace(token, REDACTED)
+    return text
 
 
 def run(action: Callable[[], Any]) -> str:
@@ -189,16 +192,43 @@ def run(action: Callable[[], Any]) -> str:
 # Session
 
 
-def session_loader(config: Config) -> trading.SessionLoader:
-    """Return a loader for the active stored session; it never prompts."""
+class AccountSession:
+    """Load one connected account's session for the length of a tool call.
 
-    def load() -> dict[str, str]:
+    With ADDRESS, that connected account; without it, the active account.
+    The first load pins the address, so switching the active account during
+    a call cannot move a checked trade to another account. Never prompts.
+    """
+
+    def __init__(self, config: Config, address: str | None = None) -> None:
+        self.config = config
+        self.requested = address
+        self.pinned: str | None = None
+
+    def __call__(self) -> dict[str, str]:
         try:
-            return sessions.load_active_session(config.endpoint)
+            result = sessions.load_active_session(
+                self.config.endpoint, self.pinned or self.requested
+            )
         except ValueError as exc:
             raise SessionUnavailable(str(exc)) from exc
+        self.pinned = result["evmAddress"]
+        return result
 
-    return load
+    def account(self) -> str | None:
+        """Return the address a trade would use, or None when the active
+        account is unusable. A requested account must be usable."""
+        if self.requested:
+            return self()["evmAddress"]
+        try:
+            return self()["evmAddress"]
+        except SessionUnavailable:
+            return None
+
+
+def session_loader(config: Config, address: str | None = None) -> AccountSession:
+    """Return a loader for ADDRESS or the active account; it never prompts."""
+    return AccountSession(config, address)
 
 
 def resolve_address(config: Config, address: str | None) -> dict[str, Any]:
@@ -240,8 +270,13 @@ def session_state(config: Config) -> dict[str, Any]:
         return {"signedIn": False, "error": str(exc)}
     expired = expiry <= datetime.now(UTC)
     matches = stored.get("endpoint") == config.endpoint
+    try:
+        connected = len(storage.load_accounts()["sessions"])
+    except ValueError:
+        connected = 1
     return {
         "signedIn": True,
+        "connectedAccounts": connected,
         "usable": matches and not expired,
         "address": stored["evmAddress"],
         "expiresAt": stored["expiresAt"],
@@ -251,9 +286,40 @@ def session_state(config: Config) -> dict[str, Any]:
     }
 
 
-def auth_status(config: Config) -> dict[str, Any]:
-    result = sessions.summary(session_loader(config)())
+def auth_status(config: Config, address: str | None = None) -> dict[str, Any]:
+    result = sessions.summary(session_loader(config, address)())
     return {**result, "endpoint": info.public_url(result["endpoint"])}
+
+
+def account_rows(config: Config) -> dict[str, Any]:
+    """Describe every connected account without its token."""
+    accounts = storage.load_accounts()
+    now = datetime.now(UTC)
+    rows = []
+    for key, result in sorted(accounts["sessions"].items()):
+        expired = datetime.fromisoformat(result["expiresAt"]) <= now
+        matches = result.get("endpoint") == config.endpoint
+        rows.append(
+            {
+                "address": result["evmAddress"],
+                "active": key == accounts["active"],
+                "expiresAt": result["expiresAt"],
+                "expired": expired,
+                "endpoint": info.public_url(result.get("endpoint")),
+                "endpointMatches": matches,
+                "usable": matches and not expired,
+            }
+        )
+    return {"accounts": rows}
+
+
+def auth_list(config: Config) -> dict[str, Any]:
+    return account_rows(config)
+
+
+def auth_use(config: Config, address: str) -> dict[str, Any]:
+    storage.use_session(address)
+    return account_rows(config)
 
 
 # Reads
@@ -350,16 +416,8 @@ def with_digest(preview: dict[str, Any]) -> dict[str, Any]:
     return {**preview, "previewDigest": preview_digest(preview)}
 
 
-def preview_account(config: Config) -> str | None:
-    """Return the signed-in address a trade would use, or None without one."""
-    try:
-        return session_loader(config)()["evmAddress"]
-    except SessionUnavailable:
-        return None
-
-
 def bound(
-    config: Config,
+    load: AccountSession,
     digest: str | None,
     reference_price: str | None = None,
     slippage: str | None = None,
@@ -380,7 +438,7 @@ def bound(
     )
 
     def check(preview: dict[str, Any]) -> None:
-        fresh = with_digest({**preview, "account": preview_account(config)})
+        fresh = with_digest({**preview, "account": load.account()})
         confirmed = (
             fresh
             if reference is None
@@ -403,7 +461,7 @@ def bound(
 
 
 def submit_check(
-    config: Config,
+    load: AccountSession,
     dry_run: bool,
     digest: str | None,
     reference_price: str | None = None,
@@ -412,7 +470,7 @@ def submit_check(
     """Return the pre-submit check for a trade; a dry run never calls it."""
     if dry_run:
         return lambda _preview: None
-    return bound(config, digest, reference_price, slippage)
+    return bound(load, digest, reference_price, slippage)
 
 
 # Statuses of an open that may still fill, and how long one can. Keeper
@@ -446,11 +504,11 @@ def recent_opens(
     return recent
 
 
-def no_recent_open(config: Config) -> trading.SubmitCheck:
+def no_recent_open(config: Config, load: AccountSession) -> trading.SubmitCheck:
     """Return a check that refuses an open while a recent one may fill."""
 
     def check(_preview: dict[str, Any]) -> None:
-        account = session_loader(config)()["evmAddress"]
+        account = load()["evmAddress"]
         pending = recent_opens(config.endpoint, account)
         if pending:
             statuses = " or ".join(sorted({row["status"] for row in pending}))
@@ -475,12 +533,13 @@ def both(
     return check
 
 
-def finish(config: Config, dry_run: bool, result: dict[str, Any]) -> dict[str, Any]:
-    """Add the account and previewDigest to a preview; pass a submission
-    through."""
+def finish(
+    load: AccountSession, dry_run: bool, result: dict[str, Any]
+) -> dict[str, Any]:
+    """Add the account to a result, and the previewDigest to a preview."""
     if not dry_run:
-        return result
-    return with_digest({**result, "account": preview_account(config)})
+        return {**result, "account": load.pinned}
+    return with_digest({**result, "account": load.account()})
 
 
 # Trading: each action previews with dry_run and submits without it. A
@@ -503,6 +562,7 @@ def open_trade(
     take_profit: str | None,
     stop_loss: str | None,
     preview_digest: str | None = None,
+    address: str | None = None,
     reference_price: str | None = None,
     allow_concurrent_open: bool = False,
 ) -> dict[str, Any]:
@@ -511,15 +571,16 @@ def open_trade(
         raise ValueError(MARKET_ONLY_REFERENCE)
     if not dry_run and market and reference_price is None:
         raise ValueError(NEEDS_REFERENCE)
+    load = session_loader(config, address)
     check = submit_check(
-        config, dry_run, preview_digest, reference_price, slippage if market else None
+        load, dry_run, preview_digest, reference_price, slippage if market else None
     )
     if not dry_run and not allow_concurrent_open:
-        check = both(no_recent_open(config), check)
+        check = both(no_recent_open(config, load), check)
     notices: list[str] = []
     result = trading.open_trade(
         config.endpoint,
-        session_loader(config),
+        load,
         market_id=market_id,
         side=side,
         order_type=order_type,
@@ -539,7 +600,7 @@ def open_trade(
         result["referencePrice"] = format(Decimal(str(current)), "f")
     if notices:
         result["notices"] = notices
-    return finish(config, dry_run, result)
+    return finish(load, dry_run, result)
 
 
 def close_trade(
@@ -549,17 +610,19 @@ def close_trade(
     trade_id: int,
     cancel_order: bool,
     preview_digest: str | None = None,
+    address: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(config, dry_run, preview_digest)
+    load = session_loader(config, address)
+    check = submit_check(load, dry_run, preview_digest)
     result = trading.close_trade(
         config.endpoint,
-        session_loader(config),
+        load,
         trade_id=trade_id,
         cancel_order=cancel_order,
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(config, dry_run, result)
+    return finish(load, dry_run, result)
 
 
 def set_tpsl(
@@ -572,11 +635,13 @@ def set_tpsl(
     clear_take_profit: bool,
     clear_stop_loss: bool,
     preview_digest: str | None = None,
+    address: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(config, dry_run, preview_digest)
+    load = session_loader(config, address)
+    check = submit_check(load, dry_run, preview_digest)
     result = trading.set_tpsl(
         config.endpoint,
-        session_loader(config),
+        load,
         trade_id=trade_id,
         take_profit=take_profit,
         stop_loss=stop_loss,
@@ -585,7 +650,7 @@ def set_tpsl(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(config, dry_run, result)
+    return finish(load, dry_run, result)
 
 
 def set_leverage(
@@ -595,17 +660,19 @@ def set_leverage(
     trade_id: int,
     leverage: str,
     preview_digest: str | None = None,
+    address: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(config, dry_run, preview_digest)
+    load = session_loader(config, address)
+    check = submit_check(load, dry_run, preview_digest)
     result = trading.set_leverage(
         config.endpoint,
-        session_loader(config),
+        load,
         trade_id=trade_id,
         leverage=leverage,
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(config, dry_run, result)
+    return finish(load, dry_run, result)
 
 
 def change_margin(
@@ -616,11 +683,13 @@ def change_margin(
     direction: str,
     amount: str,
     preview_digest: str | None = None,
+    address: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(config, dry_run, preview_digest)
+    load = session_loader(config, address)
+    check = submit_check(load, dry_run, preview_digest)
     result = trading.change_margin(
         config.endpoint,
-        session_loader(config),
+        load,
         trade_id=trade_id,
         direction=direction,
         amount=amount,
@@ -628,7 +697,7 @@ def change_margin(
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(config, dry_run, result)
+    return finish(load, dry_run, result)
 
 
 def partial_close(
@@ -638,15 +707,17 @@ def partial_close(
     trade_id: int,
     percent: int,
     preview_digest: str | None = None,
+    address: str | None = None,
 ) -> dict[str, Any]:
-    check = submit_check(config, dry_run, preview_digest)
+    load = session_loader(config, address)
+    check = submit_check(load, dry_run, preview_digest)
     result = trading.partial_close(
         config.endpoint,
-        session_loader(config),
+        load,
         trade_id=trade_id,
         percent=percent,
         lcd_endpoint=config.lcd_endpoint,
         dry_run=dry_run,
         before_submit=check,
     )
-    return finish(config, dry_run, result)
+    return finish(load, dry_run, result)

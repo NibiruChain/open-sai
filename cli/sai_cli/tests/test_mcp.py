@@ -17,6 +17,7 @@ from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 from sai_cli.core import keeper, margin, storage, stream
+from sai_cli.core import session as sessions
 from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 
@@ -36,6 +37,8 @@ TRADE_TOOLS = {
 READ_TOOLS = {
     "mcp_info",
     "auth_status",
+    "auth_list",
+    "auth_use",
     "market_list",
     "market_prices",
     "account_positions",
@@ -50,7 +53,9 @@ READ_TOOLS = {
     "preview_margin",
     "preview_partial_close",
 }
-LOCAL_TOOLS = {"mcp_info", "auth_status", "intent_local"}
+LOCAL_TOOLS = {"mcp_info", "auth_status", "auth_list", "auth_use", "intent_local"}
+# Changes only which connected account is active on this machine.
+SWITCH_TOOLS = {"auth_use"}
 
 
 @pytest.fixture(autouse=True)
@@ -151,6 +156,11 @@ def test_every_tool_has_a_description_and_the_right_annotations(mcp):
             assert hints.destructiveHint is True, name
             assert hints.idempotentHint is False, name
             assert hints.openWorldHint is True, name
+        elif name in SWITCH_TOOLS:
+            assert hints.readOnlyHint is False, name
+            assert hints.destructiveHint is False, name
+            assert hints.idempotentHint is True, name
+            assert hints.openWorldHint is False, name
         else:
             assert hints.readOnlyHint is True, name
             assert hints.destructiveHint is False, name
@@ -591,6 +601,117 @@ def test_preview_is_bound_to_the_signed_in_account(mcp, monkeypatch, name, argum
     assert error["preview"]["account"] == OTHER
     assert fake.submitted == []
     assert storage.list_pending(ENDPOINT, OTHER) == []
+
+
+OTHER_TOKEN = "header.other-account-session-token.signature"
+
+
+def connect_two_accounts() -> None:
+    """Connect ADDRESS, then OTHER, which becomes active."""
+    storage.save_session(stored_session())
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+
+
+def test_auth_list_and_auth_use_switch_accounts(mcp):
+    connect_two_accounts()
+    listed = invoke(mcp, "auth_list")
+    assert OTHER_TOKEN not in json.dumps(listed)
+    assert {r["address"]: r["active"] for r in listed["accounts"]} == {
+        ADDRESS: False,
+        OTHER: True,
+    }
+    assert all(r["usable"] for r in listed["accounts"])
+    assert invoke(mcp, "auth_status")["address"] == OTHER
+    assert invoke(mcp, "auth_status", {"address": ADDRESS})["address"] == ADDRESS
+
+    switched = invoke(mcp, "auth_use", {"address": ADDRESS.upper().replace("0X", "0x")})
+    assert {r["address"]: r["active"] for r in switched["accounts"]} == {
+        ADDRESS: True,
+        OTHER: False,
+    }
+    assert storage.load_session()["evmAddress"] == ADDRESS
+    info = invoke(mcp, "mcp_info")["session"]
+    assert (info["address"], info["connectedAccounts"]) == (ADDRESS, 2)
+
+    missing = invoke(mcp, "auth_use", {"address": "0x" + "d" * 40})
+    assert missing["code"] == "INVALID_REQUEST"
+    assert "is not connected" in missing["error"]
+
+
+def test_trade_acts_as_the_requested_connected_account(mcp, monkeypatch):
+    connect_two_accounts()
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    args = {"trade_id": 7, "address": ADDRESS}
+    preview = invoke(mcp, "preview_close", args)
+    assert preview["account"] == ADDRESS
+    result = invoke(
+        mcp, "trade_close", {**args, "preview_digest": preview["previewDigest"]}
+    )
+    # FakeKeeper checks that the submission carries ADDRESS's token, not the
+    # active account's.
+    assert result["status"] == "accepted", result
+    assert result["account"] == ADDRESS
+    assert storage.load_session()["evmAddress"] == OTHER
+
+
+def test_switching_accounts_after_a_preview_refuses_the_trade(mcp, monkeypatch):
+    connect_two_accounts()
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_close", {"trade_id": 7})
+    assert preview["account"] == OTHER
+    invoke(mcp, "auth_use", {"address": ADDRESS})
+    error = invoke(
+        mcp,
+        "trade_close",
+        {"trade_id": 7, "preview_digest": preview["previewDigest"]},
+    )
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["account"] == ADDRESS
+    assert fake.submitted == []
+
+
+def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch):
+    # ADDRESS is active; the user confirmed a preview for OTHER.
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+    storage.save_session(stored_session())
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_close", {"trade_id": 7, "address": OTHER})
+    # Another process switches to OTHER right after the trade loads ADDRESS.
+    real = sessions.load_active_session
+
+    def switch_after_load(endpoint, address=None):
+        result = real(endpoint, address)
+        storage.use_session(OTHER)
+        return result
+
+    monkeypatch.setattr(sessions, "load_active_session", switch_after_load)
+    error = invoke(
+        mcp, "trade_close", {"trade_id": 7, "preview_digest": preview["previewDigest"]}
+    )
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["account"] == ADDRESS
+    assert fake.submitted == []
+
+
+def test_preview_for_an_unconnected_account_fails(mcp, monkeypatch):
+    connect_two_accounts()
+    monkeypatch.setattr(keeper, "request", FakeKeeper())
+    error = invoke(mcp, "preview_close", {"trade_id": 7, "address": "0x" + "d" * 40})
+    assert error["code"] == "SESSION_UNAVAILABLE"
+    assert "is not connected" in error["error"]
+
+
+def test_errors_redact_every_connected_token():
+    connect_two_accounts()
+    text = f"failed with {TOKEN} and {OTHER_TOKEN}"
+    assert tools.redact(text) == f"failed with {tools.REDACTED} and {tools.REDACTED}"
 
 
 def test_preview_without_a_session_names_no_account(mcp, monkeypatch):
