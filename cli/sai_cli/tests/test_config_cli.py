@@ -166,6 +166,44 @@ def test_malformed_file_fails_commands_but_can_be_fixed(tmp_path):
         assert f"Cannot parse {path}" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "original",
+    [
+        'keeper = { endpoint = "https://old.example/q" }  # staging\n',
+        'keeper.endpoint = "https://old.example/q"  # staging\n',
+        "[keeper.sub]  # mine\nx = 1\n",
+    ],
+    ids=["inline", "dotted", "subtable-only"],
+)
+def test_set_and_unset_refuse_non_standard_sections(tmp_path, original):
+    path = tmp_path / "config.toml"
+    path.write_bytes(original.encode())
+    for args in (
+        ("config", "set", "keeper.endpoint", "https://new.example/q"),
+        ("config", "unset", "keeper.endpoint"),
+        ("config", "unset", "keeper.ws_endpoint"),
+    ):
+        result = sai(*args)
+        assert result.exit_code == 2, result.output
+        assert f"keeper in {path} is an inline table" in result.stderr
+        assert "rewrite it as a [keeper] table" in result.stderr
+        assert path.read_bytes() == original.encode()
+
+
+def test_unset_of_an_unset_key_never_writes(tmp_path):
+    path = tmp_path / "config.toml"
+    assert sai("config", "unset", "keeper.endpoint").exit_code == 0
+    assert not path.exists()
+    original = "[keeper]  # hand-written\n# my note\n"
+    path.write_text(original)
+    path.chmod(0o644)
+    before = path.stat().st_mtime_ns
+    result = sai("config", "unset", "keeper.endpoint")
+    assert result.stdout.startswith("Already unset: keeper.endpoint")
+    assert path.read_text() == original
+    assert path.stat().st_mtime_ns == before
+
+
 def test_unknown_file_keys_warn(tmp_path):
     (tmp_path / "config.toml").write_text("[keeper]\ntimeout = 3\n")
     result = sai("config", "list")

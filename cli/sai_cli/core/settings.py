@@ -42,6 +42,10 @@ class SettingsError(ValueError):
     """A setting, its value, or the config file is invalid."""
 
 
+class UneditableSection(SettingsError):
+    """The section is valid TOML that `sai config` will not rewrite."""
+
+
 @dataclass(frozen=True)
 class Setting:
     """One key: where it lives, how to set it, and what it defaults to."""
@@ -409,10 +413,10 @@ def _table(
     """Return the `[section]` table for SPEC, or None when absent and not
     CREATE.
 
-    An inline table (`keeper = { endpoint = "..." }`), dotted keys
-    (`keeper.endpoint = "..."`), or a section that exists only through
-    subtables becomes a `[section]` table at the end of the file, with the
-    same values.
+    The reader accepts an inline table (`keeper = { endpoint = "..." }`),
+    dotted keys (`keeper.endpoint = "..."`), and a section made only of
+    subtables, but rewriting those would drop their comments, so editing
+    them is refused and the person converts the section by hand.
     """
     item = doc.get(spec.section)
     if item is None:
@@ -423,17 +427,15 @@ def _table(
         return table
     if _is_standard(doc, spec.section, item):
         return item
-    values = item.unwrap() if hasattr(item, "unwrap") else item
-    if not isinstance(values, dict):
+    if not isinstance(getattr(item, "unwrap", lambda: None)(), dict):
         raise SettingsError(
             f"{path}: {spec.section!r} must be a table, such as [{spec.section}]"
         )
-    del doc[spec.section]
-    table = tomlkit.table()
-    for name, value in values.items():
-        table.add(name, value)
-    doc.add(spec.section, table)
-    return table
+    raise UneditableSection(
+        f"{spec.section} in {path} is an inline table, dotted keys, or only"
+        f" subtables; rewrite it as a [{spec.section}] table to edit it with"
+        " sai config"
+    )
 
 
 def _is_placeholder(item: Any, spec: Setting) -> bool:
@@ -548,9 +550,10 @@ def _locked(path: Path) -> Generator[None]:
         os.close(fd)
 
 
-def edit_file(path: Path, edit: Callable[[str | None], str]) -> None:
+def edit_file(path: Path, edit: Callable[[str | None], str | None]) -> None:
     """Apply EDIT to the text at PATH (None when missing) and save it, holding
-    the config lock across the read, the edit, and the replace."""
+    the config lock across the read, the edit, and the replace. EDIT returns
+    None to leave the file as it is."""
     with _locked(path):
         try:
             text: str | None = path.read_text(encoding="utf-8")
@@ -558,4 +561,6 @@ def edit_file(path: Path, edit: Callable[[str | None], str]) -> None:
             text = None
         except OSError as exc:
             raise SettingsError(f"Cannot read {path}: {exc.strerror}") from None
-        write_file(path, edit(text))
+        new = edit(text)
+        if new is not None:
+            write_file(path, new)

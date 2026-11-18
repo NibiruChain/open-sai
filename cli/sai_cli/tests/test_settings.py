@@ -219,38 +219,42 @@ def test_set_and_unset_keep_the_persons_comments():
     assert "# endpoint =" not in text
 
 
-@pytest.mark.parametrize(
-    "original",
-    [
-        (
-            'keeper = { endpoint = "https://old.example/q", extra = 1 }\n'
-            "[update]\nauto = false\n"
-        ),
-        (
-            'keeper.endpoint = "https://old.example/q"\nkeeper.extra = 1\n'
-            "[update]\nauto = false\n"
-        ),
-        "[update]\nauto = false\n[keeper.sub]\nx = 1\n",
-    ],
-    ids=["inline", "dotted", "subtable-only"],
-)
-def test_set_and_unset_edit_every_table_form_the_reader_accepts(original):
-    before = tomllib.loads(original)
-    old = before["keeper"].get("endpoint")
-    text, removed = settings.unset_value(original, "keeper.endpoint")
-    assert removed is (old is not None)
-    after = tomllib.loads(text)
-    assert "endpoint" not in after["keeper"]
-    assert settings.parse_file(text, "x")[0] == {"update.auto": False}
-    # Other values in the section and the file survive.
-    rest = {k: v for k, v in before["keeper"].items() if k != "endpoint"}
-    assert after["keeper"] == rest
-    assert after["update"] == {"auto": False}
+NON_STANDARD = {
+    "inline": (
+        "# notes\n"
+        'keeper = { endpoint = "https://old.example/q" }  # staging\n'
+        "[update]\nauto = false\n"
+    ),
+    "dotted": (
+        'keeper.endpoint = "https://old.example/q"  # staging\n'
+        'keeper.ws_endpoint = "wss://old.example/q"  # rotates weekly\n'
+        "[update]\nauto = false\n"
+    ),
+    "subtable-only": "[update]\nauto = false\n[keeper.sub]  # mine\nx = 1\n",
+}
 
-    text, _ = settings.set_value(original, "keeper.endpoint", "https://new.example/q")
-    after = tomllib.loads(text)
-    assert after["keeper"] == {**rest, "endpoint": "https://new.example/q"}
-    assert after["update"] == {"auto": False}
+
+@pytest.mark.parametrize("form", sorted(NON_STANDARD))
+def test_non_standard_sections_are_read_but_not_edited(form):
+    original = NON_STANDARD[form]
+    values, _ = settings.parse_file(original, "x")
+    assert values["update.auto"] is False
+    for edit in (
+        lambda: settings.set_value(
+            original, "keeper.endpoint", "https://n.example", "x"
+        ),
+        lambda: settings.unset_value(original, "keeper.endpoint", "x"),
+        lambda: settings.unset_value(original, "keeper.ws_endpoint", "x"),
+    ):
+        with pytest.raises(
+            settings.UneditableSection,
+            match=r"keeper in x is an inline table, dotted keys, or only subtables;"
+            r" rewrite it as a \[keeper\] table",
+        ):
+            edit()
+    # Other sections stay editable.
+    text, _ = settings.set_value(original, "update.auto", "true", "x")
+    assert "# staging" in text or form == "subtable-only"
 
 
 def test_known_section_that_is_not_a_table_is_an_error(tmp_path):
@@ -260,8 +264,12 @@ def test_known_section_that_is_not_a_table_is_an_error(tmp_path):
         settings.read_file(path)
     with pytest.raises(SettingsError, match="'keeper' must be a table"):
         settings.load()
-    with pytest.raises(SettingsError, match="'keeper' must be a table"):
-        settings.set_value(path.read_text(), "keeper.endpoint", "https://k.example")
+    for edit in (
+        lambda t: settings.set_value(t, "keeper.endpoint", "https://k.example"),
+        lambda t: settings.unset_value(t, "keeper.endpoint"),
+    ):
+        with pytest.raises(SettingsError, match="'keeper' must be a table"):
+            edit(path.read_text())
     # An unknown section that is not a table is still only a warning.
     path.write_text('theme = "dark"\n')
     assert settings.read_file(path) == (

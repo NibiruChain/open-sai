@@ -31,9 +31,11 @@ exact value. An unknown key or invalid value exits 2 and lists the valid keys.
 
 The first `set` or `unset` writes the whole file with every key commented out
 and explained, at mode 0600 in a 0700 directory. Later edits keep your
-comments, and a lock file makes concurrent edits run one at a time. An edit
-turns an inline table or dotted keys for a section into a `[section]` table
-with the same values. Keys the CLI does not know produce a warning and are
+comments, and a lock file makes concurrent edits run one at a time. The
+CLI reads a section written as an inline table, dotted keys, or only
+subtables, but `set` and `unset` refuse to edit it (exit 2) until you rewrite
+it as a `[section]` table. Unsetting a key that is already unset leaves the
+file alone. Keys the CLI does not know produce a warning and are
 ignored; a known section that is not a table is an error.
 
 A `keeper.ws_endpoint` from a lower layer than `keeper.endpoint` is ignored,

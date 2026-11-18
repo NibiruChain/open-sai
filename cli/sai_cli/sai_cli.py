@@ -960,6 +960,8 @@ def config_set(ctx: click.Context, key: str, value: str) -> None:
         sai_settings.edit_file(
             path, lambda text: sai_settings.set_value(text, spec.key, value, path)[0]
         )
+    except sai_settings.UneditableSection as exc:
+        raise click.UsageError(str(exc)) from exc
     except sai_settings.SettingsError as exc:
         raise click.ClickException(str(exc)) from exc
     report_change(ctx, spec, {"key": spec.key, "value": parsed, "path": str(path)})
@@ -974,13 +976,16 @@ def config_unset(ctx: click.Context, key: str) -> None:
     path = config_file()
     removed: list[bool] = []
 
-    def edit(text: str | None) -> str:
+    def edit(text: str | None) -> str | None:
         new, was_set = sai_settings.unset_value(text, spec.key, path)
         removed.append(was_set)
-        return new
+        # An already unset key leaves the file untouched.
+        return new if was_set else None
 
     try:
         sai_settings.edit_file(path, edit)
+    except sai_settings.UneditableSection as exc:
+        raise click.UsageError(str(exc)) from exc
     except sai_settings.SettingsError as exc:
         raise click.ClickException(str(exc)) from exc
     report_change(
