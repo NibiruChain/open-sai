@@ -165,6 +165,24 @@ serve`, then `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
 `~/.sai/config.toml`, which `sai config set` edits. See
 [Settings](cli/sai_cli/README.md#settings).
 
+## Logs
+
+`sai` and `sai mcp serve` record what they do in `~/.sai/logs`, one JSON
+object per line: each command and MCP tool call with its arguments and
+duration, each Keeper request and its outcome, and each status change of a
+trade intent. The session token is never written.
+
+```bash
+sai logs tail                    # the last 20 events
+sai logs tail -n 50 --surface mcp
+sai logs tail --event intent     # how each intent moved through its states
+sai logs path                    # where the files are
+```
+
+Files older than 14 days are deleted. `sai config set logs.enabled false`
+turns logging off. See [Logs](cli/sai_cli/README.md#logs) for the events and
+their fields.
+
 ## Development
 
 Run `just install`, `just test`, and `just check`.
