@@ -29,6 +29,10 @@ balances ADDRESS`, and `account history ADDRESS` for data. Use `watch price
 TOKEN_ID`, `watch positions ADDRESS`, or `watch balances ADDRESS` for streams.
 Streams reconnect after transport interruptions and emit a new snapshot.
 
+When a command fails in a way you cannot explain, run `sai --json doctor`.
+Each check has a `status` (pass, warn, fail, or skipped) and a `fix` command;
+show the person the failing checks and their fixes.
+
 ## Connect Sai
 
 When the person asks you to connect Sai:

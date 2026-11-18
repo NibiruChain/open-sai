@@ -821,6 +821,45 @@ def partial_close(
         raise click.ClickException(str(exc)) from exc
 
 
+@main.command("doctor")
+@click.option(
+    "--offline", is_flag=True, help="Skip the Keeper, WebSocket, and LCD checks."
+)
+@click.option(
+    "--ws-endpoint", help="Keeper WebSocket endpoint; derived from --endpoint."
+)
+@click.option(
+    "--lcd-endpoint",
+    default=margin.MAINNET_LCD,
+    show_default=True,
+    help="Nibiru REST endpoint.",
+)
+@click.pass_context
+def doctor_command(
+    ctx: click.Context, offline: bool, ws_endpoint: str | None, lcd_endpoint: str
+) -> None:
+    """Check the install, session, intent ledger, and endpoints.
+
+    Prints pass, warn, or fail with a fix for each check and exits 1 on any
+    fail. Read-only: it changes no files and never prints the session token.
+    """
+    from . import doctor
+    from .mcp_server import tools
+
+    config = tools.Config(
+        endpoint=ctx.obj["endpoint"],
+        ws_override=ws_endpoint,
+        lcd_endpoint=lcd_endpoint,
+    )
+    checks = doctor.run_checks(doctor.context(config), offline=offline)
+    if ctx.obj["json"]:
+        click.echo(doctor.render_json(doctor.report(checks)))
+    else:
+        click.echo(doctor.render_text(checks))
+    if doctor.overall(checks) == "fail":
+        ctx.exit(1)
+
+
 @main.group()
 def watch() -> None:
     """Stream live Keeper updates as JSON lines."""
