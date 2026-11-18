@@ -29,8 +29,9 @@ sai config unset keeper.endpoint
 `default`, or `derived`. `list` drops credentials from URLs; `get` prints the
 exact value. An unknown key or invalid value exits 2 and lists the valid keys.
 
-The first `set` or `unset` writes the whole file with every key commented out
-and explained, at mode 0600 in a 0700 directory. Later edits keep your
+The first `set`, or an `unset` that removes a value, writes the whole file
+with every key commented out and explained, at mode 0600 in a 0700
+directory. Unsetting a key that is already unset writes nothing. Later edits keep your
 comments, and a lock file makes concurrent edits run one at a time. The
 CLI reads a section written as an inline table, dotted keys, or only
 subtables, but `set` and `unset` refuse to edit it (exit 2) until you rewrite
