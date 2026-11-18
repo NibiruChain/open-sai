@@ -4,12 +4,15 @@ intent identities."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import time
+from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,10 +46,13 @@ _V2_AAD = b"sai-session-v2-test"
 SIGN_IN_AGAIN = "run `sai auth import` or `sai auth login` again"
 NO_SESSION = "No Sai session; run `sai auth import` or `sai auth login`"
 SESSION_FIELDS = ("token", "evmAddress", "expiresAt")
+# What delete_session reports after deleting a store it could not read.
+UNREADABLE_REMOVED = "unreadable session file"
 
 
 def _sessions_path() -> Path:
-    return directory() / "sessions.json"
+    # home(), not directory(): reading must not create the directory.
+    return home() / "sessions.json"
 
 
 def _v2_path() -> Path:
@@ -144,9 +150,39 @@ def _save_accounts(accounts: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             output.write(json.dumps(envelope))
-        os.replace(temp, _sessions_path())
+        os.replace(temp, root / "sessions.json")
     finally:
         Path(temp).unlink(missing_ok=True)
+    _v2_path().unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def _locked() -> Generator[None]:
+    """Hold an exclusive lock across one read-modify-write of the accounts,
+    so concurrent sign-ins, switches, and logouts do not lose each other."""
+    with open(directory() / "sessions.lock", "a+b") as handle:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _remove_files() -> None:
+    _sessions_path().unlink(missing_ok=True)
     _v2_path().unlink(missing_ok=True)
 
 
@@ -161,12 +197,20 @@ def _find(accounts: dict[str, Any], address: str) -> str:
 
 
 def save_session(session: dict[str, str]) -> None:
-    """Add or replace the account for SESSION's address and make it active."""
-    accounts = load_accounts()
-    address = session["evmAddress"].lower()
-    accounts["sessions"][address] = session
-    accounts["active"] = address
-    _save_accounts(accounts)
+    """Add or replace the account for SESSION's address and make it active.
+
+    A store that cannot be read (damaged, or from a passphrase version) is
+    replaced, since signing in is how the person recovers from it.
+    """
+    with _locked():
+        try:
+            accounts = load_accounts()
+        except ValueError:
+            accounts: dict[str, Any] = {"active": None, "sessions": {}}
+        address = session["evmAddress"].lower()
+        accounts["sessions"][address] = session
+        accounts["active"] = address
+        _save_accounts(accounts)
 
 
 def load_session(address: str | None = None) -> dict[str, str]:
@@ -186,11 +230,12 @@ def load_session(address: str | None = None) -> dict[str, str]:
 
 def use_session(address: str) -> dict[str, str]:
     """Make the connected ADDRESS the active account and return its session."""
-    accounts = load_accounts()
-    key = _find(accounts, address)
-    accounts["active"] = key
-    _save_accounts(accounts)
-    return accounts["sessions"][key]
+    with _locked():
+        accounts = load_accounts()
+        key = _find(accounts, address)
+        accounts["active"] = key
+        _save_accounts(accounts)
+        return accounts["sessions"][key]
 
 
 def session_exists() -> bool:
@@ -202,28 +247,35 @@ def delete_session(address: str | None = None) -> str | None:
     """Remove ADDRESS, or the active account, from this machine.
 
     Returns the removed address, or None when there was nothing to remove.
-    Removing the active account leaves no account active.
+    Removing the active account leaves no account active. Without ADDRESS, a
+    store that cannot be read is deleted and reported as removed.
     """
     if not session_exists():
         return None
-    accounts = load_accounts()
-    if address is None:
-        key = accounts["active"]
-        if key is None:
-            return None
-    else:
-        key = address.lower()
-        if key not in accounts["sessions"]:
-            return None
-    removed = accounts["sessions"].pop(key)["evmAddress"]
-    if accounts["active"] == key:
-        accounts["active"] = None
-    if accounts["sessions"]:
-        _save_accounts(accounts)
-    else:
-        _sessions_path().unlink(missing_ok=True)
-        _v2_path().unlink(missing_ok=True)
-    return removed
+    with _locked():
+        try:
+            accounts = load_accounts()
+        except ValueError:
+            if address is not None:
+                raise
+            _remove_files()
+            return UNREADABLE_REMOVED
+        if address is None:
+            key = accounts["active"]
+            if key is None:
+                return None
+        else:
+            key = address.lower()
+            if key not in accounts["sessions"]:
+                return None
+        removed = accounts["sessions"].pop(key)["evmAddress"]
+        if accounts["active"] == key:
+            accounts["active"] = None
+        if accounts["sessions"]:
+            _save_accounts(accounts)
+        else:
+            _remove_files()
+        return removed
 
 
 # Version 1 adds `created_at`, the Unix time when the CLI reserved the key.

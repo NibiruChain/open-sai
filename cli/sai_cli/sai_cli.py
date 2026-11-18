@@ -327,7 +327,7 @@ def logout(ctx: click.Context, address: str | None) -> None:
         ctx,
         {
             "removed": removed is not None,
-            "address": removed,
+            "address": None if removed == storage.UNREADABLE_REMOVED else removed,
             "note": "Keeper cannot revoke session tokens yet; the token stays"
             " valid until it expires.",
         },
@@ -377,7 +377,8 @@ def auth_use(ctx: click.Context, address: str) -> None:
 @auth.command("status")
 @click.pass_context
 def auth_status(ctx: click.Context) -> None:
-    """Show the account and expiration without showing the token."""
+    """Show the active account, or the --as account, and its expiry without
+    showing the token."""
     try:
         result = session(ctx)
         emit(ctx, sessions.summary(result))
@@ -491,6 +492,18 @@ def loader(ctx: click.Context) -> trading.SessionLoader:
     return lambda: session(ctx)
 
 
+def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
+    """Print a trade result with the account it used or would use.
+
+    A dry run without a usable session names no account.
+    """
+    try:
+        account: str | None = session(ctx)["evmAddress"]
+    except ValueError:
+        account = None
+    emit(ctx, {"account": account, **result})
+
+
 def warn(message: str) -> None:
     click.echo(message, err=True)
 
@@ -530,7 +543,7 @@ def trade_open(
 ) -> None:
     """Open a market, limit, or stop trade."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.open_trade(
                 ctx.obj["endpoint"],
@@ -566,7 +579,7 @@ def trade_close(
 ) -> None:
     """Close a position or cancel a pending order."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.close_trade(
                 ctx.obj["endpoint"],
@@ -599,7 +612,7 @@ def trade_tpsl(
 ) -> None:
     """Set or clear take-profit and stop-loss prices."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.set_tpsl(
                 ctx.obj["endpoint"],
@@ -626,7 +639,7 @@ def trade_leverage(
 ) -> None:
     """Set target leverage without changing TP or SL."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.set_leverage(
                 ctx.obj["endpoint"],
@@ -669,7 +682,7 @@ def trade_margin(
     The amount is a quote, not a cap: collateral can change before execution.
     """
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.change_margin(
                 ctx.obj["endpoint"],
@@ -701,7 +714,7 @@ def partial_close(
 ) -> None:
     """Reduce an open USDC position by a whole percentage."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.partial_close(
                 ctx.obj["endpoint"],
