@@ -8,6 +8,7 @@ import shlex
 import shutil
 import sys
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime
 from importlib import metadata, resources
 from pathlib import Path
@@ -1338,7 +1339,7 @@ def update_report(
         "latestTag": latest,
         "updateAvailable": newer,
         "install": install.to_json(),
-        "reinstall": update.reinstall_command(latest) if newer else None,
+        "update": asdict(update.guidance(install, latest)) if newer else None,
     }
 
 
@@ -1349,12 +1350,10 @@ def print_update_report(report: dict[str, Any]) -> None:
     if not report["updateAvailable"]:
         click.echo("sai is up to date.")
         return
-    if kind == update.CHECKOUT:
-        click.echo("A newer version is available. This is a source checkout;")
-        click.echo("pull and run `uv sync` to update it.")
-        return
-    click.echo("A newer version is available. To install it, run:")
-    click.echo(f"  {report['reinstall']}")
+    guide = report["update"]
+    click.echo(f"A newer version is available. {guide['note']}")
+    if guide["command"]:
+        click.echo(f"  {guide['command']}")
 
 
 @main.command("update")
@@ -1367,15 +1366,15 @@ def update_command(
 ) -> None:
     """Compare the installed version with the latest GitHub release.
 
-    `--check` reports the installed and latest versions and how sai was
-    installed. Installing updates comes in a later release; until then,
-    reinstall with the command `--check` prints.
+    `--check` reports the installed and latest versions, how sai was
+    installed, and how to update it. Installing updates comes in a later
+    release.
     """
     if not check:
         click.echo(
             "`sai update` cannot install updates yet; that comes in a later"
-            " release. Run `sai update --check`, then reinstall with:\n"
-            f"  {update.reinstall_command()}",
+            " release. Run `sai update --check` to see the latest version and"
+            " how to update this install.",
             err=True,
         )
         ctx.exit(EXIT_UNSUPPORTED)

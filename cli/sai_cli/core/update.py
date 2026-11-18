@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -82,31 +83,54 @@ def _checked(tag: Any) -> str:
     return tag
 
 
+# The API answer is a few kilobytes; refuse anything far larger.
+MAX_BODY = 1 << 20
+TIMED_OUT = "timed out checking the latest release"
+
+
 def _timeout(deadline: float, connect: float) -> httpx.Timeout:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise UpdateError("timed out checking the latest release")
+        raise UpdateError(TIMED_OUT)
     return httpx.Timeout(remaining, connect=min(connect, remaining))
 
 
-def _from_api(client: httpx.Client, url: str, timeout: httpx.Timeout) -> str | None:
+def _read_body(response: httpx.Response, deadline: float) -> bytes:
+    """Read the body, giving up at DEADLINE even if bytes keep arriving."""
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        body += chunk
+        if time.monotonic() > deadline:
+            raise UpdateError(TIMED_OUT)
+        if len(body) > MAX_BODY:
+            raise UpdateError("GitHub API answer is too large")
+    return bytes(body)
+
+
+def _from_api(
+    client: httpx.Client, url: str, deadline: float, connect: float
+) -> str | None:
     """Return the tag from the API, or None when the fallback should run."""
-    response = client.get(url, timeout=timeout)
-    if response.status_code in FALLBACK_STATUSES or response.status_code >= 500:
-        return None
-    if response.status_code == 404:
-        raise UpdateError("no release is published yet")
-    if response.status_code != 200:
-        raise UpdateError(f"GitHub API answered HTTP {response.status_code}")
+    with client.stream("GET", url, timeout=_timeout(deadline, connect)) as response:
+        status = response.status_code
+        if status in FALLBACK_STATUSES or status >= 500:
+            return None
+        if status == 404:
+            raise UpdateError("no release is published yet")
+        if status != 200:
+            raise UpdateError(f"GitHub API answered HTTP {status}")
+        body = _read_body(response, deadline)
     try:
-        return _checked(response.json().get("tag_name"))
+        return _checked(json.loads(body).get("tag_name"))
     except (ValueError, AttributeError) as exc:
         raise UpdateError("GitHub API answered with malformed JSON") from exc
 
 
-def _from_redirect(client: httpx.Client, url: str, timeout: httpx.Timeout) -> str:
+def _from_redirect(
+    client: httpx.Client, url: str, deadline: float, connect: float
+) -> str:
     """Read the tag from the Location of the web /releases/latest redirect."""
-    response = client.head(url, timeout=timeout)
+    response = client.head(url, timeout=_timeout(deadline, connect))
     location = response.headers.get("location")
     if not response.is_redirect or not location:
         raise UpdateError(
@@ -119,6 +143,19 @@ def _from_redirect(client: httpx.Client, url: str, timeout: httpx.Timeout) -> st
     return _checked(unquote(tag))
 
 
+def _fetch(api: str, web: str, deadline: float, connect: float) -> str:
+    try:
+        with httpx.Client(headers=_headers(), follow_redirects=False) as client:
+            tag = _from_api(client, api, deadline, connect)
+            if tag is not None:
+                return tag
+            return _from_redirect(client, web, deadline, connect)
+    except httpx.TimeoutException as exc:
+        raise UpdateError(TIMED_OUT) from exc
+    except httpx.HTTPError as exc:
+        raise UpdateError(f"could not reach GitHub: {type(exc).__name__}") from exc
+
+
 def fetch_latest(
     api_base: str = API_BASE,
     web_base: str = WEB_BASE,
@@ -129,21 +166,33 @@ def fetch_latest(
     """Return the latest release tag of REPO.
 
     Asks the API first and falls back to the web redirect on 403, 429, or a
-    5xx. Both requests share one TOTAL_TIMEOUT budget.
+    5xx. Both requests share one TOTAL_TIMEOUT wall-clock budget. HTTPX
+    timeouts apply per network operation, so a server that sends a byte at a
+    time could outlast them; the lookup runs in a daemon thread that the
+    caller stops waiting for at the deadline.
     """
     deadline = time.monotonic() + total_timeout
     api = f"{api_base.rstrip('/')}/repos/{repo}/releases/latest"
     web = f"{web_base.rstrip('/')}/{repo}/releases/latest"
-    try:
-        with httpx.Client(headers=_headers(), follow_redirects=False) as client:
-            tag = _from_api(client, api, _timeout(deadline, connect_timeout))
-            if tag is not None:
-                return tag
-            return _from_redirect(client, web, _timeout(deadline, connect_timeout))
-    except httpx.TimeoutException as exc:
-        raise UpdateError("timed out checking the latest release") from exc
-    except httpx.HTTPError as exc:
-        raise UpdateError(f"could not reach GitHub: {type(exc).__name__}") from exc
+    outcome: dict[str, str | Exception] = {}
+
+    def work() -> None:
+        try:
+            outcome["tag"] = _fetch(api, web, deadline, connect_timeout)
+        except Exception as exc:  # noqa: BLE001 - re-raised in the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=work, name="sai-update-check", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    if worker.is_alive():
+        raise UpdateError(TIMED_OUT)
+    error = outcome.get("error")
+    if isinstance(error, Exception):
+        raise error
+    tag = outcome.get("tag")
+    assert isinstance(tag, str)
+    return tag
 
 
 # Install kind
@@ -243,9 +292,56 @@ def install_kind(prefix: Path | None = None) -> Install:
 
 
 def reinstall_command(tag: str | None = None) -> str:
-    """The command that installs TAG, or main, as a uv tool."""
+    """The command that installs TAG, or main, from this repository."""
     ref = f"@{tag}" if tag else ""
     return f"uv tool install --reinstall git+{GIT_URL}{ref}"
+
+
+@dataclass(frozen=True)
+class Guidance:
+    """How to move INSTALL to a newer release, without replacing a fork or
+    local build with the upstream package."""
+
+    note: str
+    command: str | None = None
+
+
+def _source(url: str | None) -> str | None:
+    """The uv source that reinstalls from URL: a path or a git URL."""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    if parts.scheme == "file":
+        return unquote(parts.path)
+    return url if url.startswith("git+") else f"git+{url}"
+
+
+def guidance(install: Install, tag: str) -> Guidance:
+    """Say how to update INSTALL to release TAG.
+
+    Only an install from this repository gets the upstream command; any
+    other source is the user's to update.
+    """
+    if install.kind == UV_TOOL_GIT:
+        return Guidance("Reinstall the release with uv.", reinstall_command(tag))
+    if install.kind == CHECKOUT:
+        return Guidance("This is a source checkout; pull, then run `uv sync`.")
+    if install.kind == UVX:
+        return Guidance(
+            "uvx runs a cached copy; name the release to run it.",
+            f"uvx --from git+{GIT_URL}@{tag} sai",
+        )
+    source = _source(install.url)
+    if install.kind == UV_TOOL_OTHER and source:
+        return Guidance(
+            f"This sai was installed from {install.url}, not {REPO}. Update"
+            " that source, then reinstall from it.",
+            f"uv tool install --reinstall {source}",
+        )
+    return Guidance(
+        "This sai was not installed from this repository's releases. Update it"
+        " the way it was installed."
+    )
 
 
 # Cache

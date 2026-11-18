@@ -31,7 +31,15 @@ Routes = dict[str, tuple[int, dict[str, str], bytes]]
 class Stub:
     """A loopback HTTP server answering fixed routes, recording requests."""
 
-    def __init__(self, routes: Routes, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        routes: Routes,
+        delay: float = 0.0,
+        drip: float = 0.0,
+        drip_paths: frozenset[str] = frozenset(),
+    ) -> None:
+        """DRIP sends each response on DRIP_PATHS one byte at a time, DRIP
+        seconds apart, so no single read waits long enough to time out."""
         self.routes = routes
         self.requests: list[tuple[str, str]] = []
         stub = self
@@ -41,6 +49,9 @@ class Stub:
                 stub.requests.append((self.command, self.path))
                 time.sleep(delay)
                 status, headers, data = stub.routes.get(self.path, (404, {}, b""))
+                if self.path in drip_paths:
+                    self.drip(status, headers, data if body else b"")
+                    return
                 self.send_response(status)
                 for name, value in headers.items():
                     self.send_header(name, value)
@@ -48,6 +59,19 @@ class Stub:
                 self.end_headers()
                 if body:
                     self.wfile.write(data)
+
+            def drip(self, status: int, headers: dict[str, str], data: bytes) -> None:
+                lines = [f"HTTP/1.1 {status} X", f"Content-Length: {len(data)}"]
+                lines += [f"{name}: {value}" for name, value in headers.items()]
+                raw = ("\r\n".join(lines) + "\r\n\r\n").encode() + data
+                try:
+                    for byte in raw:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(drip)
+                except OSError:
+                    pass
+                self.close_connection = True
 
             def do_GET(self) -> None:
                 self.answer(body=True)
@@ -179,6 +203,28 @@ def test_fetch_gives_up_at_the_total_timeout():
         with pytest.raises(update.UpdateError, match="timed out"):
             fetch(stub, total_timeout=0.3)
     assert time.monotonic() - started < 0.9
+
+
+def slow_release() -> tuple[int, dict[str, str], bytes]:
+    status, headers, body = release("v0.2.0")
+    return status, headers, body + b" " * 200
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_fetch_keeps_its_deadline_against_a_slow_drip(fallback):
+    location = f"/{update.REPO}/releases/tag/v0.2.0"
+    if fallback:
+        routes: Routes = {API_PATH: (429, {}, b""), WEB_PATH: redirect(location)}
+        drip_paths = frozenset({WEB_PATH})
+    else:
+        routes = {API_PATH: slow_release()}
+        drip_paths = frozenset({API_PATH})
+    with Stub(routes, drip=0.02, drip_paths=drip_paths) as stub:
+        started = time.monotonic()
+        with pytest.raises(update.UpdateError, match="timed out"):
+            fetch(stub, total_timeout=0.3)
+        elapsed = time.monotonic() - started
+    assert elapsed < 0.6
 
 
 def test_fetch_reports_an_unreachable_host():
@@ -313,7 +359,7 @@ def test_update_check_json_reports_versions_and_caches(sai_home):
         update.UVX,
         update.OTHER,
     }
-    assert report["reinstall"].endswith("open-sai@v99.0.0")
+    assert report["update"]["note"]
     assert update.latest_version() == "99.0.0"
 
 
@@ -353,18 +399,63 @@ def test_update_without_check_does_not_install():
     assert result.exit_code == EXIT_UNSUPPORTED
     assert result.stdout == ""
     assert "cannot install updates yet" in result.stderr
-    assert "uv tool install --reinstall" in result.stderr
+    assert "uv tool install" not in result.stderr
 
 
-def test_update_text_names_the_reinstall_command_or_the_checkout_steps(capsys):
-    tool = update.Install(update.UV_TOOL_GIT, "/p")
-    print_update_report(update_report("0.1.0", "v0.2.0", tool))
-    out = capsys.readouterr().out
+UPSTREAM = update.reinstall_command("v0.2.0")
+
+
+def advice(install: update.Install, capsys) -> tuple[dict, str]:
+    report = update_report("0.1.0", "v0.2.0", install)
+    print_update_report(report)
+    return report["update"], capsys.readouterr().out
+
+
+def test_only_an_upstream_uv_tool_gets_the_upstream_reinstall(capsys):
+    guide, out = advice(update.Install(update.UV_TOOL_GIT, "/p"), capsys)
+    assert guide["command"] == UPSTREAM
     assert "installed  0.1.0 (uv-tool-git)" in out
-    assert update.reinstall_command("v0.2.0") in out
+    assert UPSTREAM in out
 
-    checkout = update.Install(update.CHECKOUT, "/p")
-    print_update_report(update_report("0.1.0", "v0.2.0", checkout))
-    out = capsys.readouterr().out
-    assert "uv sync" in out
+
+@pytest.mark.parametrize(
+    ("url", "command"),
+    [
+        (
+            "https://github.com/someone/open-sai.git",
+            "uv tool install --reinstall git+https://github.com/someone/open-sai.git",
+        ),
+        ("file:///home/u/my%20sai", "uv tool install --reinstall /home/u/my sai"),
+    ],
+)
+def test_a_fork_or_local_uv_tool_reinstalls_from_its_own_source(capsys, url, command):
+    guide, out = advice(update.Install(update.UV_TOOL_OTHER, "/p", url), capsys)
+    assert guide["command"] == command
+    assert "not SaiDotFun/open-sai" in guide["note"]
+    assert command in out
+    assert "SaiDotFun/open-sai@" not in out
+
+
+@pytest.mark.parametrize(
+    ("install", "command", "text"),
+    [
+        (update.Install(update.CHECKOUT, "/p"), None, "uv sync"),
+        (
+            update.Install(update.UVX, "/p"),
+            "uvx --from git+https://github.com/SaiDotFun/open-sai@v0.2.0 sai",
+            "uvx runs a cached copy",
+        ),
+        (update.Install(update.UV_TOOL_OTHER, "/p"), None, "the way it was"),
+        (update.Install(update.OTHER, "/p"), None, "the way it was"),
+    ],
+)
+def test_other_install_kinds_get_their_own_guidance(capsys, install, command, text):
+    guide, out = advice(install, capsys)
+    assert guide["command"] == command
+    assert text in out
     assert "uv tool install" not in out
+
+
+def test_no_guidance_when_current():
+    report = update_report("0.2.0", "v0.2.0", update.Install(update.UV_TOOL_GIT, "/p"))
+    assert report["update"] is None
