@@ -1008,5 +1008,83 @@ def report_change(
         warn(f"Warning: {spec.env} is set and overrides {spec.key} in the file")
 
 
+@main.group("mcp", invoke_without_command=True)
+@click.pass_context
+def mcp_group(ctx: click.Context) -> None:
+    """Run Sai as an MCP server for agent clients.
+
+    Register it with a client, for example:
+    `claude mcp add sai -- sai mcp serve`.
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(0)
+
+
+SERVE_TTY_NOTICE = (
+    "sai mcp serve speaks MCP over stdin and stdout; an agent client should"
+    " launch it, for example `claude mcp add sai -- sai mcp serve`."
+    " Press Ctrl-C to stop."
+)
+
+
+@mcp_group.command("serve")
+@click.option(
+    "--endpoint",
+    help="Keeper GraphQL HTTP endpoint. Defaults to `sai --endpoint` when"
+    " given, then SAI_ENDPOINT, then keeper.endpoint in the config file,"
+    " then mainnet.",
+)
+@click.option(
+    "--ws-endpoint",
+    help="Keeper WebSocket endpoint. Defaults to `sai --ws-endpoint`, then"
+    " SAI_WS_ENDPOINT, then keeper.ws_endpoint, then one derived from the"
+    " Keeper endpoint.",
+)
+@click.option(
+    "--lcd-endpoint",
+    help="Nibiru LCD endpoint for margin and partial-close reads. Defaults to"
+    " `sai --lcd-endpoint`, then SAI_LCD_ENDPOINT, then lcd.endpoint, then"
+    " mainnet.",
+)
+@click.pass_context
+def mcp_serve(
+    ctx: click.Context,
+    endpoint: str | None,
+    ws_endpoint: str | None,
+    lcd_endpoint: str | None,
+) -> None:
+    """Serve Sai tools to an agent client over stdio.
+
+    Stdout carries only MCP protocol messages. Every tool is listed; trade
+    tools submit only while an account is signed in with `sai auth login`
+    or `sai auth import`. Endpoints resolve once, at start, like the CLI's:
+    these flags, then SAI_* variables, then $SAI_HOME/config.toml.
+    """
+    from .mcp_server import server
+
+    flags = serve_flags(
+        ctx.find_root().obj["flags"], endpoint, ws_endpoint, lcd_endpoint
+    )
+    if sys.stdin.isatty():
+        click.echo(SERVE_TTY_NOTICE, err=True)
+    server.serve(flags)
+
+
+def serve_flags(
+    global_flags: dict[str, str | None],
+    endpoint: str | None,
+    ws_endpoint: str | None,
+    lcd_endpoint: str | None,
+) -> dict[str, str | None]:
+    """The flag layer for `sai mcp serve`: its own options, then the same
+    `sai` global flags."""
+    passed = (endpoint, ws_endpoint, lcd_endpoint)
+    return {
+        key: value if value is not None else global_flags.get(key)
+        for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)
+    }
+
+
 if __name__ == "__main__":
     main()

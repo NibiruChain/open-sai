@@ -7,7 +7,7 @@ The CLI connects to mainnet Keeper by default.
 ## Settings
 
 `$SAI_HOME/config.toml` (default `~/.sai/config.toml`) holds settings for both
-the CLI and `sai-mcp`. Each setting comes from the first of these that sets
+the CLI and `sai mcp serve`. Each setting comes from the first of these that sets
 it: a flag, an environment variable, the file, the mainnet default.
 
 | Key                  | Flag             | Variable           | Default                 |
