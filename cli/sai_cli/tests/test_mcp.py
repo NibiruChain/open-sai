@@ -17,6 +17,7 @@ from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 from sai_cli.core import keeper, margin, storage, stream
+from sai_cli.core import session as sessions
 from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 
@@ -667,6 +668,32 @@ def test_switching_accounts_after_a_preview_refuses_the_trade(mcp, monkeypatch):
         mcp,
         "trade_close",
         {"trade_id": 7, "preview_digest": preview["previewDigest"]},
+    )
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["account"] == ADDRESS
+    assert fake.submitted == []
+
+
+def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch):
+    # ADDRESS is active; the user confirmed a preview for OTHER.
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+    storage.save_session(stored_session())
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_close", {"trade_id": 7, "address": OTHER})
+    # Another process switches to OTHER right after the trade loads ADDRESS.
+    real = sessions.load_active_session
+
+    def switch_after_load(endpoint, address=None):
+        result = real(endpoint, address)
+        storage.use_session(OTHER)
+        return result
+
+    monkeypatch.setattr(sessions, "load_active_session", switch_after_load)
+    error = invoke(
+        mcp, "trade_close", {"trade_id": 7, "preview_digest": preview["previewDigest"]}
     )
     assert error["code"] == "PREVIEW_MISMATCH"
     assert error["preview"]["account"] == ADDRESS
