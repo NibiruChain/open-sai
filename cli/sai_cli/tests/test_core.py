@@ -161,7 +161,14 @@ def test_trade_session_stays_on_the_account_it_first_loaded(session):
     other = {**session, "evmAddress": "0x" + "c" * 40, "token": "other-token"}
     storage.save_session(other)
     storage.save_session(session)
-    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "as_addr": None})
+    ctx = click.Context(
+        main,
+        obj={
+            "flags": {"keeper.endpoint": keeper.MAINNET_HTTP},
+            "settings": None,
+            "as_addr": None,
+        },
+    )
     load = loader(ctx)
     assert load()["evmAddress"] == session["evmAddress"]
     # Another process switches accounts while the trade is in flight.
@@ -299,7 +306,7 @@ def test_wallet_signing_omits_only_empty_undeclared_domain_fields(monkeypatch, s
         "message": {"account": session["evmAddress"], "challenge": "0x" + "ab" * 32},
     }
 
-    def query(endpoint, query, variables=None, token=None):
+    def query(endpoint, query, variables=None, token=None, timeout=20):
         if query == keeper.CHALLENGE:
             return {
                 "createUserIntentAuthChallenge": {
@@ -380,7 +387,7 @@ def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
     storage.pending(key, keeper.MAINNET_HTTP, addr, "CLOSE_POSITION", "1")
     matched = False
 
-    def query(endpoint, query, variables=None, token=None):
+    def query(endpoint, query, variables=None, token=None, timeout=20):
         if query == keeper.INTENTS:
             return {
                 "userIntents": [

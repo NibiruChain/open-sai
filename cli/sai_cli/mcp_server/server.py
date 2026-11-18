@@ -1,47 +1,45 @@
-"""Sai MCP server over stdio.
+"""Sai MCP server over stdio, started by `sai mcp serve`.
 
 Tools return JSON strings and never raise. Read-only tools carry
-`readOnlyHint=True`; trade tools carry `destructiveHint=True`. Exposure goes
-by name, not annotation: the six TRADE_TOOL_NAMES are registered only when
-SAI_MCP_EXPOSED_TOOLS is `all`. The default, `read-only`, applies to the
-module-level `mcp` too, so a server started without the variable never
-offers a trade tool.
+`readOnlyHint=True`; trade tools carry `destructiveHint=True`. Every tool is
+always listed, so agents see one stable tool set. Trading follows sign-in
+per call instead: a trade_* call without a signed-in, unexpired session for
+this server's endpoint returns SIGNED_OUT, SESSION_EXPIRED, or
+SESSION_UNAVAILABLE before any preview is rebuilt, and otherwise still needs
+the digest of the preview the user confirmed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import ContentBlock, TextContent, ToolAnnotations
 from pydantic import ConfigDict
 
+from ..core import settings as sai_settings
+from ..core.settings import Settings
 from . import info, tools
 
-ENV_MODE = "SAI_MCP_EXPOSED_TOOLS"
-MODES = ("read-only", "all")
-TRADE_TOOL_NAMES = frozenset(
-    {
-        "trade_open",
-        "trade_close",
-        "trade_tpsl",
-        "trade_leverage",
-        "trade_margin",
-        "trade_partial_close",
-    }
-)
+log = logging.getLogger("sai_cli.mcp_server")
 
 INSTRUCTIONS = """\
 Sai perpetuals trading on Nibiru through Sai Keeper.
 
-- Call mcp_info first to learn the version, endpoints, exposure mode, and \
-whether a usable session exists.
+- Call mcp_info first to learn the version, endpoints, and whether \
+trading is available: trading.available is true only while an account is \
+signed in for this server's endpoint.
+- Every tool is always listed. Reads and previews work signed out. A \
+trade_* call while signed out returns SIGNED_OUT (or SESSION_EXPIRED, or \
+SESSION_UNAVAILABLE for another endpoint) and submits nothing: ask the user \
+to run `sai auth login` or `sai auth import` in a terminal, then retry.
 - Before any trade, call the matching preview_* tool, show the user the \
 preview and the account it names, and get their explicit confirmation. Only then call the trade_* \
 tool with the same arguments plus the preview's previewDigest, and for a \
@@ -97,9 +95,26 @@ def destructive(title: str) -> ToolAnnotations:
     )
 
 
+# Resolved once, so endpoints cannot change mid-session. `serve` resolves at
+# start; `create_server` clears it, and the first tool call resolves it then.
+_settings: Settings | None = None
+
+
+def server_settings() -> Settings:
+    """Settings from the environment, then $SAI_HOME/config.toml, then
+    mainnet defaults, resolved on first use and kept."""
+    global _settings
+    if _settings is None:
+        _settings = sai_settings.load(warn=log.warning)
+    return _settings
+
+
 async def call(action: Callable[..., Any], /, *args: Any, **kwargs: Any) -> str:
     """Run a blocking tool implementation off the event loop."""
-    config = tools.load_config()
+    try:
+        config = server_settings()
+    except sai_settings.SettingsError as exc:
+        return json.dumps(tools.error(str(exc), "BAD_SETTINGS"))
     return await asyncio.to_thread(tools.run, partial(action, config, *args, **kwargs))
 
 
@@ -640,55 +655,93 @@ TRADE_TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
     (trade_margin, destructive("Change Margin")),
     (trade_partial_close, destructive("Partial Close")),
 )
+TRADE_TOOL_NAMES = frozenset(function.__name__ for function, _ in TRADE_TOOLS)
 
 
-def create_server(mode: str = "read-only") -> FastMCP:
-    """Build a server for exposure MODE.
+class SaiMCP(FastMCP):
+    """FastMCP that checks the session before a trade tool's arguments.
 
-    Trade tools are registered only when MODE is `all`. The check goes by
-    name, so a read tool that is mislabeled cannot carry a trade through.
+    FastMCP validates arguments before the tool runs, so without this a
+    signed-out call with missing or bad arguments would get a validation
+    error instead of SIGNED_OUT and the sign-in guidance.
     """
-    mode = exposed_tools_mode(mode)
-    server = FastMCP("sai", instructions=INSTRUCTIONS)
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        if name in TRADE_TOOL_NAMES:
+            addr = arguments.get("addr")
+            refusal = await asyncio.to_thread(
+                session_refusal, addr if isinstance(addr, str) else None
+            )
+            if refusal is not None:
+                # Shaped like FastMCP's own result for a `-> str` tool: content
+                # plus structured output. FastMCP's annotation omits the tuple.
+                content: Sequence[ContentBlock] = [
+                    TextContent(type="text", text=refusal)
+                ]
+                result = (content, {"result": refusal})
+                return result  # ty: ignore[invalid-explicit-return]
+        return await super().call_tool(name, arguments)
+
+
+def session_refusal(addr: str | None = None) -> str | None:
+    """Return the JSON error for a trade without a usable session for
+    ADDR, or the active account, or None."""
+    try:
+        tools.require_session(server_settings(), addr)
+    except sai_settings.SettingsError as exc:
+        return json.dumps(tools.error(str(exc), "BAD_SETTINGS"))
+    except tools.SessionUnavailable as exc:
+        return json.dumps(tools.describe(exc))
+    return None
+
+
+def create_server(settings: Settings | None = None) -> FastMCP:
+    """Build a server that lists every read, preview, and trade tool.
+
+    Trade tools check sign-in on each call, so registering them while
+    signed out offers nothing that can submit. SETTINGS, when None, resolve
+    on the first tool call.
+    """
+    global _settings
+    _settings = settings
+    server = SaiMCP("sai", instructions=INSTRUCTIONS)
 
     async def mcp_info() -> str:
-        """Report this server's version, provenance, endpoints, exposed tools,
-        and session state. Call this first.
+        """Report this server's versions, provenance, endpoints, tools,
+        session state, and whether trading is available. Call this first.
+
+        `restartNeeded` is true when a newer sai was installed after this
+        server started; restart the MCP client to load it.
 
         Never read MCP client config files to learn about this server; they
         can hold secrets. The report never includes the session token.
         """
 
-        def report(config: tools.Config) -> dict[str, Any]:
-            try:
-                ws: str | None = config.ws_endpoint
-            except ValueError:
-                ws = None
+        def report(config: Settings) -> dict[str, Any]:
             names = sorted(tool.name for tool in server._tool_manager.list_tools())
             return {
                 "name": "sai",
                 "package": info.PACKAGE,
-                "version": info.version(),
+                **info.versions(),
                 "mcpVersion": info.version("mcp"),
                 "provenance": info.provenance(),
                 "endpoints": {
-                    "keeper": info.public_url(config.endpoint),
-                    "websocket": info.public_url(ws),
-                    "lcd": info.public_url(config.lcd_endpoint),
+                    "keeper": sai_settings.public_url(config.endpoint),
+                    "websocket": sai_settings.public_url(config.ws_endpoint),
+                    "lcd": sai_settings.public_url(config.lcd_endpoint),
                 },
-                "exposedTools": mode,
+                "configFile": str(sai_settings.config_path(os.environ)),
                 "tools": names,
+                "trading": tools.trading_state(config),
                 "session": tools.session_state(config),
             }
 
         return await call(report)
 
     server.add_tool(mcp_info, annotations=read_only("MCP Info", open_world=False))
-    selected = READ_TOOLS + (TRADE_TOOLS if mode == "all" else ())
-    for function, hints in selected:
-        name = getattr(function, "__name__", "")
-        if mode != "all" and (not name or name in TRADE_TOOL_NAMES):
-            raise RuntimeError(f"Trade tool {name!r} is in READ_TOOLS")
+    for function, hints in READ_TOOLS + TRADE_TOOLS:
         server.add_tool(function, annotations=hints)
     forbid_unknown_arguments(server)
     return server
@@ -709,34 +762,21 @@ def forbid_unknown_arguments(server: FastMCP) -> None:
         tool.parameters["additionalProperties"] = False
 
 
-def exposed_tools_mode(value: str | None = None) -> str:
-    """Return the exposure mode from VALUE or SAI_MCP_EXPOSED_TOOLS.
+def serve(flags: Mapping[str, str | None] | None = None) -> None:
+    """Serve over stdio; stdout carries only protocol.
 
-    Exits with a message on an unknown mode.
+    FLAGS maps setting keys to the `sai mcp serve` flags given, the top
+    layer over SAI_* variables, $SAI_HOME/config.toml, and mainnet
+    defaults. Settings resolve once, here, so endpoints cannot change
+    mid-session.
     """
-    raw = os.environ.get(ENV_MODE, "read-only") if value is None else value
-    mode = raw.strip().lower()
-    if mode not in MODES:
-        raise SystemExit(
-            f"Invalid {ENV_MODE} {raw!r}. Expected one of: {', '.join(MODES)}."
-        )
-    return mode
-
-
-# Built at import from SAI_MCP_EXPOSED_TOOLS, so `mcp` is read-only unless
-# the variable says `all`, however the server is started.
-mcp = create_server(exposed_tools_mode())
-
-
-def main() -> None:
-    """Serve over stdio with the exposure mode chosen at import."""
     logging.basicConfig(
         level=logging.WARNING,
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
-    mcp.run()
-
-
-if __name__ == "__main__":
-    main()
+    try:
+        settings = sai_settings.load(flags, warn=log.warning)
+    except sai_settings.SettingsError as exc:
+        raise SystemExit(f"sai mcp serve: {exc}") from None
+    create_server(settings).run()

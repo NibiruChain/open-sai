@@ -11,28 +11,12 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+
+from ..core import update
 
 PACKAGE = "sai-cli"
 # cli/sai_cli/mcp_server/info.py -> repository root
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
-
-
-def public_url(url: str | None) -> str | None:
-    """Return URL without user info, query, or fragment, which can hold
-    credentials such as API keys."""
-    if url is None:
-        return None
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parts.port
-    except ValueError:
-        port = None
-    netloc = host if port is None else f"{host}:{port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def version(name: str = PACKAGE) -> str:
@@ -40,6 +24,28 @@ def version(name: str = PACKAGE) -> str:
         return metadata.version(name)
     except metadata.PackageNotFoundError:
         return "unknown"
+
+
+# The version this process loaded. A reinstall changes the installed version on
+# disk, but a running server keeps executing the code it imported.
+RUNNING_VERSION = version()
+
+
+def versions() -> dict[str, Any]:
+    """Report the running, installed, and latest known versions.
+
+    The installed version is read fresh from package metadata. The latest
+    version comes from the cache that `sai update --check` writes; this makes
+    no network request.
+    """
+    installed = version()
+    known = "unknown" not in (installed, RUNNING_VERSION)
+    return {
+        "version": RUNNING_VERSION,
+        "installedVersion": installed,
+        "restartNeeded": known and installed != RUNNING_VERSION,
+        "latestVersion": update.latest_version(),
+    }
 
 
 def is_checkout(root: Path) -> bool:

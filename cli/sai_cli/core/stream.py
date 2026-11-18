@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
 from websockets.exceptions import WebSocketException
-from websockets.sync.client import connect
+from websockets.sync.client import ClientConnection, connect
 from websockets.typing import Subprotocol
+
+from . import keeper
 
 BALANCES = "subscription($user:String!) { userBalances(where:{user:$user}) { amount usd_value token_info { name symbol decimals type } } }"
 POSITIONS = "subscription($user:String!) { perpTrades(where:{trader:$user}) { id trader isOpen isLong tradeType leverage openPrice tp sl } }"
@@ -41,12 +45,12 @@ def derive_ws(endpoint: str) -> str:
 
 
 def check_ws(ws_endpoint: str) -> None:
-    """Refuse a plain-text WebSocket URL except on loopback."""
-    parsed = urlsplit(ws_endpoint)
-    if parsed.scheme != "wss" and not (
-        parsed.scheme == "ws" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-    ):
-        raise StreamError("WebSocket endpoint must use WSS, except on loopback")
+    """Refuse a plain-text WebSocket URL except on loopback, or one with
+    credentials."""
+    try:
+        keeper.check_url(ws_endpoint, "WebSocket", secure="wss")
+    except ValueError as exc:
+        raise StreamError(str(exc)) from exc
 
 
 def check_payload(payload: Any, query: str) -> dict[str, Any]:
@@ -74,6 +78,51 @@ def decode(raw: str | bytes) -> dict[str, Any]:
     return message
 
 
+# Seconds to wait for the server's close frame when disconnecting.
+CLOSE_TIMEOUT = 2.0
+
+
+@contextmanager
+def _open(
+    ws_endpoint: str, timeout: float, close_timeout: float = CLOSE_TIMEOUT
+) -> Generator[ClientConnection]:
+    """Connect and finish the graphql-transport-ws handshake.
+
+    The connect and the wait for `connection_ack` share one TIMEOUT in
+    seconds; the close at exit waits at most CLOSE_TIMEOUT for the server.
+    Raises StreamError on a refused handshake and one of DISCONNECTS on a
+    dropped or slow connection.
+    """
+    deadline = time.monotonic() + timeout
+    with connect(
+        ws_endpoint,
+        subprotocols=[Subprotocol("graphql-transport-ws")],
+        open_timeout=timeout,
+        close_timeout=min(close_timeout, timeout),
+    ) as socket:
+        try:
+            socket.send(json.dumps({"type": "connection_init"}))
+            remaining = max(deadline - time.monotonic(), 0.001)
+            message = decode(socket.recv(timeout=remaining))
+            if message.get("type") != "connection_ack":
+                raise StreamError("Keeper did not acknowledge WebSocket connection")
+        except BaseException:
+            # A failed handshake must not wait past TIMEOUT for the close.
+            socket.close_timeout = max(deadline - time.monotonic(), 0.001)
+            raise
+        yield socket
+
+
+def handshake(ws_endpoint: str, timeout: float) -> None:
+    """Check that WS_ENDPOINT acknowledges a connection, then disconnect
+    without subscribing, all within TIMEOUT seconds."""
+    check_ws(ws_endpoint)
+    deadline = time.monotonic() + timeout
+    with _open(ws_endpoint, timeout) as socket:
+        # The close must fit in what is left of TIMEOUT.
+        socket.close_timeout = max(deadline - time.monotonic(), 0.001)
+
+
 def payloads(
     ws_endpoint: str,
     query: str,
@@ -87,15 +136,7 @@ def payloads(
     an invalid message, or fails or ends the subscription, and one of DISCONNECTS
     when the connection drops or a read exceeds TIMEOUT seconds.
     """
-    with connect(
-        ws_endpoint,
-        subprotocols=[Subprotocol("graphql-transport-ws")],
-        open_timeout=10,
-    ) as socket:
-        socket.send(json.dumps({"type": "connection_init"}))
-        message = decode(socket.recv(timeout=10))
-        if message.get("type") != "connection_ack":
-            raise StreamError("Keeper did not acknowledge WebSocket connection")
+    with _open(ws_endpoint, 10) as socket:
         socket.send(
             json.dumps(
                 {
