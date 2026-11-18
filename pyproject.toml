@@ -40,4 +40,4 @@ target-version = "py311"
 exclude = ["cli/sai_cli/utils/repl_skin.py"]
 
 [tool.ty.environment]
-extra-paths = ["cli"]
+extra-paths = ["cli", "scripts"]
