@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shlex
@@ -827,13 +828,12 @@ def partial_close(
 )
 @click.option("--no-fix", is_flag=True, help="Report problems without fixing any.")
 @click.option(
-    "--ws-endpoint", help="Keeper WebSocket endpoint; derived from --endpoint."
+    "--ws-endpoint",
+    help="Keeper WebSocket endpoint. Defaults to the keeper.ws_endpoint setting.",
 )
 @click.option(
     "--lcd-endpoint",
-    default=margin.MAINNET_LCD,
-    show_default=True,
-    help="Nibiru REST endpoint.",
+    help="Nibiru REST endpoint. Defaults to the lcd.endpoint setting.",
 )
 @click.pass_context
 def doctor_command(
@@ -841,7 +841,7 @@ def doctor_command(
     offline: bool,
     no_fix: bool,
     ws_endpoint: str | None,
-    lcd_endpoint: str,
+    lcd_endpoint: str | None,
 ) -> None:
     """Check the install, session, intent ledger, and endpoints, and fix what
     is safe to fix.
@@ -854,12 +854,11 @@ def doctor_command(
     1 if any check still fails.
     """
     from . import doctor
-    from .mcp_server import tools
 
-    config = tools.Config(
-        endpoint=ctx.obj["endpoint"],
-        ws_override=ws_endpoint,
-        lcd_endpoint=lcd_endpoint,
+    config = dataclasses.replace(
+        settings(ctx),
+        ws_endpoint=ws_url(ctx, ws_endpoint),
+        lcd_endpoint=lcd_url(ctx, lcd_endpoint),
     )
     checks = doctor.run_checks(doctor.context(config, fix=not no_fix, offline=offline))
     if ctx.obj["json"]:

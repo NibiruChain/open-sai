@@ -19,8 +19,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 from sai_cli import doctor
-from sai_cli.core import keeper, margin, storage, stream
-from sai_cli.mcp_server import tools
+from sai_cli.core import keeper, margin, settings, storage, stream
 from sai_cli.sai_cli import main
 from websockets.sync.server import ServerConnection, serve
 from websockets.typing import Subprotocol
@@ -60,12 +59,26 @@ def save(hours: float = 48, endpoint: str = ENDPOINT, address: str = ADDRESS) ->
     )
 
 
+def endpoints(
+    endpoint: str | None = None,
+    ws_override: str | None = None,
+    lcd_endpoint: str | None = None,
+) -> settings.Settings:
+    """Settings with the given endpoints as flags, ignoring env and file."""
+    flags = {
+        "keeper.endpoint": endpoint,
+        "keeper.ws_endpoint": ws_override,
+        "lcd.endpoint": lcd_endpoint,
+    }
+    return settings.resolve(flags, {}, {})
+
+
 def ctx(
     endpoint: str = ENDPOINT, fix: bool = False, offline: bool = False, **config: Any
 ) -> doctor.Context:
     """A report-only context unless FIX is set."""
     return doctor.context(
-        tools.Config(endpoint=endpoint, **config),
+        endpoints(endpoint, **config),
         path_env="",
         fix=fix,
         offline=offline,
@@ -182,7 +195,7 @@ def loosen(home: Path) -> Path:
     ledger([])
     root = home / "trader"
     root.chmod(0o755)
-    (root / "session.json").chmod(0o644)
+    (root / "sessions.json").chmod(0o644)
     (root / "intents.sqlite3").chmod(0o640)
     return root
 
@@ -194,7 +207,7 @@ def test_no_fix_reports_loose_modes_without_changing_them(isolated_home):
     check = one(doctor.check_home, ctx())
     assert check.status == "warn"
     assert check.fix == (
-        f"chmod go-rwx {root}; chmod go-rwx {root / 'session.json'};"
+        f"chmod go-rwx {root}; chmod go-rwx {root / 'sessions.json'};"
         f" chmod go-rwx {root / 'intents.sqlite3'}"
     )
     assert snapshot(isolated_home) == before
@@ -203,18 +216,18 @@ def test_no_fix_reports_loose_modes_without_changing_them(isolated_home):
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 def test_fix_makes_the_directory_and_files_private(isolated_home):
     root = loosen(isolated_home)
-    session_bytes = (root / "session.json").read_bytes()
+    session_bytes = (root / "sessions.json").read_bytes()
     check = one(doctor.check_home, ctx(fix=True))
     assert check.status == "fixed"
     assert check.changes == [
         f"chmod {root} 755 -> 700",
-        f"chmod {root / 'session.json'} 644 -> 600",
+        f"chmod {root / 'sessions.json'} 644 -> 600",
         f"chmod {root / 'intents.sqlite3'} 640 -> 600",
     ]
     assert root.stat().st_mode & 0o777 == 0o700
-    for name in ("session.json", "intents.sqlite3"):
+    for name in ("sessions.json", "intents.sqlite3"):
         assert (root / name).stat().st_mode & 0o777 == 0o600
-    assert (root / "session.json").read_bytes() == session_bytes
+    assert (root / "sessions.json").read_bytes() == session_bytes
     assert one(doctor.check_home, ctx(fix=True)).status == "pass"
 
 
@@ -568,7 +581,7 @@ def test_two_installs_on_path_warn(tmp_path):
     first = fake_sai(tmp_path / "a")
     fake_sai(tmp_path / "b")
     path_env = os.pathsep.join([str(tmp_path / "a"), str(tmp_path / "b")])
-    context = doctor.context(tools.Config(), path_env=path_env)
+    context = doctor.context(endpoints(), path_env=path_env)
     check = one(doctor.check_install, context)
     assert check.status == "warn"
     assert str(first.resolve()) in check.summary

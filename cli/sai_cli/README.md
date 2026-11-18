@@ -221,7 +221,7 @@ admission does not establish execution or finality.
 `sai doctor` checks the install, `$SAI_HOME/trader`, the session, the intent
 ledger, and the Keeper HTTP, WebSocket, and LCD endpoints, and fixes what it
 safely can. It creates `$SAI_HOME/trader`, removes group and other access
-from it and the files sai keeps there (the session, the ledger and its
+from it and the files sai keeps there (the connected accounts, the ledger and its
 journals, and the shell history), migrates the intent ledger, and reconciles
 unknown intents for the signed-in account the way `sai intent status` does
 (a Keeper read; it never places or cancels a trade). It never deletes or
@@ -233,7 +233,9 @@ Each check prints pass, fixed, warn, fail, or skipped, with what changed or
 the command that fixes it. Doctor exits 1 if any check still fails;
 `sai --json doctor` prints the same report as JSON. `--no-fix` reports
 without changing anything, and `--offline` skips the network checks, which
-otherwise run in parallel and stop after 7 seconds in total.
+otherwise run in parallel and stop after 7 seconds in total. The
+endpoints come from [Settings](#settings); `sai doctor --ws-endpoint` and
+`--lcd-endpoint` override them for one run.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.

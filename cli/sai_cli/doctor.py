@@ -9,7 +9,7 @@ ledger, and reconciles unknown intents for the signed-in account with Keeper
 session. `--no-fix` reports without changing anything.
 
 Every string leaves through `tools.redact` and every URL through
-`info.public_url`, so the session token is never printed.
+`settings.public_url`, so the session token is never printed.
 
 To add a check, write a function that takes a `Context` and returns a
 `Check` or a list of them (a check that repeats, such as one per MCP client),
@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import keeper, margin, reconcile, storage, stream
+from .core.settings import Settings, public_url
 from .mcp_server import info, tools
 
 SCHEMA_VERSION = 1
@@ -77,7 +78,7 @@ class Context:
     """What the checks read: endpoints, the session state, the clock, and
     whether they may fix things or reach the network."""
 
-    config: tools.Config
+    config: Settings
     session: dict[str, Any]
     now: datetime
     path_env: str = ""
@@ -96,11 +97,11 @@ def plural(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
-def endpoint_flag(config: tools.Config) -> str:
+def endpoint_flag(config: Settings) -> str:
     """The `--endpoint` flag a fix command needs, or "" for mainnet."""
     if config.endpoint == keeper.MAINNET_HTTP:
         return ""
-    return f"--endpoint {info.public_url(config.endpoint)} "
+    return f"--endpoint {public_url(config.endpoint)} "
 
 
 # Local checks
@@ -156,6 +157,7 @@ def check_install(ctx: Context) -> Check:
 
 # Files sai writes under $SAI_HOME/trader; doctor changes no others.
 MANAGED = (
+    "sessions.json",
     "session.json",
     "intents.sqlite3",
     "intents.sqlite3-wal",
@@ -354,7 +356,7 @@ def check_session(ctx: Context) -> Check:
             "session",
             "fail",
             f"Session for {short(address)} belongs to {state['endpoint']}, not"
-            f" {info.public_url(ctx.config.endpoint)}",
+            f" {public_url(ctx.config.endpoint)}",
             f"sai {endpoint_flag(ctx.config)}auth login --account NAME, or run"
             f" sai with --endpoint {state['endpoint']}",
             details,
@@ -753,7 +755,7 @@ def elapsed_ms(start: float) -> int:
 
 
 def check_keeper(ctx: Context) -> Check:
-    url = info.public_url(ctx.config.endpoint)
+    url = public_url(ctx.config.endpoint)
     start = time.monotonic()
     try:
         route = keeper.request(
@@ -786,7 +788,7 @@ def check_websocket(ctx: Context) -> Check:
         ws = ctx.config.ws_endpoint
     except stream.StreamError as exc:
         return Check("websocket", "fail", str(exc), "Pass --ws-endpoint")
-    url = info.public_url(ws)
+    url = public_url(ws)
     start = time.monotonic()
     try:
         stream.handshake(ws, NETWORK_TIMEOUT)
@@ -809,7 +811,7 @@ def check_websocket(ctx: Context) -> Check:
 
 
 def check_lcd(ctx: Context) -> Check:
-    url = info.public_url(ctx.config.lcd_endpoint)
+    url = public_url(ctx.config.lcd_endpoint)
     start = time.monotonic()
     try:
         node = margin._get_json(
@@ -960,7 +962,7 @@ def overall(checks: Sequence[Check]) -> str:
     return "warn" if "warn" in statuses else "pass"
 
 
-def session_state(config: tools.Config) -> dict[str, Any]:
+def session_state(config: Settings) -> dict[str, Any]:
     """Return `tools.session_state`, or an error state if the stored session
     cannot be interpreted, such as an expiry without a time zone."""
     try:
@@ -979,7 +981,7 @@ def session_state(config: tools.Config) -> dict[str, Any]:
 
 
 def context(
-    config: tools.Config,
+    config: Settings,
     path_env: str | None = None,
     *,
     fix: bool = True,
