@@ -26,8 +26,10 @@ REPO = "SaiDotFun/open-sai"
 API_BASE = "https://api.github.com"
 WEB_BASE = "https://github.com"
 GIT_URL = f"https://github.com/{REPO}"
-CONNECT_TIMEOUT = 3.0
-TOTAL_TIMEOUT = 5.0
+# The check runs in the background, so the budget is generous; it is still a
+# hard wall-clock limit.
+CONNECT_TIMEOUT = 10.0
+TOTAL_TIMEOUT = 30.0
 CACHE_SCHEMA = 1
 # GitHub's API limits unauthenticated clients; the web redirect is not metered.
 FALLBACK_STATUSES = frozenset({403, 429})
@@ -299,48 +301,25 @@ def reinstall_command(tag: str | None = None) -> str:
 
 @dataclass(frozen=True)
 class Guidance:
-    """How to move INSTALL to a newer release, without replacing a fork or
-    local build with the upstream package."""
+    """How to move an install to a newer release."""
 
     note: str
     command: str | None = None
 
 
-def _source(url: str | None) -> str | None:
-    """The uv source that reinstalls from URL: a path or a git URL."""
-    if not url:
-        return None
-    parts = urlsplit(url)
-    if parts.scheme == "file":
-        return unquote(parts.path)
-    return url if url.startswith("git+") else f"git+{url}"
-
-
 def guidance(install: Install, tag: str) -> Guidance:
     """Say how to update INSTALL to release TAG.
 
-    Only an install from this repository gets the upstream command; any
-    other source is the user's to update.
+    Only `uv tool install` from this repository is supported. A checkout
+    updates with git; anything else is pointed at the supported install.
     """
-    if install.kind == UV_TOOL_GIT:
-        return Guidance("Reinstall the release with uv.", reinstall_command(tag))
     if install.kind == CHECKOUT:
         return Guidance("This is a source checkout; pull, then run `uv sync`.")
-    if install.kind == UVX:
-        return Guidance(
-            "uvx runs a cached copy; name the release to run it.",
-            f"uvx --from git+{GIT_URL}@{tag} sai",
-        )
-    source = _source(install.url)
-    if install.kind == UV_TOOL_OTHER and source:
-        return Guidance(
-            f"This sai was installed from {install.url}, not {REPO}. Update"
-            " that source, then reinstall from it.",
-            f"uv tool install --reinstall {source}",
-        )
+    if install.kind == UV_TOOL_GIT:
+        return Guidance("Reinstall the release with uv.", reinstall_command(tag))
     return Guidance(
-        "This sai was not installed from this repository's releases. Update it"
-        " the way it was installed."
+        f"Only uv tool installs from {REPO} are supported. To switch to one, run:",
+        reinstall_command(tag),
     )
 
 

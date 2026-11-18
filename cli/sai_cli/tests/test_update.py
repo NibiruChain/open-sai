@@ -419,41 +419,24 @@ def test_only_an_upstream_uv_tool_gets_the_upstream_reinstall(capsys):
 
 
 @pytest.mark.parametrize(
-    ("url", "command"),
-    [
-        (
-            "https://github.com/someone/open-sai.git",
-            "uv tool install --reinstall git+https://github.com/someone/open-sai.git",
-        ),
-        ("file:///home/u/my%20sai", "uv tool install --reinstall /home/u/my sai"),
-    ],
-)
-def test_a_fork_or_local_uv_tool_reinstalls_from_its_own_source(capsys, url, command):
-    guide, out = advice(update.Install(update.UV_TOOL_OTHER, "/p", url), capsys)
-    assert guide["command"] == command
-    assert "not SaiDotFun/open-sai" in guide["note"]
-    assert command in out
-    assert "SaiDotFun/open-sai@" not in out
-
-
-@pytest.mark.parametrize(
     ("install", "command", "text"),
     [
         (update.Install(update.CHECKOUT, "/p"), None, "uv sync"),
+        (update.Install(update.UVX, "/p"), UPSTREAM, "Only uv tool installs"),
         (
-            update.Install(update.UVX, "/p"),
-            "uvx --from git+https://github.com/SaiDotFun/open-sai@v0.2.0 sai",
-            "uvx runs a cached copy",
+            update.Install(update.UV_TOOL_OTHER, "/p", "file:///home/u/sai"),
+            UPSTREAM,
+            "Only uv tool installs",
         ),
-        (update.Install(update.UV_TOOL_OTHER, "/p"), None, "the way it was"),
-        (update.Install(update.OTHER, "/p"), None, "the way it was"),
+        (update.Install(update.OTHER, "/p"), UPSTREAM, "Only uv tool installs"),
     ],
 )
 def test_other_install_kinds_get_their_own_guidance(capsys, install, command, text):
     guide, out = advice(install, capsys)
     assert guide["command"] == command
     assert text in out
-    assert "uv tool install" not in out
+    if command is None:
+        assert "uv tool install" not in out
 
 
 def test_no_guidance_when_current():
