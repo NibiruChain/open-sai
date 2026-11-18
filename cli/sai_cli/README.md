@@ -49,10 +49,12 @@ challenge nonce.
   keystore password.
 - With neither, it stops and names where it looked.
 
-`--addr ADDR` is optional. The CLI refuses to sign when the key holds a
-different account. For a keystore it reads the addr from the keystore
-file's plaintext `address` field, which needs no password, and falls back
-to `cast wallet address` only when the file has none.
+`--addr ADDR` is optional. The CLI refuses to sign when ud or the keystore
+reports a different addr. For a keystore it reads the file's plaintext
+`address` field, which needs no password, and falls back to `cast wallet
+address` only when the file has none. That field is not bound to the
+encrypted key: if someone edited it, the check passes, Keeper rejects the
+signature, and nothing is stored.
 
 ### Several Accounts
 

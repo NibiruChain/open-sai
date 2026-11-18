@@ -166,7 +166,7 @@ def auth() -> None:
     "--addr",
     metavar="ADDR",
     help="EVM addr you expect NAME to hold. Sign-in stops before signing if"
-    " NAME holds another account.",
+    " ud or the keystore file reports another addr.",
 )
 @click.pass_context
 def login(ctx: click.Context, name: str, addr: str | None) -> None:
@@ -191,7 +191,7 @@ def login(ctx: click.Context, name: str, addr: str | None) -> None:
           Sign with ~/.foundry/keystores/trading-bot; cast asks for its
           password.
       sai auth login trading-bot --addr 0xYOUR_ADDR
-          Same, but stop if the keystore holds another account.
+          Same, but stop if the keystore records another addr.
       sai auth import
           Use a session token copied from Sai Web instead of a key.
     """
@@ -211,8 +211,9 @@ def keystore_path(name: str) -> Path:
 def keystore_addr(name: str) -> str | None:
     """Read the plaintext `address` a Foundry keystore records, if any.
 
-    Reading it needs no password. Keeper still verifies the signature, so a
-    wrong value can only make sign-in fail.
+    Reading it needs no password. The field is not bound to the encrypted
+    key, so an edited file can pass the --addr check; Keeper then rejects
+    the signature, and no session is stored.
     """
     try:
         value = json.loads(keystore_path(name).read_text(encoding="utf-8"))
