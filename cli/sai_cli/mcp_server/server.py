@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import ConfigDict
 
 from . import info, tools
 
@@ -689,7 +690,23 @@ def create_server(mode: str = "read-only") -> FastMCP:
         if mode != "all" and (not name or name in TRADE_TOOL_NAMES):
             raise RuntimeError(f"Trade tool {name!r} is in READ_TOOLS")
         server.add_tool(function, annotations=hints)
+    forbid_unknown_arguments(server)
     return server
+
+
+def forbid_unknown_arguments(server: FastMCP) -> None:
+    """Make every tool reject arguments it does not define.
+
+    FastMCP ignores unknown arguments by default. A client still sending a
+    renamed argument, such as `address` before it became `addr`, would then
+    act on the active account without any error.
+    """
+    for tool in server._tool_manager.list_tools():
+        base = tool.fn_metadata.arg_model
+        config = ConfigDict(**{**base.model_config, "extra": "forbid"})
+        strict = type(base.__name__, (base,), {"model_config": config})
+        tool.fn_metadata.arg_model = strict
+        tool.parameters["additionalProperties"] = False
 
 
 def exposed_tools_mode(value: str | None = None) -> str:

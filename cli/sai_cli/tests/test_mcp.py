@@ -15,6 +15,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from sai_cli.core import keeper, margin, storage, stream
 from sai_cli.core import session as sessions
@@ -697,6 +698,19 @@ def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch
     )
     assert error["code"] == "PREVIEW_MISMATCH"
     assert error["preview"]["addr"] == ADDR
+    assert fake.submitted == []
+
+
+def test_unknown_arguments_are_rejected(mcp, monkeypatch):
+    connect_two_accounts()
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    for tool in mcp._tool_manager.list_tools():
+        assert tool.parameters.get("additionalProperties") is False, tool.name
+    # A client still using the old name must not fall back to the active
+    # account.
+    with pytest.raises(ToolError, match="address"):
+        asyncio.run(mcp.call_tool("preview_close", {"trade_id": 7, "address": ADDR}))
     assert fake.submitted == []
 
 
