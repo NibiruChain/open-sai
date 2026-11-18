@@ -1251,19 +1251,26 @@ def mcp_install_command(
 @click.argument("clients", nargs=-1)
 @click.option("--all", "all_clients", is_flag=True, help="Every client.")
 @click.option("--dry-run", is_flag=True, help="Show the changes; make none.")
-@SCOPE_OPTION
+@click.option(
+    "--scope",
+    type=click.Choice(mcp_install.UNINSTALL_SCOPES),
+    help="Remove only this scope. Default: every scope sai is registered in"
+    " (Claude Code local entries are this directory's).",
+)
 @click.pass_context
 def mcp_uninstall(
     ctx: click.Context,
     clients: tuple[str, ...],
     all_clients: bool,
     dry_run: bool,
-    scope: str,
+    scope: str | None,
 ) -> None:
     """Remove Sai from Claude Code, Codex, or Cursor.
 
-    With no CLIENT and no --all, a terminal asks which to remove; without a
-    terminal this is a usage error that names where Sai is registered.
+    Removes sai from every scope it is registered in for each client, unless
+    --scope names one. With no CLIENT and no --all, a terminal asks which to
+    remove; without a terminal this is a usage error that names where Sai is
+    registered.
     """
     found = mcp_clients()
     names = chosen_clients(clients)
@@ -1273,7 +1280,9 @@ def mcp_uninstall(
         rows = mcp_install.list_clients(found, None)
         registered = [r["client"] for r in rows if r["registered"]]
         where = ", ".join(
-            f"{r['client']} ({r['scope']})" for r in rows if r["registered"]
+            f"{r['client']} ({', '.join(e['scope'] for e in r['registrations'])})"
+            for r in rows
+            if r["registered"]
         )
         if not interactive():
             raise click.UsageError(
@@ -1284,7 +1293,9 @@ def mcp_uninstall(
         if not registered:
             raise click.UsageError("Sai is not registered with any client.")
         names = pick("Remove Sai from (numbers, names, or all)", registered)
-    results = [mcp_install.uninstall_one(found[n], scope, dry_run) for n in names]
+    results = [
+        r for n in names for r in mcp_install.uninstall_client(found[n], scope, dry_run)
+    ]
     finish(ctx, results)
 
 

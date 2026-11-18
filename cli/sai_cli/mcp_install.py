@@ -26,6 +26,7 @@ NAME = "sai"
 CLIENTS = ("claude", "codex", "cursor")
 ALIASES = {"claude-code": "claude", "claude_code": "claude"}
 SCOPES = ("user", "project")
+UNINSTALL_SCOPES = ("user", "project", "local")
 SUBPROCESS_TIMEOUT = 60
 INSTALL_URL = "git+https://github.com/SaiDotFun/open-sai"
 
@@ -48,14 +49,38 @@ class Target:
 
 @dataclass(frozen=True)
 class Registration:
-    """The `sai` entry found in a client: its argv and SAI_HOME only."""
+    """The `sai` entry found in a client.
+
+    Keeps argv, the SAI_HOME value (a path), and only the names of any other
+    environment settings, which `install` does not carry and so replaces.
+    """
 
     argv: list[str]
     scope: str
     sai_home: str | None = None
+    stale_env: tuple[str, ...] = ()
+    disabled: bool = False
 
     def matches(self, target: Target) -> bool:
-        return self.argv == target.argv and self.sai_home == target.env.get("SAI_HOME")
+        return (
+            self.argv == target.argv
+            and self.sai_home == target.env.get("SAI_HOME")
+            and not self.stale_env
+            and not self.disabled
+        )
+
+    def to_json(self, target: Target | None, effective: bool) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "scope": self.scope,
+            "command": self.argv,
+            "current": target is not None and self.matches(target),
+            "effective": effective,
+        }
+        if self.stale_env:
+            out["staleEnv"] = list(self.stale_env)
+        if self.disabled:
+            out["disabled"] = True
+        return out
 
 
 @dataclass
@@ -67,13 +92,24 @@ class Result:
     path: str | None = None
     would: str | None = None
     error: str | None = None
+    scope: str | None = None
+    shadowed_by: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"client": self.client, "action": self.action}
-        for key in ("would", "command", "argv", "path", "error"):
+        names = {"shadowed_by": "shadowedBy"}
+        for key in (
+            "scope",
+            "would",
+            "command",
+            "argv",
+            "path",
+            "shadowed_by",
+            "error",
+        ):
             value = getattr(self, key)
             if value is not None:
-                out[key] = value
+                out[names.get(key, key)] = value
         return out
 
 
@@ -200,8 +236,14 @@ def load_json(path: Path) -> dict[str, Any] | None:
     return data
 
 
-def entry_registration(entry: Any, scope: str) -> Registration | None:
-    """Keep only command, args, and SAI_HOME from a client's `sai` entry."""
+def entry_registration(
+    entry: Any, scope: str, disabled: bool = False
+) -> Registration | None:
+    """Keep command, args, SAI_HOME, and other env names from a `sai` entry.
+
+    Other env values are never kept. Codex `env_vars` (variables passed
+    through from the client's environment) count as other env too.
+    """
     if not isinstance(entry, dict):
         return None
     command = entry.get("command")
@@ -209,8 +251,21 @@ def entry_registration(entry: Any, scope: str) -> Registration | None:
     argv = [command] if isinstance(command, str) else []
     argv += [a for a in args if isinstance(a, str)] if isinstance(args, list) else []
     env = entry.get("env")
-    home = env.get("SAI_HOME") if isinstance(env, dict) else None
-    return Registration(argv, scope, home if isinstance(home, str) else None)
+    env = env if isinstance(env, dict) else {}
+    home = env.get("SAI_HOME")
+    stale = {str(k) for k in env if k != "SAI_HOME"}
+    passed = entry.get("env_vars")
+    for item in passed if isinstance(passed, list) else []:
+        name = item.get("name") if isinstance(item, dict) else item
+        if isinstance(name, str):
+            stale.add(name)
+    return Registration(
+        argv,
+        scope,
+        home if isinstance(home, str) else None,
+        tuple(sorted(stale)),
+        disabled,
+    )
 
 
 def servers(data: dict[str, Any] | None) -> dict[str, Any]:
@@ -218,8 +273,23 @@ def servers(data: dict[str, Any] | None) -> dict[str, Any]:
     return found if isinstance(found, dict) else {}
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
-    """Replace path in one rename, keeping its mode (0600 for a new file)."""
+def read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def before_replace(path: Path) -> None:
+    """Hook between writing the temp file and the final check; tests use it."""
+
+
+def replace_if_unchanged(path: Path, data: dict[str, Any], seen: bytes | None) -> bool:
+    """Write data over path in one rename if path still holds `seen`.
+
+    Keeps the file mode (0600 for a new file). Returns False, writing
+    nothing, when another program changed the file since it was read.
+    """
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
@@ -231,7 +301,12 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
             json.dump(data, handle, indent=2)
             handle.write("\n")
         os.chmod(temp, mode)
+        before_replace(path)
+        if read_bytes(path) != seen:
+            Path(temp).unlink(missing_ok=True)
+            return False
         os.replace(temp, path)
+        return True
     except BaseException:
         Path(temp).unlink(missing_ok=True)
         raise
@@ -270,9 +345,16 @@ class Client:
             raise ClientError(f"`{self.binary}` is not on PATH")
         return exe
 
+    # Scopes in the order the client prefers them; the first found wins.
+    precedence: tuple[str, ...] = ("user",)
+
     def registrations(self) -> list[Registration]:
-        """Every `sai` entry, most specific scope last."""
+        """Every `sai` entry, the effective one first."""
         raise NotImplementedError
+
+    def ordered(self, found: list[Registration]) -> list[Registration]:
+        rank = {scope: i for i, scope in enumerate(self.precedence)}
+        return sorted(found, key=lambda r: rank.get(r.scope, len(rank)))
 
     def registration(self, scope: str) -> Registration | None:
         return next((r for r in self.registrations() if r.scope == scope), None)
@@ -291,6 +373,7 @@ class Client:
 class Claude(Client):
     name = "claude"
     binary = "claude"
+    precedence = ("local", "project", "user")
 
     def home_dir(self) -> Path:
         configured = self.environ.get("CLAUDE_CONFIG_DIR")
@@ -315,7 +398,7 @@ class Claude(Client):
         shared = servers(load_json(self.cwd / ".mcp.json")).get(NAME)
         if shared is not None:
             found.append(entry_registration(shared, "project"))
-        return [r for r in found if r is not None]
+        return self.ordered([r for r in found if r is not None])
 
     def add_steps(self, scope: str, target: Target) -> list[list[str]]:
         exe = self.require_exe()
@@ -360,8 +443,9 @@ class Codex(Client):
             data = json.loads(done.stdout)
         except ValueError:
             raise ClientError("`codex mcp get` printed something other than JSON")
-        transport = data.get("transport") if isinstance(data, dict) else None
-        found = entry_registration(transport, "user")
+        data = data if isinstance(data, dict) else {}
+        disabled = data.get("enabled") is False
+        found = entry_registration(data.get("transport"), "user", disabled)
         return [found] if found is not None else []
 
     def check_scope(self, scope: str) -> None:
@@ -382,6 +466,7 @@ class Cursor(Client):
     name = "cursor"
     binary = "cursor-agent"
     HINT = "You may need to enable sai in Cursor under Cursor Settings > MCP."
+    precedence = ("project", "user")
 
     def home_dir(self) -> Path:
         return self.home / ".cursor"
@@ -406,26 +491,36 @@ class Cursor(Client):
                 reg = entry_registration(entry, scope)
                 if reg is not None:
                     found.append(reg)
-        return found
+        return self.ordered(found)
 
     def write(self, scope: str, target: Target | None) -> None:
+        """Set or delete the sai entry, merging again once if the file moves."""
         path = self.config_path(scope)
-        data = load_json(path) or {}
-        entries = data.get("mcpServers")
-        if not isinstance(entries, dict):
-            entries = {}
-        if target is None:
-            entries.pop(NAME, None)
-        else:
-            entry: dict[str, Any] = {
-                "command": target.argv[0],
-                "args": target.argv[1:],
-            }
-            if target.env:
-                entry["env"] = dict(target.env)
-            entries[NAME] = entry
-        data["mcpServers"] = entries
-        write_json_atomic(path, data)
+        for _ in range(2):
+            seen = read_bytes(path)
+            data = load_json(path) or {}
+            if read_bytes(path) != seen:
+                continue
+            entries = data.get("mcpServers")
+            if not isinstance(entries, dict):
+                entries = {}
+            if target is None:
+                entries.pop(NAME, None)
+            else:
+                entry: dict[str, Any] = {
+                    "command": target.argv[0],
+                    "args": target.argv[1:],
+                }
+                if target.env:
+                    entry["env"] = dict(target.env)
+                entries[NAME] = entry
+            data["mcpServers"] = entries
+            if replace_if_unchanged(path, data, seen):
+                return
+        raise ClientError(
+            f"{path} kept changing while sai was writing it; nothing was"
+            " written. Run the command again."
+        )
 
 
 def make_clients(
@@ -461,6 +556,9 @@ def list_clients(
         except ClientError as exc:
             row["error"] = str(exc)
             found = []
+        row["registrations"] = [
+            reg.to_json(target, i == 0) for i, reg in enumerate(found)
+        ]
         if found:
             reg = found[0]
             row.update(
@@ -469,14 +567,21 @@ def list_clients(
                 registeredCommand=reg.argv,
                 scope=reg.scope,
             )
+            if reg.stale_env:
+                row["staleEnv"] = list(reg.stale_env)
+            if reg.disabled:
+                row["disabled"] = True
         rows.append(row)
     return rows
 
 
 def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Result:
-    result = Result(client.name, "failed", command=target.argv)
+    result = Result(client.name, "failed", command=target.argv, scope=scope)
     try:
-        existing = client.registration(scope)
+        found = client.registrations()
+        existing = next((r for r in found if r.scope == scope), None)
+        if found and found[0].scope != scope and not found[0].matches(target):
+            result.shadowed_by = found[0].scope
         if existing is not None and existing.matches(target):
             result.action = "unchanged"
             return result
@@ -501,10 +606,25 @@ def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Re
     return result
 
 
-def uninstall_one(client: Client, scope: str, dry_run: bool) -> Result:
-    result = Result(client.name, "failed")
+def uninstall_client(client: Client, scope: str | None, dry_run: bool) -> list[Result]:
+    """Remove sai from one scope, or from every scope it is registered in."""
     try:
-        existing = client.registration(scope)
+        found = client.registrations()
+    except ClientError as exc:
+        return [Result(client.name, "failed", scope=scope, error=str(exc))]
+    if scope is not None:
+        existing = next((r for r in found if r.scope == scope), None)
+        return [uninstall_one(client, scope, existing, dry_run)]
+    if not found:
+        return [Result(client.name, "absent")]
+    return [uninstall_one(client, r.scope, r, dry_run) for r in found]
+
+
+def uninstall_one(
+    client: Client, scope: str, existing: Registration | None, dry_run: bool
+) -> Result:
+    result = Result(client.name, "failed", scope=scope)
+    try:
         if existing is None:
             result.action = "absent"
             return result

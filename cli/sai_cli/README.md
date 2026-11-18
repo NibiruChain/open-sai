@@ -140,8 +140,16 @@ install that is running. A server command after `--` replaces the default, for
 a dev checkout. Claude Code and Codex change through `claude mcp add|remove`
 and `codex mcp add|remove`; Cursor through an atomic edit of
 `~/.cursor/mcp.json` that keeps other servers and the file mode. Reads take
-only the `sai` entry's command and args, and never run `claude mcp get`, which
-starts the server. Results report `added`, `replaced`, `unchanged`, `removed`,
+only the `sai` entry's command, args, `SAI_HOME`, and the names of any other
+environment settings, and never run `claude mcp get`, which starts the
+server. The only environment value output shows is `SAI_HOME`, a path; other
+settings appear by name in `staleEnv`, and an entry with any of them, or a
+disabled Codex entry, is not current and gets replaced. `list` shows every
+scope's entry under `registrations` and marks the one the client uses as
+`effective` (Claude Code: local, then project, then user; Cursor: project,
+then user). `uninstall` removes every scope's entry unless `--scope` names
+one. The Cursor edit re-reads the file just before the rename and merges
+again once if something else changed it. Results report `added`, `replaced`, `unchanged`, `removed`,
 `absent`, `failed`, or `planned` (with `--dry-run`) per client, and the
 command exits 1 if any client failed. Without a terminal, `install` with no
 client lists clients and changes nothing, and `uninstall` with no client is a

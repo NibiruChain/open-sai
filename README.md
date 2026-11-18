@@ -102,8 +102,10 @@ edits `~/.cursor/mcp.json` and keeps your other servers. Cursor may ask you to
 enable `sai` in its MCP settings. Claude Code registers for your user by
 default; `--scope project` writes the project's `.mcp.json` instead.
 
-Running `install` again reports `unchanged`, and an older entry is
-`replaced`. `--dry-run` shows the commands without running them. `install`
+Running `install` again reports `unchanged`. An older entry is `replaced`,
+and so is one that sets other environment variables or that Codex has
+disabled. `uninstall` removes Sai from every scope it is registered in unless
+you pass `--scope`. `--dry-run` shows the commands without running them. `install`
 asks which clients to register only on a terminal; an agent that names no
 client gets the list of detected clients and nothing changes. Restart or
 reconnect a client after a change.

@@ -32,12 +32,15 @@ args = sys.argv[1:]
 assert args[:2] == ["mcp", "add"] or args[:2] == ["mcp", "remove"], args
 scope = args[args.index("--scope") + 1]
 path = (
-    Path(os.environ["HOME"]) / ".claude.json"
-    if scope == "user"
-    else Path.cwd() / ".mcp.json"
+    Path.cwd() / ".mcp.json"
+    if scope == "project"
+    else Path(os.environ["HOME"]) / ".claude.json"
 )
 data = json.loads(path.read_text()) if path.exists() else {}
-servers = data.setdefault("mcpServers", {})
+holder = data
+if scope == "local":
+    holder = data.setdefault("projects", {}).setdefault(str(Path.cwd()), {})
+servers = holder.setdefault("mcpServers", {})
 if args[1] == "remove":
     if "sai" not in servers:
         sys.stderr.write(f'No MCP server named "sai" in {scope} scope\\n')
@@ -67,9 +70,11 @@ if args[:2] == ["mcp", "get"]:
     if "sai" not in state:
         sys.stderr.write("Error: No MCP server named 'sai' found.\\n")
         sys.exit(1)
-    print(json.dumps({"name": "sai", "enabled": True, "transport": state["sai"]}))
+    enabled = state.get("sai_enabled", True)
+    print(json.dumps({"name": "sai", "enabled": enabled, "transport": state["sai"]}))
 elif args[:2] == ["mcp", "remove"]:
     state.pop("sai", None)
+    state.pop("sai_enabled", None)
 elif args[:2] == ["mcp", "add"]:
     dash = args.index("--")
     env = dict(
@@ -435,7 +440,9 @@ def test_list_reads_only_the_sai_entry_and_prints_no_secrets(env: Env):
     assert rows["claude"]["registeredCommand"] == [OLD_COMMAND]
     assert rows["claude"]["current"] is False
     assert rows["claude"]["scope"] == "user"
-    assert rows["codex"]["current"] is True
+    # The codex entry runs the right command but carries an extra env name.
+    assert rows["codex"]["current"] is False
+    assert rows["codex"]["staleEnv"] == ["TOKEN"]
     assert rows["cursor"]["registered"] is False
     assert set(rows["claude"]) == {
         "client",
@@ -445,6 +452,8 @@ def test_list_reads_only_the_sai_entry_and_prints_no_secrets(env: Env):
         "current",
         "registeredCommand",
         "scope",
+        "registrations",
+        "staleEnv",
     }
     for result in outputs:
         text = result.stdout + result.stderr
@@ -468,3 +477,174 @@ def test_client_errors_skip_warning_lines():
     out = "WARNING: could not create aliases\nError: config is locked\n"
     assert mcp_install.first_line(out) == "Error: config is locked"
     assert mcp_install.first_line("one\nlast words\n") == "last words"
+
+
+def claude_entry(argv: list[str], env: dict[str, str] | None = None) -> dict:
+    return {"type": "stdio", "command": argv[0], "args": argv[1:], "env": env or {}}
+
+
+def test_extra_env_is_stale_and_replaced(env: Env):
+    endpoint = "https://other-network.example/query"
+    (env.home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "sai": claude_entry(serve(env), {"SAI_ENDPOINT": endpoint})
+                }
+            }
+        )
+    )
+    (env.codex_home / "fake-state.json").write_text(
+        json.dumps(
+            {
+                "sai": {
+                    "type": "stdio",
+                    "command": str(env.sai),
+                    "args": ["mcp", "serve"],
+                    "env": {},
+                    "env_vars": ["SAI_LCD_ENDPOINT"],
+                }
+            }
+        )
+    )
+    listed = invoke("mcp", "list")
+    rows = {r["client"]: r for r in payload(listed)["clients"]}
+    assert rows["claude"]["current"] is False
+    assert rows["claude"]["staleEnv"] == ["SAI_ENDPOINT"]
+    assert rows["codex"]["staleEnv"] == ["SAI_LCD_ENDPOINT"]
+    assert endpoint not in listed.stdout + listed.stderr
+    result = invoke("mcp", "install", "claude", "codex")
+    assert actions(result) == {"claude": "replaced", "codex": "replaced"}
+    assert endpoint not in result.stdout + result.stderr
+    assert env.claude_json()["mcpServers"]["sai"]["env"] == {}
+    again = invoke("mcp", "install", "claude", "codex")
+    assert set(actions(again).values()) == {"unchanged"}
+
+
+def test_disabled_codex_entry_is_not_current_and_is_replaced(env: Env):
+    (env.codex_home / "fake-state.json").write_text(
+        json.dumps(
+            {
+                "sai": {
+                    "type": "stdio",
+                    "command": str(env.sai),
+                    "args": ["mcp", "serve"],
+                },
+                "sai_enabled": False,
+            }
+        )
+    )
+    row = payload(invoke("mcp", "list"))["clients"][1]
+    assert (row["client"], row["current"], row["disabled"]) == ("codex", False, True)
+    result = invoke("mcp", "install", "codex")
+    assert actions(result) == {"codex": "replaced"}
+    assert ["mcp", "remove", "sai"] in env.calls()
+    row = payload(invoke("mcp", "list"))["clients"][1]
+    assert row["current"] is True
+    assert "disabled" not in row
+
+
+def test_list_shows_every_scope_and_the_effective_one(env: Env):
+    old = claude_entry([OLD_COMMAND])
+    (env.home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"sai": claude_entry(serve(env))}})
+    )
+    (env.project / ".mcp.json").write_text(json.dumps({"mcpServers": {"sai": old}}))
+    row = payload(invoke("mcp", "list"))["clients"][0]
+    assert row["client"] == "claude"
+    assert (row["scope"], row["current"]) == ("project", False)
+    assert row["registrations"] == [
+        {
+            "scope": "project",
+            "command": [OLD_COMMAND],
+            "current": False,
+            "effective": True,
+        },
+        {"scope": "user", "command": serve(env), "current": True, "effective": False},
+    ]
+    result = invoke("mcp", "install", "claude")
+    only = payload(result)["results"][0]
+    assert (only["action"], only["scope"], only["shadowedBy"]) == (
+        "unchanged",
+        "user",
+        "project",
+    )
+
+
+def test_uninstall_removes_every_scope_sai_is_in(env: Env):
+    (env.home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(env.project): {"mcpServers": {"sai": claude_entry(serve(env))}}
+                }
+            }
+        )
+    )
+    (env.project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"sai": claude_entry(serve(env))}})
+    )
+    cursor_project = env.project / ".cursor" / "mcp.json"
+    cursor_project.parent.mkdir()
+    cursor_project.write_text(json.dumps({"mcpServers": {"sai": {"command": "x"}}}))
+    result = invoke("mcp", "uninstall", "claude", "cursor")
+    assert result.exit_code == 0, result.output
+    got = [(r["client"], r["scope"], r["action"]) for r in payload(result)["results"]]
+    assert got == [
+        ("claude", "local", "removed"),
+        ("claude", "project", "removed"),
+        ("cursor", "project", "removed"),
+    ]
+    assert env.calls() == [
+        ["mcp", "remove", "--scope", "local", "sai"],
+        ["mcp", "remove", "--scope", "project", "sai"],
+    ]
+    assert json.loads(cursor_project.read_text())["mcpServers"] == {}
+    rows = payload(invoke("mcp", "list"))["clients"]
+    assert [r["registered"] for r in rows] == [False, False, False]
+
+
+def test_uninstall_scope_limits_the_removal(env: Env):
+    (env.project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"sai": claude_entry(serve(env))}})
+    )
+    result = invoke("mcp", "uninstall", "claude", "--scope", "user")
+    assert [(r["scope"], r["action"]) for r in payload(result)["results"]] == [
+        ("user", "absent")
+    ]
+    assert env.calls() == []
+
+
+def test_cursor_merges_again_after_a_concurrent_change(env: Env, monkeypatch):
+    path = env.cursor_path()
+    path.parent.mkdir()
+    path.write_text(json.dumps({"mcpServers": {"first": {"command": "a"}}}))
+    writes = []
+
+    def concurrent(target: Path) -> None:
+        if not writes:
+            writes.append(1)
+            target.write_text(
+                json.dumps({"mcpServers": {"first": {"command": "a"}, "late": {}}})
+            )
+
+    monkeypatch.setattr(mcp_install, "before_replace", concurrent)
+    assert actions(invoke("mcp", "install", "cursor")) == {"cursor": "added"}
+    assert set(json.loads(path.read_text())["mcpServers"]) == {"first", "late", "sai"}
+
+
+def test_cursor_gives_up_when_the_file_keeps_changing(env: Env, monkeypatch):
+    path = env.cursor_path()
+    path.parent.mkdir()
+    path.write_text("{}")
+    count = iter(range(100))
+
+    def concurrent(target: Path) -> None:
+        target.write_text(json.dumps({"mcpServers": {f"s{next(count)}": {}}}))
+
+    monkeypatch.setattr(mcp_install, "before_replace", concurrent)
+    result = invoke("mcp", "install", "cursor")
+    assert result.exit_code == 1
+    assert "kept changing" in payload(result)["results"][0]["error"]
+    assert "sai" not in json.loads(path.read_text())["mcpServers"]
+    assert [p.name for p in path.parent.iterdir()] == ["mcp.json"]
