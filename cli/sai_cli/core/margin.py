@@ -6,7 +6,7 @@ import base64
 import json
 from decimal import Decimal
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import httpx
 
@@ -15,16 +15,10 @@ from . import intents, keeper
 MAINNET_LCD = "https://lcd.nibiru.fi"
 
 
-def _get_json(url: str) -> dict[str, Any]:
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" and not (
-        parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")
-    ):
-        raise ValueError("LCD endpoint must use HTTPS except on loopback")
-    if parsed.username or parsed.password:
-        raise ValueError("Credentials are not allowed in the LCD URL")
+def _get_json(url: str, timeout: float = 20) -> dict[str, Any]:
+    keeper.check_url(url, "LCD")
     try:
-        response = httpx.get(url, timeout=20)
+        response = httpx.get(url, timeout=timeout)
         response.raise_for_status()
         result = response.json()
         if not isinstance(result, dict):
