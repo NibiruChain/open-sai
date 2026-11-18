@@ -17,3 +17,7 @@ check:
 # Build the wheel and sdist and check that both ship the real SKILL.md
 build-check:
     uv run python scripts/check_dist.py
+
+# Tag main as vVERSION and push it; dry run unless given --run
+release VERSION *FLAGS:
+    uv run python scripts/release.py {{VERSION}} {{FLAGS}}
