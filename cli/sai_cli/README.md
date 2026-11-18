@@ -2,9 +2,48 @@
 
 Install `sai` as the [root README](../../README.md) shows. From a checkout, run
 `uv sync`, then `uv run sai --help`.
-The CLI connects to mainnet Keeper by default and accepts `--endpoint` for a
-different network. `account balances` and `watch` accept `--ws-endpoint` if the
-WebSocket service differs from the HTTP endpoint.
+The CLI connects to mainnet Keeper by default.
+
+## Settings
+
+`$SAI_HOME/config.toml` (default `~/.sai/config.toml`) holds settings for both
+the CLI and `sai mcp serve`. Each setting comes from the first of these that sets
+it: a flag, an environment variable, the file, the mainnet default.
+
+| Key                  | Flag             | Variable           | Default                 |
+| -------------------- | ---------------- | ------------------ | ----------------------- |
+| `keeper.endpoint`    | `--endpoint`     | `SAI_ENDPOINT`     | mainnet Keeper GraphQL  |
+| `keeper.ws_endpoint` | `--ws-endpoint`  | `SAI_WS_ENDPOINT`  | derived from the above  |
+| `lcd.endpoint`       | `--lcd-endpoint` | `SAI_LCD_ENDPOINT` | `https://lcd.nibiru.fi` |
+| `update.auto`        |                  | `SAI_UPDATE_AUTO`  | `true`                  |
+
+```bash
+sai config list                      # every key, its value, and its source
+sai config get keeper.endpoint       # the exact value
+sai config set keeper.endpoint URL
+sai config unset keeper.endpoint
+```
+
+`config list --json` returns `{"path", "settings": {KEY: {"value",
+"source", "env", "default"}}}`, where `source` is `flag`, `env`, `file`,
+`default`, or `derived`. `list` drops credentials from URLs; `get` prints the
+exact value. An unknown key or invalid value exits 2 and lists the valid keys.
+
+The first `set`, or an `unset` that removes a value, writes the whole file
+with every key commented out and explained, at mode 0600 in a 0700
+directory. Unsetting a key that is already unset writes nothing. Later edits keep your
+comments, and a lock file makes concurrent edits run one at a time. The
+CLI reads a section written as an inline table, dotted keys, or only
+subtables, but `set` and `unset` refuse to edit it (exit 2) until you rewrite
+it as a `[section]` table. Unsetting a key that is already unset leaves the
+file alone. Keys the CLI does not know produce a warning and are
+ignored; a known section that is not a table is an error.
+
+A `keeper.ws_endpoint` from a lower layer than `keeper.endpoint` is ignored,
+and the CLI derives the WebSocket from the Keeper endpoint instead. So
+`sai --endpoint URL` never pairs `URL` with the WebSocket of the Keeper in the
+file. The per-command `--ws-endpoint` and `--lcd-endpoint` options still
+work and override the setting for that command.
 
 ## Connecting
 
@@ -80,6 +119,69 @@ multiple accounts still loads and moves into `sessions.json` at the next
 sign-in or switch.
 
 
+## MCP Server
+
+`sai mcp serve` runs the stdio MCP server for agent clients. Register it with
+`sai mcp install claude`, `codex`, or `cursor`, or `--all` for every detected
+client; `sai mcp list` and `sai mcp uninstall` show and remove registrations.
+A bare `sai mcp` prints help. The
+server writes only MCP messages to stdout and logs to stderr; run on a
+terminal, it prints one stderr line saying an agent client should launch it.
+`--endpoint`, `--ws-endpoint`, and `--lcd-endpoint` pick the network as the
+top layer of [Settings](#settings), falling back to the same `sai` global
+flags, then `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
+the config file, then mainnet. They resolve once, at start.
+
+`install` registers the unresolved `sai` on `PATH` (normally the
+`~/.local/bin/sai` link that survives updates) as `<sai> mcp serve`, with no
+environment except `SAI_HOME` when it is set. It refuses a `sai` inside the uv
+cache with code `UNSTABLE_PATH`, and warns when the `sai` on `PATH` is not the
+install that is running. A server command after `--` replaces the default, for
+a dev checkout. Claude Code and Codex change through `claude mcp add|remove`
+and `codex mcp add|remove`; Cursor through an atomic edit of
+`~/.cursor/mcp.json` that keeps other servers and the file mode. Reads take
+only the `sai` entry's command, args, `SAI_HOME`, and the names of any other
+environment settings, and never run `claude mcp get`, which starts the
+server. The only environment value output shows is `SAI_HOME`, a path; other
+settings appear by name in `staleEnv`, and an entry with any of them, or a
+disabled Codex entry, is not current and gets replaced. `list` shows every
+scope's entry under `registrations` and marks the one the client uses as
+`effective` (Claude Code: local, then project, then user; Cursor: project,
+then user). `uninstall` removes every scope's entry unless `--scope` names
+one. Output shows a registered command in full only when it is the one
+`install` would register; any other entry shows only its program name and
+`args: "<hidden>"`, since its args may hold a token or credential URL. A
+trusted Codex project's `.codex/config.toml` can define its own `sai` entry
+that overrides the user's. Codex decides which project configs load, so sai
+runs `codex mcp get sai --json` twice, from `$CODEX_HOME` for the user entry
+and from the working directory for the entry Codex uses there. When they
+differ (compared by a hash of everything Codex reports for the server, env values,
+URL, and tool filters included), `list`
+reports a `project` entry as effective, and `install` and `uninstall` fail
+for Codex rather than edit project files. After each change sai reads the
+client again: the entry must match, or be gone, and for Codex the answer from
+the working directory must agree too. Otherwise the client fails with "a
+project .codex/config.toml entry is still active", which catches a project
+entry identical to the user one. An entry with a Codex tool filter
+(`enabled_tools` or `disabled_tools`) lists it under `extraSettings` and is not
+current. `reconnectNeeded` is true whenever a client config was written, even
+if the check afterwards failed. The Cursor edit re-reads the file just before the rename
+and merges again once if something else changed it. A plain file has no
+compare-and-swap, so a write in the instant between that re-read and the
+rename can still be lost. Results report `added`, `replaced`, `unchanged`, `removed`,
+`absent`, `failed`, or `planned` (with `--dry-run`) per client, and the
+command exits 1 if any client failed. Without a terminal, `install` with no
+client lists clients and changes nothing, and `uninstall` with no client is a
+usage error.
+
+The server lists every tool regardless of sign-in. Each `trade_*` call checks
+the session of the account it acts as (the active one, or its `addr`)
+before it rebuilds the preview: no session returns
+`SIGNED_OUT`, an expired one `SESSION_EXPIRED`, and one for another endpoint
+or an unreadable file `SESSION_UNAVAILABLE`. Each message tells the agent to
+have the user run `sai auth login` or `sai auth import`. A signed-in trade
+still needs the `previewDigest` of the preview the user confirmed.
+
 ## Commands
 
 Commands include `market list`, `market prices`, `account positions ADDR`,
@@ -115,6 +217,25 @@ minutes after submission, past Keeper's two-minute admission expiry, the CLI
 marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
 admission does not establish execution or finality.
+
+`sai doctor` checks the install, `$SAI_HOME/trader`, the session, the intent
+ledger, and the Keeper HTTP, WebSocket, and LCD endpoints, and fixes what it
+safely can. It creates `$SAI_HOME/trader`, removes group and other access
+from it and the files sai keeps there (the connected accounts, the ledger and its
+journals, and the shell history), migrates the intent ledger, and reconciles
+unknown intents for the signed-in account the way `sai intent status` does
+(a Keeper read; it never places or cancels a trade). It never deletes or
+rewrites the session, never writes through a symlink in `$SAI_HOME/trader`,
+and never prints the session token. Without fixes it reads the ledger from a
+temporary copy, so it writes nothing at all.
+
+Each check prints pass, fixed, warn, fail, or skipped, with what changed or
+the command that fixes it. Doctor exits 1 if any check still fails;
+`sai --json doctor` prints the same report as JSON. `--no-fix` reports
+without changing anything, and `--offline` skips the network checks, which
+otherwise run in parallel and stop after 7 seconds in total. The
+endpoints come from [Settings](#settings); `sai doctor --ws-endpoint` and
+`--lcd-endpoint` override them for one run.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.

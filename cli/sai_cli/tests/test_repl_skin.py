@@ -8,7 +8,6 @@ import click
 import pytest
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
-from sai_cli.core import keeper
 from sai_cli.sai_cli import main, repl, repl_args
 from sai_cli.utils.repl_skin import ReplSkin
 
@@ -75,7 +74,7 @@ def test_repl_writes_history_and_shows_help(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SAI_HOME", str(tmp_path))
     ctx = click.Context(
         main,
-        obj={"endpoint": keeper.MAINNET_HTTP, "json": True},
+        obj={"flags": {}, "settings": None, "json": True},
     )
     with create_pipe_input() as pipe:
         pipe.send_text("help\rhelp trade\r")

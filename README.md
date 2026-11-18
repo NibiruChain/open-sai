@@ -24,10 +24,18 @@ uv tool install git+https://github.com/SaiDotFun/open-sai
 sai --help
 ```
 
-Upgrade with `uv tool upgrade sai-cli`, or rerun the install command with
-`--reinstall`. Both Git commands install from `main`. `sai --version`
-prints the installed version. The package is `sai-cli` and is not on PyPI
-yet, so `uv tool install sai` installs an unrelated PyPI package.
+Both Git commands install from `main`. `sai --version` prints the installed
+version, and `sai update --check` compares it with the latest GitHub release
+and prints the command that installs it:
+
+```bash
+uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai@vX.Y.Z
+```
+
+`sai update` does not install updates by itself yet.
+
+The package is `sai-cli` and is not on PyPI yet, so `uv tool install sai`
+installs an unrelated PyPI package.
 
 Agents: run `sai --skill` to print the agent skill that matches the installed
 version. Agents that load skills ahead of time can install it with
@@ -83,25 +91,48 @@ your files can decrypt it. There is no session passphrase.
 
 ## Use Sai From Your Agent (MCP)
 
-The `sai-mcp` server gives MCP clients such as Claude Code the same reads,
-previews, and trades as the CLI. Connect to Sai with the CLI first. The
-server reads the stored session without a prompt, never asks for the token,
-and never returns it.
+`sai mcp serve` runs an MCP server that gives agent clients such as Claude
+Code the same reads, previews, and trades as the CLI. Install `sai` on your
+`PATH` with `uv tool install` first, then register it:
 
 ```bash
-claude mcp add sai -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp
+sai mcp install claude          # or codex, cursor, or several at once
+sai mcp install --all           # every client found on this machine
+sai mcp list                    # where Sai is registered
+sai mcp uninstall codex
 ```
 
-From a checkout, use `uv run --directory /path/to/open-sai sai-mcp` as the
-command instead.
+`install` registers the `sai` on your `PATH`, normally `~/.local/bin/sai`,
+which keeps its path across updates. It refuses a `sai` run through `uvx`,
+because uv cleans that copy out of its cache. Claude Code and Codex change
+through their own `mcp add` and `mcp remove` commands; for Cursor, `install`
+edits `~/.cursor/mcp.json` and keeps your other servers. Cursor may ask you to
+enable `sai` in its MCP settings. Claude Code registers for your user by
+default; `--scope project` writes the project's `.mcp.json` instead.
 
-The server starts read-only: market data, account reads, intent status, and
-trade previews. To let the agent submit trades, set
-`SAI_MCP_EXPOSED_TOOLS=all` before the `--`:
+Running `install` again reports `unchanged`. An older entry is `replaced`,
+and so is one that sets other environment variables or that Codex has
+disabled. `uninstall` removes Sai from every scope it is registered in unless
+you pass `--scope`. When Codex loads a different `sai` entry from the current project's
+`.codex/config.toml`, sai reports it but never edits it; change it there
+yourself. `--dry-run` shows the commands without running them. `install`
+asks which clients to register only on a terminal; an agent that names no
+client gets the list of detected clients and nothing changes. Restart or
+reconnect a client after a change.
+
+From a checkout, give the server command after `--`:
 
 ```bash
-claude mcp add sai -e SAI_MCP_EXPOSED_TOOLS=all -- uvx --from git+https://github.com/SaiDotFun/open-sai sai-mcp
+sai mcp install claude -- uv run --directory /path/to/open-sai sai mcp serve
 ```
+
+The server lists every tool, trades included, whether or not you are signed in.
+Trading follows sign-in on each call. Sign in with `sai auth login` or `sai
+auth import` in a terminal, and the agent can submit trades; sign out with `sai
+auth logout`, and every `trade_*` call returns `SIGNED_OUT` without touching
+Keeper. An expired session returns `SESSION_EXPIRED`. The server reads the
+stored session without a prompt, never asks for the token, and never returns
+it.
 
 Each preview names the signed-in `account`, and each trade must carry the
 `previewDigest` from a preview the user confirmed. Before submitting, the
@@ -117,14 +148,22 @@ longer matches:
 - `trade_close`, `trade_tpsl`, and `trade_leverage`: nothing beyond the
   account and arguments.
 
-Ask the agent to call `mcp_info` to see the version, endpoints, mode, and
-active account.
+Ask the agent to call `mcp_info` to see the version, endpoints, active
+account, and `trading`, which reports whether trades can submit and why not
+(`signed-out`, `expired`, or `other-endpoint`).
 
 With several accounts connected, `auth_list` shows them, `auth_use` switches
 the active one (for the CLI too), and preview and trade tools take an
 optional `addr` to act as another connected account. A preview names its
-account, and a trade refuses if the account changed after the preview. `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`
-select another network.
+account, and a trade refuses if the account changed after the preview. A
+trade for an account that is not signed in for this server's endpoint is
+refused the same way.
+
+The server reads the same settings as the CLI once, when it starts: the
+`--endpoint`, `--ws-endpoint`, and `--lcd-endpoint` flags after `sai mcp
+serve`, then `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
+`~/.sai/config.toml`, which `sai config set` edits. See
+[Settings](cli/sai_cli/README.md#settings).
 
 ## Development
 

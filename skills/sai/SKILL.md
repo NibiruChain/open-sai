@@ -13,14 +13,28 @@ and stays correct when two builds report the same `sai --version`. The
 installed `sai --help` is the authority for commands and options.
 
 Use `sai --help` to inspect commands. Add `--json` before the
-command for machine-readable output. Mainnet is the default. Override the
-Keeper HTTP endpoint with `--endpoint`; WebSocket commands derive their endpoint
-from it unless `--ws-endpoint` is supplied.
+command for machine-readable output. Mainnet is the default.
+
+Settings live in `~/.sai/config.toml` (under `$SAI_HOME` when set), shared
+with the MCP server. Change them with `sai config set KEY VALUE` and `sai
+config unset KEY`, not by editing the file or MCP client config. `sai --json
+config list` shows each key's value and source (`flag`, `env`, `file`,
+`default`, `derived`). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
+derives it from the Keeper endpoint), `lcd.endpoint`, `update.auto`. A flag
+such as `--endpoint` or a variable such as `SAI_ENDPOINT` overrides the file
+for one run.
 
 Use `market list`, `market prices`, `account positions ADDR`, `account
 balances ADDR`, and `account history ADDR` for data. Use `watch price
 TOKEN_ID`, `watch positions ADDR`, or `watch balances ADDR` for streams.
 Streams reconnect after transport interruptions and emit a new snapshot.
+
+When a command fails in a way you cannot explain, run `sai --json doctor`.
+It fixes file modes, the ledger schema, and unknown intents it can settle
+with Keeper, and lists each change under `changes`; it never trades. Each
+check has a `status` (pass, fixed, warn, fail, or skipped) and a `fix`
+command. Show the person what doctor changed, then the checks that still fail
+and their fixes. Use `--no-fix` to look without changing anything.
 
 ## Connect Sai
 
@@ -75,8 +89,19 @@ auth login`.
 ## MCP Server
 
 If Sai tools such as `mcp_info` and `market_prices` are available, prefer
-them over shell commands. Call `mcp_info` first. Trade tools exist only when
-the server runs with `SAI_MCP_EXPOSED_TOOLS=all`. Before any trade, call the
+them over shell commands. To register them, run `sai mcp install claude`
+(or `codex`, `cursor`, `--all`); `sai mcp list --json` shows where Sai is
+registered, and `sai mcp uninstall CLIENT` removes it. A client needs a
+restart or reconnect to load the change. If `install` returns code
+`UNSTABLE_PATH`, `sai` is running from the uv cache: run `uv tool install
+git+https://github.com/SaiDotFun/open-sai` first. `sai mcp serve` is meant for
+an agent client to launch, not for a person to run. Call `mcp_info` first. Every tool is listed
+at all times, but trades submit only while someone is signed in:
+`mcp_info.trading.available` says whether they can, and its `reason` is
+`signed-in`, `signed-out`, `expired`, or `other-endpoint`. A signed-out
+`trade_*` call returns `SIGNED_OUT` (or `SESSION_EXPIRED`, or
+`SESSION_UNAVAILABLE`) and submits nothing; ask the person to run `sai auth
+login` or `sai auth import` in their own terminal. Before any trade, call the
 matching `preview_*` tool, show the person the result, and wait for explicit
 confirmation. Then call the `trade_*` tool with the preview's `previewDigest`
 (and `referencePrice` for a market open). On `PREVIEW_MISMATCH` or

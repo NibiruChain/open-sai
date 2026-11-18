@@ -1,0 +1,1175 @@
+"""`sai doctor`: local and network checks, output, exit codes, no secrets."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import socket
+import sqlite3
+import threading
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+from click.testing import CliRunner
+from sai_cli import doctor
+from sai_cli.core import keeper, margin, settings, storage, stream
+from sai_cli.sai_cli import main
+from websockets.sync.server import ServerConnection, serve
+from websockets.typing import Subprotocol
+
+ADDR = "0x" + "4803" * 10
+OTHER = "0x" + "c" * 40
+ENDPOINT = keeper.MAINNET_HTTP
+
+
+def b64(value: dict[str, Any]) -> str:
+    raw = json.dumps(value).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+HEADER = b64({"alg": "ES256K", "typ": "JWT", "kid": "doctor-test"})
+PAYLOAD = b64({"sub": ADDR, "purpose": "user_intent", "nonce": "q7Zr2"})
+SIGNATURE = "c2lnbmF0dXJlLW5ldmVyLXByaW50ZWQtYnktZG9jdG9y"
+TOKEN = f"{HEADER}.{PAYLOAD}.{SIGNATURE}"
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("SAI_HOME", str(tmp_path))
+    for name in ("SAI_ENDPOINT", "SAI_WS_ENDPOINT", "SAI_LCD_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path
+
+
+def save(hours: float = 48, endpoint: str = ENDPOINT, addr: str = ADDR) -> None:
+    storage.save_session(
+        {
+            "token": TOKEN,
+            "evmAddress": addr,
+            "endpoint": endpoint,
+            "expiresAt": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(),
+        }
+    )
+
+
+def endpoints(
+    endpoint: str | None = None,
+    ws_override: str | None = None,
+    lcd_endpoint: str | None = None,
+) -> settings.Settings:
+    """Settings with the given endpoints as flags, ignoring env and file."""
+    flags = {
+        "keeper.endpoint": endpoint,
+        "keeper.ws_endpoint": ws_override,
+        "lcd.endpoint": lcd_endpoint,
+    }
+    return settings.resolve(flags, {}, {})
+
+
+def ctx(
+    endpoint: str = ENDPOINT, fix: bool = False, offline: bool = False, **config: Any
+) -> doctor.Context:
+    """A report-only context unless FIX is set."""
+    return doctor.context(
+        endpoints(endpoint, **config),
+        path_env="",
+        fix=fix,
+        offline=offline,
+    )
+
+
+def one(fn, context: doctor.Context) -> doctor.Check:
+    result = fn(context)
+    assert isinstance(result, doctor.Check)
+    return result
+
+
+def snapshot(root: Path) -> dict[str, tuple[int, bytes | None]]:
+    """Every path under ROOT with its mode and file bytes."""
+    return {
+        str(path): (
+            path.stat().st_mode,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in sorted(root.rglob("*"))
+    }
+
+
+def run_cli(*args: str) -> tuple[int, str]:
+    result = CliRunner().invoke(main, list(args), catch_exceptions=False)
+    return result.exit_code, result.output
+
+
+# Session
+
+
+def test_no_fix_on_empty_home_creates_nothing(isolated_home):
+    code, output = run_cli("doctor", "--offline", "--no-fix")
+    assert code == 0
+    assert list(isolated_home.iterdir()) == []
+    assert "does not exist yet" in output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_empty_home_gets_a_private_trader_directory(isolated_home):
+    code, output = run_cli("--json", "doctor", "--offline")
+    assert code == 0
+    root = isolated_home / "trader"
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert list(root.iterdir()) == []
+    home = next(c for c in json.loads(output)["checks"] if c["id"] == "home")
+    assert home["status"] == "fixed"
+    assert home["changes"] == [f"created {root} with mode 700"]
+
+
+def test_empty_home_warns_signed_out(isolated_home):
+    code, output = run_cli("doctor", "--offline")
+    assert code == 0
+    assert "Signed out; MCP trading tools are unavailable" in output
+    assert "No intent ledger yet" in output
+    assert output.count("Skipped with --offline") == 3
+
+
+def test_valid_session_passes():
+    save()
+    check = one(doctor.check_session, ctx())
+    assert check.status == "pass"
+    assert check.details["addr"] == ADDR
+
+
+def test_expired_session_fails():
+    save(hours=-1)
+    check = one(doctor.check_session, ctx())
+    assert check.status == "fail"
+    assert "expired" in check.summary
+    assert check.fix and "sai auth login" in check.fix
+
+
+def test_session_for_other_endpoint_fails():
+    save(endpoint="https://user:pw@other.example/query?key=abc")
+    check = one(doctor.check_session, ctx())
+    assert check.status == "fail"
+    assert "https://other.example/query" in check.summary
+    assert "pw" not in check.summary and "key=abc" not in check.summary
+
+
+def test_session_expiring_within_a_day_warns():
+    save(hours=0.5)
+    check = one(doctor.check_session, ctx())
+    assert check.status == "warn"
+    assert "expires in" in check.summary and "min" in check.summary
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [{"version": 1, "salt": "x"}, {"version": 2, "backend": "file"}],
+)
+def test_passphrase_session_fails(isolated_home, envelope):
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "session.json").write_text(json.dumps(envelope))
+    (root / "session.json").chmod(0o600)
+    check = one(doctor.check_session, ctx())
+    assert check.status == "fail"
+    assert "passphrase" in check.summary
+
+
+def test_unreadable_session_fails(isolated_home):
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "session.json").write_text("not json")
+    check = one(doctor.check_session, ctx())
+    assert check.status == "fail"
+    assert "unreadable" in check.summary
+
+
+def loosen(home: Path) -> Path:
+    save()
+    ledger([])
+    root = home / "trader"
+    root.chmod(0o755)
+    (root / "sessions.json").chmod(0o644)
+    (root / "intents.sqlite3").chmod(0o640)
+    return root
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_no_fix_reports_loose_modes_without_changing_them(isolated_home):
+    root = loosen(isolated_home)
+    before = snapshot(isolated_home)
+    check = one(doctor.check_home, ctx())
+    assert check.status == "warn"
+    assert check.fix == (
+        f"chmod go-rwx {root}; chmod go-rwx {root / 'sessions.json'};"
+        f" chmod go-rwx {root / 'intents.sqlite3'}"
+    )
+    assert snapshot(isolated_home) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_fix_makes_the_directory_and_files_private(isolated_home):
+    root = loosen(isolated_home)
+    session_bytes = (root / "sessions.json").read_bytes()
+    check = one(doctor.check_home, ctx(fix=True))
+    assert check.status == "fixed"
+    assert check.changes == [
+        f"chmod {root} 755 -> 700",
+        f"chmod {root / 'sessions.json'} 644 -> 600",
+        f"chmod {root / 'intents.sqlite3'} 640 -> 600",
+    ]
+    assert root.stat().st_mode & 0o777 == 0o700
+    for name in ("sessions.json", "intents.sqlite3"):
+        assert (root / name).stat().st_mode & 0o777 == 0o600
+    assert (root / "sessions.json").read_bytes() == session_bytes
+    assert one(doctor.check_home, ctx(fix=True)).status == "pass"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_fix_keeps_owner_bits_and_skips_files_sai_does_not_manage(isolated_home):
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    history = root / "history"
+    history.write_text("")
+    history.chmod(0o754)
+    tool = root / "notes.sh"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    check = one(doctor.check_home, ctx(fix=True))
+    assert check.changes == [f"chmod {history} 754 -> 700"]
+    assert history.stat().st_mode & 0o777 == 0o700
+    assert tool.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_symlinked_trader_directory_is_never_written(isolated_home, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    outside.chmod(0o755)
+    child = outside / "session.json"
+    child.write_text("{}")
+    child.chmod(0o755)
+    (isolated_home / "trader").symlink_to(outside)
+    before = snapshot(outside)
+    code, output = run_cli("--json", "doctor", "--offline")
+    assert code == 1
+    by_id = {c["id"]: c for c in json.loads(output)["checks"]}
+    assert by_id["home"]["status"] == "fail"
+    assert "symlink" in by_id["home"]["summary"]
+    assert by_id["intents"]["status"] == "fail"
+    assert outside.stat().st_mode & 0o777 == 0o755
+    assert snapshot(outside) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_symlinked_ledger_is_not_migrated(isolated_home, tmp_path_factory):
+    target = old_ledger(tmp_path_factory.mktemp("elsewhere"))
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "intents.sqlite3").symlink_to(target)
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fail"
+    assert "symlink" in check.summary
+    assert user_version(target) == 0
+    assert one(doctor.check_home, ctx(fix=True)).status == "fail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_tighten_refuses_a_path_swapped_for_a_symlink(isolated_home, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    target = outside / "secret"
+    target.write_text("x")
+    target.chmod(0o644)
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "session.json").symlink_to(target)
+    changes, failed = doctor.tighten(root, doctor.MANAGED)
+    assert changes == []
+    assert failed == [f"chmod go-rwx {root / 'session.json'}"]
+    assert target.stat().st_mode & 0o777 == 0o644
+    linked = isolated_home / "linked"
+    linked.symlink_to(outside)
+    outside.chmod(0o755)
+    assert doctor.tighten(linked, doctor.MANAGED) == ([], [f"chmod go-rwx {linked}"])
+    assert outside.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard links")
+def test_hard_linked_history_is_not_chmodded(isolated_home, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside") / "shared"
+    outside.write_text("x")
+    outside.chmod(0o644)
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    os.link(outside, root / "history")
+    check = one(doctor.check_home, ctx(fix=True))
+    assert check.status == "fail"
+    assert check.fix == f"{root / 'history'} has other hard links; fix by hand"
+    assert outside.stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard links")
+def test_hard_linked_ledger_is_not_migrated(isolated_home, tmp_path_factory):
+    outside = old_ledger(tmp_path_factory.mktemp("elsewhere"))
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    os.link(outside, root / "intents.sqlite3")
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fail"
+    assert "hard links" in check.summary
+    assert user_version(outside) == 0
+
+
+def test_ledger_replaced_before_a_write_is_not_written(isolated_home, monkeypatch):
+    path = old_ledger(isolated_home)
+    replacement = isolated_home / "replacement.sqlite3"
+    replacement.write_bytes(path.read_bytes())
+    read = doctor.read_ledger
+
+    def read_then_swap(target):
+        result = read(target)
+        os.replace(replacement, path)
+        return result
+
+    monkeypatch.setattr(doctor, "read_ledger", read_then_swap)
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fail"
+    assert "changed during the check" in check.summary
+    assert user_version(path) == 0
+
+
+# Intents
+
+
+def ledger(rows: list[tuple[str, str, str, str]], version: int | None = None) -> Path:
+    with storage.db() as connection:
+        for key, endpoint, account, status in rows:
+            connection.execute(
+                "INSERT INTO intents (id, endpoint, account, kind, status, entity,"
+                " created_at) VALUES (?, ?, ?, 'OPEN_TRADE', ?, '', ?)",
+                (key, endpoint, account.lower(), status, time.time()),
+            )
+        if version is not None:
+            connection.execute(f"PRAGMA user_version = {version}")
+    return storage.home() / "intents.sqlite3"
+
+
+def test_clean_ledger_passes():
+    ledger([("k1", ENDPOINT, ADDR, "executed")])
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "pass"
+    assert check.details["unknown"] == 0
+
+
+def test_ledger_from_newer_sai_fails_and_is_not_touched(isolated_home):
+    path = ledger([], version=storage.SCHEMA_VERSION + 1)
+    before = path.read_bytes()
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "fail"
+    assert "schema" in check.summary
+    assert path.read_bytes() == before
+
+
+def test_unknown_intent_for_signed_in_account_fails():
+    save()
+    ledger(
+        [
+            ("20261118T000000000000-a", ENDPOINT, ADDR, "unknown"),
+            ("20261118T000000000000-b", ENDPOINT, OTHER, "unknown"),
+        ]
+    )
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "fail"
+    assert check.summary == "1 unknown intent blocks trading for 0x4803…"
+    assert check.fix == (f"sai intent status {ADDR} --key 20261118T000000000000-a")
+    assert check.details["otherAccounts"] == {"unknown": 1, "accounts": 1}
+
+
+def test_unknown_intents_for_other_accounts_warn_with_counts_only():
+    save()
+    ledger(
+        [
+            ("k1", ENDPOINT, OTHER, "unknown"),
+            ("k2", ENDPOINT, OTHER, "unknown"),
+            ("k3", "https://other.example/query", ADDR, "unknown"),
+        ]
+    )
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "warn"
+    assert check.summary == (
+        "3 unknown intents for 2 accounts not signed in here; they do not"
+        " block this session"
+    )
+    rendered = json.dumps(check.to_json())
+    assert OTHER.lower() not in rendered and "k1" not in rendered
+
+
+def test_signed_out_unknowns_never_block():
+    ledger([("k1", ENDPOINT, ADDR, "unknown")])
+    assert one(doctor.check_intents, ctx()).status == "warn"
+
+
+def test_corrupt_ledger_fails(isolated_home):
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "intents.sqlite3").write_bytes(b"not a database" * 512)
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "fail"
+    assert "unreadable" in check.summary
+
+
+def old_ledger(home: Path) -> Path:
+    """A schema-0 ledger from before `created_at`."""
+    root = home / "trader"
+    root.mkdir(mode=0o700)
+    path = root / "intents.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE intents (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL,"
+            " account TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,"
+            " entity TEXT NOT NULL DEFAULT '')"
+        )
+    connection.close()
+    path.chmod(0o600)
+    return path
+
+
+def user_version(path: Path) -> int:
+    with sqlite3.connect(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+    connection.close()
+    return version
+
+
+def test_no_fix_warns_about_an_old_ledger(isolated_home):
+    path = old_ledger(isolated_home)
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "warn"
+    assert user_version(path) == 0
+
+
+def test_fix_migrates_an_old_ledger(isolated_home):
+    path = old_ledger(isolated_home)
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fixed"
+    assert check.changes == [
+        f"migrated the ledger from schema 0 to {storage.SCHEMA_VERSION}"
+    ]
+    assert user_version(path) == storage.SCHEMA_VERSION
+
+
+def test_no_fix_reads_a_wal_ledger_without_writing(isolated_home):
+    path = ledger([("k1", ENDPOINT, ADDR, "executed")])
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    connection.close()
+    assert names(path.parent) == ["intents.sqlite3"]
+    before = snapshot(isolated_home)
+    code, _output = run_cli("doctor", "--offline", "--no-fix")
+    assert code == 0
+    assert snapshot(isolated_home) == before
+
+
+def test_no_fix_reads_rows_from_a_live_wal_without_touching_it():
+    save()
+    path = ledger([])
+    writer = sqlite3.connect(path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "INSERT INTO intents (id, endpoint, account, kind, status, entity,"
+            " created_at) VALUES ('k-wal', ?, ?, 'OPEN_TRADE', 'unknown', '', 0)",
+            (ENDPOINT, ADDR.lower()),
+        )
+        before = snapshot(path.parent)
+        check = one(doctor.check_intents, ctx())
+        after = snapshot(path.parent)
+    finally:
+        writer.close()
+    assert check.details["blocking"] == ["k-wal"]
+    assert after == before
+
+
+def add_unknown(key: str, account: str = ADDR, endpoint: str = ENDPOINT) -> None:
+    with storage.db() as connection:
+        connection.execute(
+            "INSERT INTO intents (id, endpoint, account, kind, status, entity,"
+            " created_at) VALUES (?, ?, ?, 'OPEN_TRADE', 'unknown', '', ?)",
+            (key, endpoint, account.lower(), time.time()),
+        )
+    connection.close()
+
+
+def test_snapshot_retries_when_the_ledger_changes_during_the_copy(monkeypatch):
+    save()
+    path = ledger([])
+    copy = doctor.shutil.copyfile
+    writes = iter(["k-late"])
+
+    def copy_then_write(source, target):
+        result = copy(source, target)
+        key = next(writes, None)
+        if key:
+            time.sleep(0.01)
+            add_unknown(key)
+        return result
+
+    monkeypatch.setattr(doctor.shutil, "copyfile", copy_then_write)
+    check = one(doctor.check_intents, ctx())
+    assert check.details["blocking"] == ["k-late"]
+    assert path.is_file()
+
+
+def test_ledger_that_keeps_changing_warns(monkeypatch):
+    ledger([])
+    copy = doctor.shutil.copyfile
+    count = iter(range(100))
+
+    def copy_then_write(source, target):
+        result = copy(source, target)
+        time.sleep(0.01)
+        add_unknown(f"k{next(count)}", account=OTHER)
+        return result
+
+    monkeypatch.setattr(doctor.shutil, "copyfile", copy_then_write)
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "warn"
+    assert "changed while reading" in check.summary
+
+
+def names(directory: Path) -> list[str]:
+    return sorted(path.name for path in directory.iterdir())
+
+
+def test_naive_session_expiry_fails_the_session_check_and_continues(isolated_home):
+    storage.save_session(
+        {
+            "token": TOKEN,
+            "evmAddress": ADDR,
+            "endpoint": ENDPOINT,
+            "expiresAt": "2099-01-01T00:00:00",
+        }
+    )
+    code, output = run_cli("--json", "doctor", "--offline")
+    assert code == 1
+    report = json.loads(output)
+    by_id = {check["id"]: check for check in report["checks"]}
+    assert by_id["session"]["status"] == "fail"
+    assert "invalid" in by_id["session"]["summary"]
+    assert by_id["intents"]["status"] == "pass"
+
+
+# Install
+
+
+def fake_sai(directory: Path) -> Path:
+    directory.mkdir()
+    path = directory / "sai"
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_two_installs_on_path_warn(tmp_path):
+    first = fake_sai(tmp_path / "a")
+    fake_sai(tmp_path / "b")
+    path_env = os.pathsep.join([str(tmp_path / "a"), str(tmp_path / "b")])
+    context = doctor.context(endpoints(), path_env=path_env)
+    check = one(doctor.check_install, context)
+    assert check.status == "warn"
+    assert str(first.resolve()) in check.summary
+    assert len(check.details["onPath"]) == 2
+
+
+def test_install_reports_package_version():
+    check = one(doctor.check_install, ctx())
+    assert check.details["version"] == doctor.info.version()
+    assert check.status in ("pass", "warn")
+
+
+# Network stubs
+
+
+class Stub:
+    def __init__(
+        self, enabled: bool = True, network: str | None = "cataclysm-1"
+    ) -> None:
+        self.enabled = enabled
+        self.network = network
+        self.intents: list[dict[str, Any]] = []
+        # Seconds to drip the userIntents reply over, one byte at a time.
+        self.intents_drip = 0.0
+        # Called before each userIntents reply.
+        self.on_intents: Any = None
+        self.queries: list[str] = []
+
+
+@pytest.fixture
+def http_stub() -> Iterator[tuple[str, Stub]]:
+    """Serve Keeper's trading route on POST and LCD node_info on GET."""
+    state = Stub()
+
+    class Handler(BaseHTTPRequestHandler):
+        def reply(self, value: dict[str, Any]) -> None:
+            body = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def drip(self, value: dict[str, Any]) -> None:
+            body = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            end = time.monotonic() + state.intents_drip
+            sent = 0
+            while time.monotonic() < end and sent < len(body) - 1:
+                self.wfile.write(body[sent : sent + 1])
+                self.wfile.flush()
+                sent += 1
+                time.sleep(0.1)
+            time.sleep(max(end - time.monotonic(), 0))
+            self.wfile.write(body[sent:])
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state.queries.append(body["query"])
+            if "userIntents" in body["query"]:
+                if state.on_intents:
+                    state.on_intents()
+                if state.intents_drip:
+                    self.drip({"data": {"userIntents": state.intents}})
+                else:
+                    self.reply({"data": {"userIntents": state.intents}})
+                return
+            assert "oneClickTrading" in body["query"]
+            route = {
+                "enabled": state.enabled,
+                "chainId": "cataclysm-1",
+                "contractAddress": "nibi1x",
+            }
+            self.reply({"data": {"oneClickTrading": route}})
+
+        def do_GET(self):
+            assert self.path.endswith("/cosmos/base/tendermint/v1beta1/node_info")
+            info = {} if state.network is None else {"network": state.network}
+            self.reply({"default_node_info": info})
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}", state
+    server.shutdown()
+    server.server_close()
+    thread.join()
+
+
+def ws_stub(ack: bool) -> tuple[str, Any]:
+    release = threading.Event()
+
+    def handler(connection: ServerConnection) -> None:
+        connection.recv()
+        if ack:
+            connection.send(json.dumps({"type": "connection_ack"}))
+        release.wait(10)
+
+    server = serve(
+        handler, "127.0.0.1", 0, subprotocols=[Subprotocol("graphql-transport-ws")]
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def stop() -> None:
+        release.set()
+        server.shutdown()
+        thread.join()
+
+    return f"ws://127.0.0.1:{server.socket.getsockname()[1]}/query", stop
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_network_checks_pass_against_stubs(http_stub):
+    base, _state = http_stub
+    ws, stop = ws_stub(ack=True)
+    try:
+        checks = doctor.run_checks(
+            ctx(f"{base}/query", ws_override=ws, lcd_endpoint=base)
+        )
+    finally:
+        stop()
+    by_id = {check.id: check for check in checks}
+    assert [check.id for check in checks] == [
+        "install",
+        "home",
+        "session",
+        "intents",
+        "keeper",
+        "websocket",
+        "lcd",
+    ]
+    assert by_id["keeper"].status == "pass"
+    assert by_id["websocket"].status == "pass"
+    assert by_id["lcd"].status == "pass"
+    assert by_id["lcd"].details["network"] == "cataclysm-1"
+
+
+def test_lcd_without_a_network_fails(http_stub):
+    base, state = http_stub
+    state.network = None
+    check = one(doctor.check_lcd, ctx(lcd_endpoint=base))
+    assert check.status == "fail"
+    assert "network" in check.summary
+
+
+@pytest.fixture
+def drip_server() -> Iterator[str]:
+    """An HTTP server that sends headers, then one body byte per 0.3 s."""
+    stop = threading.Event()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.2)
+
+    def drip(conn: socket.socket) -> None:
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n")
+            while not stop.wait(0.3):
+                try:
+                    conn.sendall(b" ")
+                except OSError:
+                    return
+
+    def accept() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except TimeoutError:
+                continue
+            threading.Thread(target=drip, args=(conn,), daemon=True).start()
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{listener.getsockname()[1]}"
+    stop.set()
+    thread.join()
+    listener.close()
+
+
+def test_network_checks_stop_at_the_deadline(drip_server, monkeypatch):
+    monkeypatch.setattr(doctor, "NETWORK_DEADLINE", 1.0)
+    start = time.monotonic()
+    checks = doctor.run_checks(ctx(f"{drip_server}/query", lcd_endpoint=drip_server))
+    assert time.monotonic() - start < 2.5
+    keeper_check = next(check for check in checks if check.id == "keeper")
+    assert keeper_check.status == "fail"
+    assert keeper_check.summary == "No answer within 1 s"
+
+
+def deaf_ws_server(ack: bool = True) -> tuple[str, threading.Event]:
+    """A WebSocket server that ignores the close; with ACK false it also
+    ignores connection_init."""
+    stop = threading.Event()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+
+    def serve_one() -> None:
+        conn, _ = listener.accept()
+        with conn, listener:
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += conn.recv(4096)
+            key = next(
+                line.split(b":", 1)[1].strip()
+                for line in request.split(b"\r\n")
+                if line.lower().startswith(b"sec-websocket-key:")
+            )
+            accept = base64.b64encode(
+                hashlib.sha1(key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest()
+            )
+            conn.sendall(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                b"Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                + accept
+                + b"\r\nSec-WebSocket-Protocol: graphql-transport-ws\r\n\r\n"
+            )
+            conn.recv(4096)  # connection_init
+            if ack:
+                reply = json.dumps({"type": "connection_ack"}).encode()
+                conn.sendall(bytes([0x81, len(reply)]) + reply)
+            stop.wait(15)
+
+    threading.Thread(target=serve_one, daemon=True).start()
+    return f"ws://127.0.0.1:{listener.getsockname()[1]}/query", stop
+
+
+def test_handshake_close_fits_in_the_timeout():
+    ws, stop = deaf_ws_server()
+    start = time.monotonic()
+    try:
+        stream.handshake(ws, 0.5)
+    finally:
+        stop.set()
+    assert time.monotonic() - start < 1.5
+
+
+def test_handshake_without_ack_fails_within_the_timeout():
+    ws, stop = deaf_ws_server(ack=False)
+    start = time.monotonic()
+    try:
+        with pytest.raises(stream.DISCONNECTS):
+            stream.handshake(ws, 0.5)
+    finally:
+        stop.set()
+    assert time.monotonic() - start < 1.0
+
+
+def test_trading_disabled_warns(http_stub):
+    base, state = http_stub
+    state.enabled = False
+    check = one(doctor.check_keeper, ctx(f"{base}/query"))
+    assert check.status == "warn"
+    assert "trading is disabled" in check.summary
+
+
+def test_lcd_on_another_chain_warns(http_stub):
+    base, state = http_stub
+    state.network = "nibiru-testnet-2"
+    ws, stop = ws_stub(ack=True)
+    try:
+        checks = doctor.run_checks(
+            ctx(f"{base}/query", ws_override=ws, lcd_endpoint=base)
+        )
+    finally:
+        stop()
+    lcd = next(check for check in checks if check.id == "lcd")
+    assert lcd.status == "warn"
+    assert "Keeper trades on cataclysm-1" in lcd.summary
+
+
+def test_silent_websocket_fails_within_the_timeout():
+    ws, stop = ws_stub(ack=False)
+    start = time.monotonic()
+    try:
+        check = one(doctor.check_websocket, ctx(ws_override=ws))
+    finally:
+        stop()
+    assert time.monotonic() - start < 6
+    assert check.status == "fail"
+    assert "connection_ack" in check.summary
+
+
+def test_unreachable_endpoints_fail_and_exit_1():
+    dead = f"http://127.0.0.1:{free_port()}"
+    code, output = run_cli(
+        "--endpoint",
+        f"{dead}/query",
+        "doctor",
+        "--lcd-endpoint",
+        dead,
+    )
+    assert code == 1
+    for line in ("fail    keeper", "fail    websocket", "fail    lcd"):
+        assert line in output
+
+
+def test_plain_text_remote_endpoint_fails():
+    check = one(doctor.check_keeper, ctx("http://keeper.example/query"))
+    assert check.status == "fail"
+    assert "HTTPS" in check.summary
+
+
+def test_offline_makes_no_connections(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("doctor --offline opened a connection")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    code, output = run_cli("doctor", "--offline")
+    assert code == 0
+    assert "skipped" in output
+
+
+def test_crashing_check_becomes_a_failure(monkeypatch):
+    def boom(_ctx):
+        raise RuntimeError(TOKEN)
+
+    monkeypatch.setattr(doctor, "LOCAL_CHECKS", [("boom", boom)])
+    checks = doctor.run_checks(ctx(offline=True))
+    assert checks[0].status == "fail"
+    assert TOKEN not in checks[0].summary
+
+
+# Reconciling unknown intents
+
+
+KEY = "20261118T000000000000-r"
+
+
+def blocked_on(endpoint: str) -> None:
+    save(endpoint=endpoint)
+    ledger([(KEY, endpoint, ADDR, "unknown")])
+
+
+def ledger_status(key: str) -> str:
+    with sqlite3.connect(storage.home() / "intents.sqlite3") as connection:
+        status = connection.execute(
+            "SELECT status FROM intents WHERE id=?", (key,)
+        ).fetchone()[0]
+    connection.close()
+    return status
+
+
+def test_fix_reconciles_a_blocking_intent_with_keeper(http_stub):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDR,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    check = one(doctor.check_intents, ctx(endpoint, fix=True))
+    assert check.status == "fixed"
+    assert check.changes == [f"reconciled intent {KEY} with Keeper"]
+    assert check.summary == f"Reconciled intent {KEY} with Keeper"
+    assert ledger_status(KEY) == "terminal"
+    assert all("mutation" not in query for query in state.queries)
+
+
+def test_late_keeper_answer_never_writes_the_ledger(http_stub, monkeypatch):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDR,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    state.intents_drip = 1.5
+    monkeypatch.setattr(doctor, "NETWORK_DEADLINE", 0.5)
+    start = time.monotonic()
+    check = one(doctor.check_intents, ctx(endpoint, fix=True))
+    assert time.monotonic() - start < 1.2
+    assert check.status == "fail"
+    assert check.details["reconcileError"] == "no answer within 0.5 s"
+    time.sleep(1.5)  # the answer arrives; the worker must not write it
+    assert ledger_status(KEY) == "unknown"
+
+
+def test_new_unknown_intent_during_reconcile_still_blocks(http_stub):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDR,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    state.on_intents = lambda: add_unknown("k-new", endpoint=endpoint)
+    check = one(doctor.check_intents, ctx(endpoint, fix=True))
+    assert check.status == "fail"
+    assert check.details["blocking"] == ["k-new"]
+    assert check.changes == [f"reconciled intent {KEY} with Keeper"]
+
+
+def test_locked_ledger_write_gives_up_at_the_deadline(http_stub, monkeypatch):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDR,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    holder = sqlite3.connect(storage.home() / "intents.sqlite3", isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        start = time.monotonic()
+        outcome = doctor.reconcile_keys(endpoint, ADDR, [KEY], 1.0)
+        took = time.monotonic() - start
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert took < 2
+    assert "error" in outcome
+    time.sleep(0.5)
+    assert ledger_status(KEY) == "unknown"
+
+
+def test_intent_keeper_cannot_settle_still_fails(http_stub):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = []  # no record yet, but too recent to mark absent
+    check = one(doctor.check_intents, ctx(endpoint, fix=True))
+    assert check.status == "fail"
+    assert check.changes == []
+    assert ledger_status(KEY) == "unknown"
+
+
+def test_offline_or_no_fix_never_reconciles(http_stub):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    for context in (ctx(endpoint, fix=True, offline=True), ctx(endpoint)):
+        assert one(doctor.check_intents, context).status == "fail"
+    assert state.queries == []
+
+
+# Output
+
+
+def test_json_report_shape_and_exit_code():
+    save(hours=-1)
+    code, output = run_cli("--json", "doctor", "--offline")
+    assert code == 1
+    report = json.loads(output)
+    assert report["schemaVersion"] == 1
+    assert report["overall"] == "fail"
+    assert set(report["sai"]) == {"version", "install"}
+    datetime.fromisoformat(report["generatedAt"])
+    for check in report["checks"]:
+        assert set(check) == {
+            "id",
+            "status",
+            "summary",
+            "fix",
+            "changes",
+            "details",
+            "durationMs",
+        }
+        assert check["status"] in doctor.STATUSES
+        assert isinstance(check["durationMs"], int)
+
+
+def test_overall_ignores_skipped():
+    checks = [doctor.Check("a", "pass", ""), doctor.Check("b", "skipped", "")]
+    assert doctor.overall(checks) == "pass"
+    checks.append(doctor.Check("c", "warn", ""))
+    assert doctor.overall(checks) == "warn"
+
+
+def test_session_token_never_printed(http_stub):
+    base, _state = http_stub
+    save(hours=-1, endpoint=f"{base}/query?token={TOKEN}")
+    ledger([("k1", f"{base}/query", ADDR, "unknown")])
+    ws, stop = ws_stub(ack=True)
+    try:
+        outputs = [
+            run_cli(
+                *prefix,
+                "--endpoint",
+                f"{base}/query",
+                "doctor",
+                "--ws-endpoint",
+                f"{ws}?token={TOKEN}",
+                "--lcd-endpoint",
+                f"{base}?token={TOKEN}",
+            )[1]
+            for prefix in ([], ["--json"])
+        ]
+    finally:
+        stop()
+    for output in outputs:
+        assert "session" in output
+        for secret in (TOKEN, HEADER, PAYLOAD, SIGNATURE):
+            assert secret not in output
+
+
+def test_redaction_covers_rendered_output():
+    save()
+    check = doctor.Check("x", "fail", f"leaked {TOKEN}", f"fix {TOKEN}")
+    assert TOKEN not in doctor.render_text([check])
+    assert TOKEN not in doctor.render_json(doctor.report([check]))
+
+
+# Refactors
+
+
+@pytest.mark.parametrize(
+    ("url", "secure", "ok"),
+    [
+        ("https://keeper.example/query", "https", True),
+        ("http://127.0.0.1:8080/query", "https", True),
+        ("http://keeper.example/query", "https", False),
+        ("https://u:p@keeper.example/query", "https", False),
+        ("wss://keeper.example/query", "wss", True),
+        ("ws://localhost/query", "wss", True),
+        ("ws://keeper.example/query", "wss", False),
+        ("https://keeper.example/query", "wss", False),
+    ],
+)
+def test_check_url(url, secure, ok):
+    if ok:
+        keeper.check_url(url, "Test", secure)
+    else:
+        with pytest.raises(ValueError, match="Test"):
+            keeper.check_url(url, "Test", secure)
+
+
+def test_check_ws_refuses_credentials():
+    with pytest.raises(stream.StreamError, match="Credentials"):
+        stream.check_ws("wss://u:p@keeper.example/query")
+
+
+def test_request_and_get_json_pass_the_timeout(monkeypatch):
+    seen: list[float] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"data": {}}
+
+    def record(*_args, timeout, **_kwargs):
+        seen.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(keeper.httpx, "post", record)
+    monkeypatch.setattr(margin.httpx, "get", record)
+    keeper.request("https://keeper.example/query", keeper.ROUTE)
+    keeper.request("https://keeper.example/query", keeper.ROUTE, timeout=5)
+    margin._get_json("https://lcd.example/x")
+    margin._get_json("https://lcd.example/x", timeout=5)
+    assert seen == [20, 5, 20, 5]
+
+
+def test_handshake_succeeds_on_ack():
+    ws, stop = ws_stub(ack=True)
+    try:
+        stream.handshake(ws, 5)
+    finally:
+        stop()

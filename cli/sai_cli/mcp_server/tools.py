@@ -1,9 +1,10 @@
 """Tool implementations for the Sai MCP server.
 
-Each function takes a `Config` and returns a JSON-ready value, raising the
-same errors as the CLI's core. `run` turns a call into a JSON string and
-never raises: known errors become `{"error", "code"}` objects, and anything
-else becomes a generic error with the traceback logged to stderr.
+Each function takes the server's `Settings` and returns a JSON-ready value,
+raising the same errors as the CLI's core. `run` turns a call into a JSON
+string and never raises: known errors become `{"error", "code"}` objects,
+and anything else becomes a generic error with the traceback logged to
+stderr.
 
 The server never takes a session token. It reads the session that `sai auth
 login` or `sai auth import` stored, the same way the CLI does, without a
@@ -16,18 +17,16 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import time
 import traceback
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from ..core import intents, keeper, margin, reconcile, storage, stream, trading
+from ..core import intents, keeper, reconcile, storage, stream, trading
 from ..core import session as sessions
-from . import info
+from ..core.settings import Settings, public_url
 
 log = logging.getLogger("sai_cli.mcp_server")
 
@@ -37,9 +36,22 @@ NO_ADDR = (
 )
 OTHER_ENDPOINT = (
     "No addr given, and the stored session belongs to a different Keeper"
-    " endpoint than this server's SAI_ENDPOINT, so its addr may not be the"
+    " endpoint than this server's keeper.endpoint, so its addr may not be the"
     " account meant here. Pass addr explicitly."
 )
+SIGN_IN = (
+    " Ask the user to sign in by running `sai auth login` or `sai auth"
+    " import` in a terminal, then retry. Reads and most previews work without it."
+)
+NOT_SIGNED_IN = {
+    "signed-out": ("No Sai account is signed in." + SIGN_IN, "SIGNED_OUT"),
+    "expired": ("The Sai trading session expired." + SIGN_IN, "SESSION_EXPIRED"),
+    "other-endpoint": (
+        "The signed-in Sai session belongs to a different Keeper endpoint than"
+        " this server's." + SIGN_IN,
+        "SESSION_UNAVAILABLE",
+    ),
+}
 INTERNAL = "Unexpected error in the Sai MCP server; see its stderr log"
 NEEDS_DIGEST = (
     "preview_digest is required: call the matching preview_* tool, show the"
@@ -71,32 +83,15 @@ PRICE_MOVED = (
 )
 
 
-@dataclass(frozen=True)
-class Config:
-    """Endpoints the server talks to. SAI_HOME is read by core.storage."""
-
-    endpoint: str = keeper.MAINNET_HTTP
-    ws_override: str | None = None
-    lcd_endpoint: str = margin.MAINNET_LCD
-
-    @property
-    def ws_endpoint(self) -> str:
-        """The WebSocket endpoint: SAI_WS_ENDPOINT or derived from ENDPOINT."""
-        return self.ws_override or stream.derive_ws(self.endpoint)
-
-
-def load_config(env: Mapping[str, str] | None = None) -> Config:
-    """Read endpoints from SAI_ENDPOINT, SAI_WS_ENDPOINT, SAI_LCD_ENDPOINT."""
-    values = os.environ if env is None else env
-    return Config(
-        endpoint=values.get("SAI_ENDPOINT") or keeper.MAINNET_HTTP,
-        ws_override=values.get("SAI_WS_ENDPOINT") or None,
-        lcd_endpoint=values.get("SAI_LCD_ENDPOINT") or margin.MAINNET_LCD,
-    )
-
-
 class SessionUnavailable(ValueError):
-    """The stored session is missing, expired, or unusable by the server."""
+    """The stored session is missing, expired, or unusable by the server.
+
+    CODE is SIGNED_OUT, SESSION_EXPIRED, or SESSION_UNAVAILABLE.
+    """
+
+    def __init__(self, message: str, code: str = "SESSION_UNAVAILABLE") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class Refused(ValueError):
@@ -149,7 +144,7 @@ def describe(exc: Exception) -> dict[str, Any]:
         extra = {} if exc.preview is None else {"preview": exc.preview}
         return error(str(exc), exc.code, **extra, **exc.extra)
     if isinstance(exc, SessionUnavailable):
-        return error(str(exc), "SESSION_UNAVAILABLE")
+        return error(str(exc), exc.code)
     if isinstance(exc, stream.StreamError):
         return error(str(exc), "STREAM_ERROR")
     if isinstance(exc, ValueError):
@@ -192,6 +187,54 @@ def run(action: Callable[[], Any]) -> str:
 # Session
 
 
+def trading_state(settings: Settings, addr: str | None = None) -> dict[str, Any]:
+    """Report whether trade tools can submit right now for ADDR, or the
+    active account, and why not.
+
+    `reason` is signed-in, signed-out, expired, or other-endpoint. A session
+    that cannot be read, or an ADDR that is not connected, counts as
+    signed-out, with the reason in `error`.
+    """
+    try:
+        if not storage.session_exists():
+            return {"available": False, "reason": "signed-out", "addr": None}
+        stored = storage.load_session(addr)
+        expiry = datetime.fromisoformat(stored["expiresAt"])
+    except (ValueError, KeyError) as exc:
+        detail = (
+            f"Stored session is malformed; {storage.SIGN_IN_AGAIN}"
+            if isinstance(exc, KeyError)
+            else redact(str(exc))
+        )
+        return {
+            "available": False,
+            "reason": "signed-out",
+            "addr": None,
+            "error": detail,
+        }
+    account = stored.get("evmAddress")
+    if stored.get("endpoint") != settings.endpoint:
+        reason = "other-endpoint"
+    elif expiry <= datetime.now(UTC):
+        reason = "expired"
+    else:
+        reason = "signed-in"
+    return {"available": reason == "signed-in", "reason": reason, "addr": account}
+
+
+def require_session(settings: Settings, addr: str | None = None) -> None:
+    """Refuse with SIGNED_OUT, SESSION_EXPIRED, or SESSION_UNAVAILABLE unless
+    ADDR, or the active account, is connected, signed in for this
+    server's endpoint, and unexpired."""
+    state = trading_state(settings, addr)
+    if state["available"]:
+        return
+    if "error" in state:
+        raise SessionUnavailable(f"{state['error']}, in a terminal.")
+    message, code = NOT_SIGNED_IN[state["reason"]]
+    raise SessionUnavailable(message, code)
+
+
 class AccountSession:
     """Load one connected account's session for the length of a tool call.
 
@@ -200,18 +243,24 @@ class AccountSession:
     a call cannot move a checked trade to another account. Never prompts.
     """
 
-    def __init__(self, config: Config, addr: str | None = None) -> None:
-        self.config = config
+    def __init__(self, settings: Settings, addr: str | None = None) -> None:
+        self.settings = settings
         self.requested = addr
         self.pinned: str | None = None
 
+    def require(self) -> None:
+        """Refuse unless this call's account can trade now; see
+        `require_session`."""
+        require_session(self.settings, self.pinned or self.requested)
+
     def __call__(self) -> dict[str, str]:
+        self.require()
         try:
             result = sessions.load_active_session(
-                self.config.endpoint, self.pinned or self.requested
+                self.settings.endpoint, self.pinned or self.requested
             )
         except ValueError as exc:
-            raise SessionUnavailable(str(exc)) from exc
+            raise SessionUnavailable(f"{exc}.{SIGN_IN}") from exc
         self.pinned = result["evmAddress"]
         return result
 
@@ -226,12 +275,12 @@ class AccountSession:
             return None
 
 
-def session_loader(config: Config, addr: str | None = None) -> AccountSession:
+def session_loader(settings: Settings, addr: str | None = None) -> AccountSession:
     """Return a loader for ADDR or the active account; it never prompts."""
-    return AccountSession(config, addr)
+    return AccountSession(settings, addr)
 
 
-def resolve_addr(config: Config, addr: str | None) -> dict[str, Any]:
+def resolve_addr(settings: Settings, addr: str | None) -> dict[str, Any]:
     """Return ADDR, or the stored session's account when it is omitted,
     with where it came from.
 
@@ -249,7 +298,7 @@ def resolve_addr(config: Config, addr: str | None) -> dict[str, Any]:
         raise
     except ValueError as exc:
         raise SessionUnavailable(f"{exc}. Or pass addr.") from exc
-    if stored.get("endpoint") != config.endpoint:
+    if stored.get("endpoint") != settings.endpoint:
         raise SessionUnavailable(OTHER_ENDPOINT)
     return {
         "addr": stored["evmAddress"],
@@ -259,7 +308,7 @@ def resolve_addr(config: Config, addr: str | None) -> dict[str, Any]:
     }
 
 
-def session_state(config: Config) -> dict[str, Any]:
+def session_state(settings: Settings) -> dict[str, Any]:
     """Describe the stored session without its token."""
     try:
         if not storage.session_exists():
@@ -269,7 +318,7 @@ def session_state(config: Config) -> dict[str, Any]:
     except ValueError as exc:
         return {"signedIn": False, "error": str(exc)}
     expired = expiry <= datetime.now(UTC)
-    matches = stored.get("endpoint") == config.endpoint
+    matches = stored.get("endpoint") == settings.endpoint
     try:
         connected = len(storage.load_accounts()["sessions"])
     except ValueError:
@@ -281,31 +330,31 @@ def session_state(config: Config) -> dict[str, Any]:
         "addr": stored["evmAddress"],
         "expiresAt": stored["expiresAt"],
         "expired": expired,
-        "endpoint": info.public_url(stored.get("endpoint")),
+        "endpoint": public_url(stored.get("endpoint")),
         "endpointMatches": matches,
     }
 
 
-def auth_status(config: Config, addr: str | None = None) -> dict[str, Any]:
-    result = sessions.summary(session_loader(config, addr)())
-    return {**result, "endpoint": info.public_url(result["endpoint"])}
+def auth_status(settings: Settings, addr: str | None = None) -> dict[str, Any]:
+    result = sessions.summary(session_loader(settings, addr)())
+    return {**result, "endpoint": public_url(result["endpoint"])}
 
 
-def account_rows(config: Config) -> dict[str, Any]:
+def account_rows(settings: Settings) -> dict[str, Any]:
     """Describe every connected account without its token."""
     accounts = storage.load_accounts()
     now = datetime.now(UTC)
     rows = []
     for key, result in sorted(accounts["sessions"].items()):
         expired = datetime.fromisoformat(result["expiresAt"]) <= now
-        matches = result.get("endpoint") == config.endpoint
+        matches = result.get("endpoint") == settings.endpoint
         rows.append(
             {
                 "addr": result["evmAddress"],
                 "active": key == accounts["active"],
                 "expiresAt": result["expiresAt"],
                 "expired": expired,
-                "endpoint": info.public_url(result.get("endpoint")),
+                "endpoint": public_url(result.get("endpoint")),
                 "endpointMatches": matches,
                 "usable": matches and not expired,
             }
@@ -313,58 +362,60 @@ def account_rows(config: Config) -> dict[str, Any]:
     return {"accounts": rows}
 
 
-def auth_list(config: Config) -> dict[str, Any]:
-    return account_rows(config)
+def auth_list(settings: Settings) -> dict[str, Any]:
+    return account_rows(settings)
 
 
-def auth_use(config: Config, addr: str) -> dict[str, Any]:
+def auth_use(settings: Settings, addr: str) -> dict[str, Any]:
     storage.use_session(addr)
-    return account_rows(config)
+    return account_rows(settings)
 
 
 # Reads
 
 
-def market_list(config: Config) -> dict[str, Any]:
-    return keeper.request(config.endpoint, keeper.MARKETS)
+def market_list(settings: Settings) -> dict[str, Any]:
+    return keeper.request(settings.endpoint, keeper.MARKETS)
 
 
-def market_prices(config: Config) -> dict[str, Any]:
-    return keeper.request(config.endpoint, keeper.PRICES)
+def market_prices(settings: Settings) -> dict[str, Any]:
+    return keeper.request(settings.endpoint, keeper.PRICES)
 
 
-def account_positions(config: Config, addr: str | None) -> dict[str, Any]:
-    account = resolve_addr(config, addr)
+def account_positions(settings: Settings, addr: str | None) -> dict[str, Any]:
+    account = resolve_addr(settings, addr)
     variables = {"trader": account["addr"]}
-    return {**account, **keeper.request(config.endpoint, keeper.POSITIONS, variables)}
+    return {**account, **keeper.request(settings.endpoint, keeper.POSITIONS, variables)}
 
 
-def account_history(config: Config, addr: str | None) -> dict[str, Any]:
-    account = resolve_addr(config, addr)
+def account_history(settings: Settings, addr: str | None) -> dict[str, Any]:
+    account = resolve_addr(settings, addr)
     variables = {"trader": account["addr"]}
-    return {**account, **keeper.request(config.endpoint, keeper.HISTORY, variables)}
+    return {**account, **keeper.request(settings.endpoint, keeper.HISTORY, variables)}
 
 
-def account_balances(config: Config, addr: str | None) -> dict[str, Any]:
-    account = resolve_addr(config, addr)
+def account_balances(settings: Settings, addr: str | None) -> dict[str, Any]:
+    account = resolve_addr(settings, addr)
     variables = {"user": account["addr"]}
     return {
         **account,
-        **stream.snapshot(config.ws_endpoint, stream.BALANCES, variables),
+        **stream.snapshot(settings.ws_endpoint, stream.BALANCES, variables),
     }
 
 
-def intent_local(config: Config, addr: str | None) -> dict[str, Any]:
-    account = resolve_addr(config, addr)
-    pending = storage.list_pending(config.endpoint, account["addr"])
+def intent_local(settings: Settings, addr: str | None) -> dict[str, Any]:
+    account = resolve_addr(settings, addr)
+    pending = storage.list_pending(settings.endpoint, account["addr"])
     return {**account, "intents": pending}
 
 
-def intent_status(config: Config, addr: str | None, key: str | None) -> dict[str, Any]:
-    account = resolve_addr(config, addr)
+def intent_status(
+    settings: Settings, addr: str | None, key: str | None
+) -> dict[str, Any]:
+    account = resolve_addr(settings, addr)
     return {
         **account,
-        **reconcile.reconcile(config.endpoint, account["addr"], key),
+        **reconcile.reconcile(settings.endpoint, account["addr"], key),
     }
 
 
@@ -422,10 +473,15 @@ def bound(
 ) -> trading.SubmitCheck:
     """Return a check that refuses any intent but the confirmed one.
 
-    The digest is recomputed for the signed-in account and, for a market
-    open, with the caller's REFERENCE_PRICE, so a changed account or
-    reference needs a new confirmation. It then refuses a market open whose
-    refreshed price moved from REFERENCE_PRICE by more than SLIPPAGE percent.
+    The check runs right before the Keeper submit, after any price refresh.
+    It loads the trade's pinned account strictly, so a logout or expiry
+    since the trade started refuses with the sign-in error instead of
+    falling back to no account. The digest is then recomputed for that
+    account and, for a market open, with the caller's REFERENCE_PRICE, so a
+    changed account or reference needs a new confirmation, and a preview
+    confirmed with no account can never match. Last, it refuses a market
+    open whose refreshed price moved from REFERENCE_PRICE by more than
+    SLIPPAGE percent.
     """
     if not digest:
         raise ValueError(NEEDS_DIGEST)
@@ -436,7 +492,9 @@ def bound(
     )
 
     def check(preview: dict[str, Any]) -> None:
-        fresh = with_digest({**preview, "addr": load.account()})
+        # Strict: never None, and SessionUnavailable propagates.
+        account = load()["evmAddress"]
+        fresh = with_digest({**preview, "addr": account})
         confirmed = (
             fresh
             if reference is None
@@ -465,9 +523,14 @@ def submit_check(
     reference_price: str | None = None,
     slippage: str | None = None,
 ) -> trading.SubmitCheck:
-    """Return the pre-submit check for a trade; a dry run never calls it."""
+    """Return the pre-submit check for a trade; a dry run never calls it.
+
+    A submission first needs a usable session, checked here before any
+    preview is rebuilt, so a signed-out trade does no Keeper work at all.
+    """
     if dry_run:
         return lambda _preview: None
+    load.require()
     return bound(load, digest, reference_price, slippage)
 
 
@@ -502,12 +565,12 @@ def recent_opens(
     return recent
 
 
-def no_recent_open(config: Config, load: AccountSession) -> trading.SubmitCheck:
+def no_recent_open(settings: Settings, load: AccountSession) -> trading.SubmitCheck:
     """Return a check that refuses an open while a recent one may fill."""
 
     def check(_preview: dict[str, Any]) -> None:
         account = load()["evmAddress"]
-        pending = recent_opens(config.endpoint, account)
+        pending = recent_opens(settings.endpoint, account)
         if pending:
             statuses = " or ".join(sorted({row["status"] for row in pending}))
             raise Refused(
@@ -547,7 +610,7 @@ def finish(
 
 
 def open_trade(
-    config: Config,
+    settings: Settings,
     *,
     dry_run: bool,
     market_id: int,
@@ -565,19 +628,21 @@ def open_trade(
     allow_concurrent_open: bool = False,
 ) -> dict[str, Any]:
     market = order_type == "market"
+    if not dry_run:
+        require_session(settings, addr)
     if not dry_run and reference_price is not None and not market:
         raise ValueError(MARKET_ONLY_REFERENCE)
     if not dry_run and market and reference_price is None:
         raise ValueError(NEEDS_REFERENCE)
-    load = session_loader(config, addr)
+    load = session_loader(settings, addr)
     check = submit_check(
         load, dry_run, preview_digest, reference_price, slippage if market else None
     )
     if not dry_run and not allow_concurrent_open:
-        check = both(no_recent_open(config, load), check)
+        check = both(no_recent_open(settings, load), check)
     notices: list[str] = []
     result = trading.open_trade(
-        config.endpoint,
+        settings.endpoint,
         load,
         market_id=market_id,
         side=side,
@@ -594,7 +659,7 @@ def open_trade(
     )
     if dry_run and market:
         # Read-only: the price a live submit would refresh to now.
-        current = trading.open_usdc_market(config.endpoint, market_id)["price"]
+        current = trading.open_usdc_market(settings.endpoint, market_id)["price"]
         result["referencePrice"] = format(Decimal(str(current)), "f")
     if notices:
         result["notices"] = notices
@@ -602,7 +667,7 @@ def open_trade(
 
 
 def close_trade(
-    config: Config,
+    settings: Settings,
     *,
     dry_run: bool,
     trade_id: int,
@@ -610,10 +675,10 @@ def close_trade(
     preview_digest: str | None = None,
     addr: str | None = None,
 ) -> dict[str, Any]:
-    load = session_loader(config, addr)
+    load = session_loader(settings, addr)
     check = submit_check(load, dry_run, preview_digest)
     result = trading.close_trade(
-        config.endpoint,
+        settings.endpoint,
         load,
         trade_id=trade_id,
         cancel_order=cancel_order,
@@ -624,7 +689,7 @@ def close_trade(
 
 
 def set_tpsl(
-    config: Config,
+    settings: Settings,
     *,
     dry_run: bool,
     trade_id: int,
@@ -635,10 +700,10 @@ def set_tpsl(
     preview_digest: str | None = None,
     addr: str | None = None,
 ) -> dict[str, Any]:
-    load = session_loader(config, addr)
+    load = session_loader(settings, addr)
     check = submit_check(load, dry_run, preview_digest)
     result = trading.set_tpsl(
-        config.endpoint,
+        settings.endpoint,
         load,
         trade_id=trade_id,
         take_profit=take_profit,
@@ -652,7 +717,7 @@ def set_tpsl(
 
 
 def set_leverage(
-    config: Config,
+    settings: Settings,
     *,
     dry_run: bool,
     trade_id: int,
@@ -660,10 +725,10 @@ def set_leverage(
     preview_digest: str | None = None,
     addr: str | None = None,
 ) -> dict[str, Any]:
-    load = session_loader(config, addr)
+    load = session_loader(settings, addr)
     check = submit_check(load, dry_run, preview_digest)
     result = trading.set_leverage(
-        config.endpoint,
+        settings.endpoint,
         load,
         trade_id=trade_id,
         leverage=leverage,
@@ -674,7 +739,7 @@ def set_leverage(
 
 
 def change_margin(
-    config: Config,
+    settings: Settings,
     *,
     dry_run: bool,
     trade_id: int,
@@ -683,15 +748,15 @@ def change_margin(
     preview_digest: str | None = None,
     addr: str | None = None,
 ) -> dict[str, Any]:
-    load = session_loader(config, addr)
+    load = session_loader(settings, addr)
     check = submit_check(load, dry_run, preview_digest)
     result = trading.change_margin(
-        config.endpoint,
+        settings.endpoint,
         load,
         trade_id=trade_id,
         direction=direction,
         amount=amount,
-        lcd_endpoint=config.lcd_endpoint,
+        lcd_endpoint=settings.lcd_endpoint,
         dry_run=dry_run,
         before_submit=check,
     )
@@ -699,7 +764,7 @@ def change_margin(
 
 
 def partial_close(
-    config: Config,
+    settings: Settings,
     *,
     dry_run: bool,
     trade_id: int,
@@ -707,14 +772,14 @@ def partial_close(
     preview_digest: str | None = None,
     addr: str | None = None,
 ) -> dict[str, Any]:
-    load = session_loader(config, addr)
+    load = session_loader(settings, addr)
     check = submit_check(load, dry_run, preview_digest)
     result = trading.partial_close(
-        config.endpoint,
+        settings.endpoint,
         load,
         trade_id=trade_id,
         percent=percent,
-        lcd_endpoint=config.lcd_endpoint,
+        lcd_endpoint=settings.lcd_endpoint,
         dry_run=dry_run,
         before_submit=check,
     )
