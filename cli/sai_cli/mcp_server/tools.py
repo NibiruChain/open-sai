@@ -39,6 +39,19 @@ OTHER_ENDPOINT = (
     " endpoint than this server's keeper.endpoint, so its address may not be the"
     " account meant here. Pass address explicitly."
 )
+SIGN_IN = (
+    " Ask the user to sign in by running `sai auth login` or `sai auth"
+    " import` in a terminal, then retry. Reads and most previews work without it."
+)
+NOT_SIGNED_IN = {
+    "signed-out": ("No Sai account is signed in." + SIGN_IN, "SIGNED_OUT"),
+    "expired": ("The Sai trading session expired." + SIGN_IN, "SESSION_EXPIRED"),
+    "other-endpoint": (
+        "The signed-in Sai session belongs to a different Keeper endpoint than"
+        " this server's." + SIGN_IN,
+        "SESSION_UNAVAILABLE",
+    ),
+}
 INTERNAL = "Unexpected error in the Sai MCP server; see its stderr log"
 NEEDS_DIGEST = (
     "preview_digest is required: call the matching preview_* tool, show the"
@@ -71,7 +84,14 @@ PRICE_MOVED = (
 
 
 class SessionUnavailable(ValueError):
-    """The stored session is missing, expired, or unusable by the server."""
+    """The stored session is missing, expired, or unusable by the server.
+
+    CODE is SIGNED_OUT, SESSION_EXPIRED, or SESSION_UNAVAILABLE.
+    """
+
+    def __init__(self, message: str, code: str = "SESSION_UNAVAILABLE") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class Refused(ValueError):
@@ -124,7 +144,7 @@ def describe(exc: Exception) -> dict[str, Any]:
         extra = {} if exc.preview is None else {"preview": exc.preview}
         return error(str(exc), exc.code, **extra, **exc.extra)
     if isinstance(exc, SessionUnavailable):
-        return error(str(exc), "SESSION_UNAVAILABLE")
+        return error(str(exc), exc.code)
     if isinstance(exc, stream.StreamError):
         return error(str(exc), "STREAM_ERROR")
     if isinstance(exc, ValueError):
@@ -167,6 +187,54 @@ def run(action: Callable[[], Any]) -> str:
 # Session
 
 
+def trading_state(settings: Settings, address: str | None = None) -> dict[str, Any]:
+    """Report whether trade tools can submit right now for ADDRESS, or the
+    active account, and why not.
+
+    `reason` is signed-in, signed-out, expired, or other-endpoint. A session
+    that cannot be read, or an ADDRESS that is not connected, counts as
+    signed-out, with the reason in `error`.
+    """
+    try:
+        if not storage.session_exists():
+            return {"available": False, "reason": "signed-out", "account": None}
+        stored = storage.load_session(address)
+        expiry = datetime.fromisoformat(stored["expiresAt"])
+    except (ValueError, KeyError) as exc:
+        detail = (
+            f"Stored session is malformed; {storage.SIGN_IN_AGAIN}"
+            if isinstance(exc, KeyError)
+            else redact(str(exc))
+        )
+        return {
+            "available": False,
+            "reason": "signed-out",
+            "account": None,
+            "error": detail,
+        }
+    account = stored.get("evmAddress")
+    if stored.get("endpoint") != settings.endpoint:
+        reason = "other-endpoint"
+    elif expiry <= datetime.now(UTC):
+        reason = "expired"
+    else:
+        reason = "signed-in"
+    return {"available": reason == "signed-in", "reason": reason, "account": account}
+
+
+def require_session(settings: Settings, address: str | None = None) -> None:
+    """Refuse with SIGNED_OUT, SESSION_EXPIRED, or SESSION_UNAVAILABLE unless
+    ADDRESS, or the active account, is connected, signed in for this
+    server's endpoint, and unexpired."""
+    state = trading_state(settings, address)
+    if state["available"]:
+        return
+    if "error" in state:
+        raise SessionUnavailable(f"{state['error']}, in a terminal.")
+    message, code = NOT_SIGNED_IN[state["reason"]]
+    raise SessionUnavailable(message, code)
+
+
 class AccountSession:
     """Load one connected account's session for the length of a tool call.
 
@@ -180,13 +248,19 @@ class AccountSession:
         self.requested = address
         self.pinned: str | None = None
 
+    def require(self) -> None:
+        """Refuse unless this call's account can trade now; see
+        `require_session`."""
+        require_session(self.settings, self.pinned or self.requested)
+
     def __call__(self) -> dict[str, str]:
+        self.require()
         try:
             result = sessions.load_active_session(
                 self.settings.endpoint, self.pinned or self.requested
             )
         except ValueError as exc:
-            raise SessionUnavailable(str(exc)) from exc
+            raise SessionUnavailable(f"{exc}.{SIGN_IN}") from exc
         self.pinned = result["evmAddress"]
         return result
 
@@ -399,10 +473,15 @@ def bound(
 ) -> trading.SubmitCheck:
     """Return a check that refuses any intent but the confirmed one.
 
-    The digest is recomputed for the signed-in account and, for a market
-    open, with the caller's REFERENCE_PRICE, so a changed account or
-    reference needs a new confirmation. It then refuses a market open whose
-    refreshed price moved from REFERENCE_PRICE by more than SLIPPAGE percent.
+    The check runs right before the Keeper submit, after any price refresh.
+    It loads the trade's pinned account strictly, so a logout or expiry
+    since the trade started refuses with the sign-in error instead of
+    falling back to no account. The digest is then recomputed for that
+    account and, for a market open, with the caller's REFERENCE_PRICE, so a
+    changed account or reference needs a new confirmation, and a preview
+    confirmed with no account can never match. Last, it refuses a market
+    open whose refreshed price moved from REFERENCE_PRICE by more than
+    SLIPPAGE percent.
     """
     if not digest:
         raise ValueError(NEEDS_DIGEST)
@@ -413,7 +492,9 @@ def bound(
     )
 
     def check(preview: dict[str, Any]) -> None:
-        fresh = with_digest({**preview, "account": load.account()})
+        # Strict: never None, and SessionUnavailable propagates.
+        account = load()["evmAddress"]
+        fresh = with_digest({**preview, "account": account})
         confirmed = (
             fresh
             if reference is None
@@ -442,9 +523,14 @@ def submit_check(
     reference_price: str | None = None,
     slippage: str | None = None,
 ) -> trading.SubmitCheck:
-    """Return the pre-submit check for a trade; a dry run never calls it."""
+    """Return the pre-submit check for a trade; a dry run never calls it.
+
+    A submission first needs a usable session, checked here before any
+    preview is rebuilt, so a signed-out trade does no Keeper work at all.
+    """
     if dry_run:
         return lambda _preview: None
+    load.require()
     return bound(load, digest, reference_price, slippage)
 
 
@@ -542,6 +628,8 @@ def open_trade(
     allow_concurrent_open: bool = False,
 ) -> dict[str, Any]:
     market = order_type == "market"
+    if not dry_run:
+        require_session(settings, address)
     if not dry_run and reference_price is not None and not market:
         raise ValueError(MARKET_ONLY_REFERENCE)
     if not dry_run and market and reference_price is None:

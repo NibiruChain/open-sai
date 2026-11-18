@@ -1,4 +1,5 @@
-"""Sai MCP server: annotations, exposure, tool calls, errors, and secrets."""
+"""Sai MCP server: annotations, tool listing, sign-in, tool calls, errors,
+and secrets."""
 
 from __future__ import annotations
 
@@ -12,13 +13,16 @@ from pathlib import Path
 from typing import Any, TextIO
 
 import pytest
+from click.testing import CliRunner
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
+from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import TextContent
 from sai_cli.core import keeper, margin, settings, storage, stream
 from sai_cli.core import session as sessions
 from sai_cli.mcp_server import server, tools
+from sai_cli.sai_cli import main
 
 ADDRESS = "0x" + "b" * 40
 OTHER = "0x" + "c" * 40
@@ -65,7 +69,6 @@ def isolated_env(tmp_path, monkeypatch):
         "SAI_WS_ENDPOINT",
         "SAI_LCD_ENDPOINT",
         "SAI_UPDATE_AUTO",
-        server.ENV_MODE,
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -138,10 +141,10 @@ class FakeKeeper:
 
 @pytest.fixture
 def mcp() -> FastMCP:
-    return server.create_server("all")
+    return server.create_server()
 
 
-# Schema and exposure
+# Schema and listing
 
 
 def test_every_tool_has_a_description_and_the_right_annotations(mcp):
@@ -178,59 +181,191 @@ def names(mcp: FastMCP) -> set[str]:
     return {tool.name for tool in mcp._tool_manager.list_tools()}
 
 
-def test_read_only_mode_registers_no_trade_tool():
-    assert server.TRADE_TOOL_NAMES == TRADE_TOOLS
-    for mcp in (server.create_server(), server.create_server("read-only")):
-        assert names(mcp) == READ_TOOLS
-        assert invoke(mcp, "mcp_info")["exposedTools"] == "read-only"
+async def client_listing(mcp: FastMCP) -> tuple[list[str], dict[str, Any]]:
+    """List tools and call mcp_info through an in-memory MCP client."""
+    async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+        listed = await client.list_tools()
+        called = await client.call_tool("mcp_info", {})
+    return [tool.name for tool in listed.tools], json.loads(text_of(called.content))
 
 
-def test_all_mode_registers_every_tool(mcp):
-    assert names(mcp) == READ_TOOLS | TRADE_TOOLS
-    assert invoke(mcp, "mcp_info")["exposedTools"] == "all"
+def test_every_tool_is_listed_signed_in_or_out(mcp):
+    """Agents doing discovery see one stable tool set, trade tools included,
+    whatever the sign-in state."""
+    signed_out, info = asyncio.run(client_listing(mcp))
+    assert set(signed_out) == READ_TOOLS | TRADE_TOOLS
+    assert info["trading"] == {
+        "available": False,
+        "reason": "signed-out",
+        "account": None,
+    }
+    assert "exposedTools" not in info
+
+    storage.save_session(stored_session())
+    signed_in, info = asyncio.run(client_listing(mcp))
+    assert signed_in == signed_out
+    assert info["trading"] == {
+        "available": True,
+        "reason": "signed-in",
+        "account": ADDRESS,
+    }
+    assert info["tools"] == sorted(signed_in)
 
 
-def test_read_only_mode_goes_by_name_not_annotation(monkeypatch):
-    """A trade tool mislabeled read-only is still never registered."""
-    mislabeled = ((server.trade_close, server.read_only("Close Trade")),)
-    monkeypatch.setattr(server, "READ_TOOLS", server.READ_TOOLS + mislabeled)
-    with pytest.raises(RuntimeError, match="trade_close"):
-        server.create_server("read-only")
+@pytest.mark.parametrize(
+    ("session", "reason", "code"),
+    (
+        (None, "signed-out", "SIGNED_OUT"),
+        (stored_session(hours=-1), "expired", "SESSION_EXPIRED"),
+        (
+            stored_session(endpoint="http://127.0.0.1:9/query"),
+            "other-endpoint",
+            "SESSION_UNAVAILABLE",
+        ),
+    ),
+)
+def test_trade_without_a_usable_session_submits_nothing(
+    mcp, monkeypatch, session, reason, code
+):
+    """Each trade tool refuses before any preview rebuild or Keeper call and
+    tells the agent how the user signs in."""
+    if session is not None:
+        storage.save_session(session)
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    trading = invoke(mcp, "mcp_info")["trading"]
+    assert trading["available"] is False and trading["reason"] == reason
+    for name, arguments in TRADES:
+        error = invoke(mcp, name, {**arguments, "preview_digest": "0" * 64})
+        assert error["code"] == code, name
+        assert "sai auth login" in error["error"], name
+        assert "sai auth import" in error["error"], name
+    assert fake.calls == []
+    assert storage.list_pending(ENDPOINT, ADDRESS) == []
 
 
-def test_invalid_mode_exits():
-    with pytest.raises(SystemExit, match="Invalid SAI_MCP_EXPOSED_TOOLS"):
-        server.create_server("write")
+MALFORMED = ({}, {"trade_id": "seven"}, {"preview_digest": 5, "extra": True})
 
 
-def test_module_level_server_is_read_only_without_the_variable(tmp_path):
-    """Importing `server.mcp` and running it, as `mcp run` does, never
-    exposes trades unless SAI_MCP_EXPOSED_TOOLS is `all`."""
-    code = (
-        "import json; from sai_cli.mcp_server import server;"
-        " print(json.dumps(sorted(t.name for t in"
-        " server.mcp._tool_manager.list_tools())))"
+@pytest.mark.parametrize(
+    ("session", "code"),
+    (
+        (None, "SIGNED_OUT"),
+        (stored_session(hours=-1), "SESSION_EXPIRED"),
+        (stored_session(endpoint="http://127.0.0.1:9/query"), "SESSION_UNAVAILABLE"),
+    ),
+)
+def test_session_check_comes_before_argument_validation(
+    mcp, monkeypatch, session, code
+):
+    """A malformed trade call without a usable session gets the sign-in
+    error over MCP, not FastMCP's validation error."""
+    if session is not None:
+        storage.save_session(session)
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+
+    async def calls() -> list[tuple[bool, dict[str, Any], Any]]:
+        results = []
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
+            for name in sorted(TRADE_TOOLS):
+                for arguments in MALFORMED:
+                    called = await client.call_tool(name, arguments)
+                    results.append(
+                        (
+                            called.isError,
+                            json.loads(text_of(called.content)),
+                            called.structuredContent,
+                        )
+                    )
+        return results
+
+    for is_error, error, structured in asyncio.run(calls()):
+        assert is_error is False
+        assert error["code"] == code
+        assert "`sai auth login` or `sai auth import`" in error["error"]
+        assert structured == {"result": json.dumps(error)}
+    assert fake.calls == []
+
+
+def test_signed_in_malformed_trade_still_gets_validation_errors(mcp):
+    storage.save_session(stored_session())
+
+    async def call() -> Any:
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
+            return await client.call_tool("trade_close", {})
+
+    called = asyncio.run(call())
+    assert called.isError is True
+    assert "trade_id" in text_of(called.content)
+
+
+def test_signed_out_trade_close_over_the_client_returns_signed_out(mcp, monkeypatch):
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+
+    async def close() -> dict[str, Any]:
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
+            called = await client.call_tool(
+                "trade_close", {"trade_id": 7, "preview_digest": "0" * 64}
+            )
+        return json.loads(text_of(called.content))
+
+    error = asyncio.run(close())
+    assert error["code"] == "SIGNED_OUT"
+    assert "`sai auth login` or `sai auth import`" in error["error"]
+    assert fake.calls == [] and fake.submitted == []
+
+
+def served_settings(monkeypatch, flags) -> settings.Settings:
+    """Run `server.serve(FLAGS)` without serving; return what it resolved."""
+    seen: list[settings.Settings | None] = []
+
+    class Idle:
+        def run(self) -> None:
+            pass
+
+    def build(resolved: settings.Settings | None = None) -> Idle:
+        seen.append(resolved)
+        return Idle()
+
+    monkeypatch.setattr(server, "create_server", build)
+    server.serve(flags)
+    assert len(seen) == 1 and seen[0] is not None
+    return seen[0]
+
+
+def test_serve_flags_win_over_the_environment_and_file(tmp_path, monkeypatch):
+    (tmp_path / "config.toml").write_text(
+        '[keeper]\nendpoint = "http://127.0.0.1:2/query"\n'
+        '[lcd]\nendpoint = "http://127.0.0.1:1"\n'
     )
-    for env, expected in (({}, READ_TOOLS), ({server.ENV_MODE: "all"}, None)):
-        done = subprocess.run(
-            [sys.executable, "-c", code],
-            env={"SAI_HOME": str(tmp_path), "PATH": os.defpath, **env},
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=60,
-        )
-        listed = set(json.loads(done.stdout))
-        assert listed == (expected or READ_TOOLS | TRADE_TOOLS)
+    monkeypatch.setenv("SAI_ENDPOINT", "http://127.0.0.1:9/query")
+    flags = {
+        "keeper.endpoint": "http://127.0.0.1:5/query",
+        "keeper.ws_endpoint": "ws://127.0.0.1:6/query",
+        "lcd.endpoint": "http://127.0.0.1:4",
+    }
+    resolved = served_settings(monkeypatch, flags)
+    assert resolved.endpoint == "http://127.0.0.1:5/query"
+    assert resolved.ws_endpoint == "ws://127.0.0.1:6/query"
+    assert resolved.lcd_endpoint == "http://127.0.0.1:4"
+    assert resolved.sources["keeper.endpoint"] == "flag"
+    partial = served_settings(monkeypatch, {"lcd.endpoint": "http://127.0.0.1:3"})
+    assert partial.endpoint == "http://127.0.0.1:9/query"
+    assert partial.lcd_endpoint == "http://127.0.0.1:3"
+    assert served_settings(monkeypatch, None).lcd_endpoint == "http://127.0.0.1:1"
 
 
-def test_mode_defaults_to_read_only_and_rejects_unknown_values(monkeypatch):
-    assert server.exposed_tools_mode() == "read-only"
-    monkeypatch.setenv(server.ENV_MODE, " ALL ")
-    assert server.exposed_tools_mode() == "all"
-    monkeypatch.setenv(server.ENV_MODE, "write")
-    with pytest.raises(SystemExit, match="Invalid SAI_MCP_EXPOSED_TOOLS 'write'"):
-        server.exposed_tools_mode()
+def test_serve_exits_on_a_bad_flag_without_serving(monkeypatch):
+    with pytest.raises(SystemExit, match="sai mcp serve: --endpoint"):
+        served_settings(monkeypatch, {"keeper.endpoint": "ftp://nope"})
 
 
 def test_server_settings_resolve_once_from_the_environment(monkeypatch):
@@ -455,6 +590,7 @@ def test_digest_binds_account_and_reference_not_market_intent_price():
 
 
 def test_trades_require_the_preview_digest(mcp):
+    storage.save_session(stored_session())
     for name in TRADE_TOOLS:
         tool = mcp._tool_manager.get_tool(name)
         assert tool is not None
@@ -473,6 +609,20 @@ PREVIEWS = (
     ("preview_leverage", {"trade_id": 7, "leverage": "3"}),
     ("preview_margin", {"trade_id": 7, "direction": "add", "amount": "1"}),
     ("preview_partial_close", {"trade_id": 7, "percent": 50}),
+)
+
+
+TRADES = (
+    ("trade_open", OPEN_ARGS),
+    (
+        "trade_open",
+        {**OPEN_ARGS, "order_type": "market", "price": None, "reference_price": "100"},
+    ),
+    ("trade_close", {"trade_id": 7}),
+    ("trade_tpsl", {"trade_id": 7, "take_profit": "120"}),
+    ("trade_leverage", {"trade_id": 7, "leverage": "3"}),
+    ("trade_margin", {"trade_id": 7, "direction": "add", "amount": "1"}),
+    ("trade_partial_close", {"trade_id": 7, "percent": 50}),
 )
 
 
@@ -678,6 +828,33 @@ def test_trade_acts_as_the_requested_connected_account(mcp, monkeypatch):
     assert storage.load_session()["evmAddress"] == OTHER
 
 
+def test_trade_checks_sign_in_for_the_requested_account(mcp, monkeypatch):
+    """With the active account signed in, a trade for another connected
+    account that expired, or one that is not connected, is still refused
+    before any Keeper call."""
+    storage.save_session(stored_session(hours=-1))
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    assert invoke(mcp, "mcp_info")["trading"]["available"] is True
+    expired = invoke(
+        mcp,
+        "trade_close",
+        {"trade_id": 7, "preview_digest": "0" * 64, "address": ADDRESS},
+    )
+    assert expired["code"] == "SESSION_EXPIRED"
+    missing = invoke(
+        mcp,
+        "trade_close",
+        {"trade_id": 7, "preview_digest": "0" * 64, "address": "0x" + "d" * 40},
+    )
+    assert missing["code"] == "SESSION_UNAVAILABLE"
+    assert "is not connected" in missing["error"]
+    assert fake.calls == []
+
+
 def test_switching_accounts_after_a_preview_refuses_the_trade(mcp, monkeypatch):
     connect_two_accounts()
     fake = FakeKeeper()
@@ -718,6 +895,91 @@ def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch
     )
     assert error["code"] == "PREVIEW_MISMATCH"
     assert error["preview"]["account"] == ADDRESS
+    assert fake.submitted == []
+
+
+MARKET_OPEN = {**OPEN_ARGS, "order_type": "market", "price": None}
+
+
+def test_preview_with_no_account_never_authorizes_a_trade(mcp, monkeypatch):
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_OPEN)
+    assert preview["account"] is None
+    storage.save_session(stored_session())
+    error = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_OPEN,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+            "allow_concurrent_open": True,
+        },
+    )
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["account"] == ADDRESS
+    assert fake.submitted == []
+
+
+def test_logout_during_the_price_refresh_refuses_the_trade(mcp, monkeypatch):
+    """A signed-out preview, then sign-in, then logout while the market
+    price refreshes: the trade must not submit with the session it loaded
+    before the logout."""
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_OPEN)
+    assert preview["account"] is None
+    storage.save_session(stored_session())
+
+    def logout_on_refresh(endpoint, query, variables=None, token=None):
+        if query == keeper.MARKETS:
+            storage.delete_session()
+        return fake(endpoint, query, variables, token)
+
+    monkeypatch.setattr(keeper, "request", logout_on_refresh)
+    error = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_OPEN,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+            "allow_concurrent_open": True,
+        },
+    )
+    assert error["code"] == "SIGNED_OUT"
+    assert "`sai auth login` or `sai auth import`" in error["error"]
+    assert any(query == keeper.MARKETS for query, _ in fake.calls[1:])
+    assert fake.submitted == []
+
+
+def test_logout_during_the_refresh_refuses_a_confirmed_signed_in_trade(
+    mcp, monkeypatch
+):
+    storage.save_session(stored_session())
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_OPEN)
+    assert preview["account"] == ADDRESS
+
+    def logout_on_refresh(endpoint, query, variables=None, token=None):
+        if query == keeper.MARKETS:
+            storage.delete_session()
+        return fake(endpoint, query, variables, token)
+
+    monkeypatch.setattr(keeper, "request", logout_on_refresh)
+    error = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_OPEN,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+            "allow_concurrent_open": True,
+        },
+    )
+    assert error["code"] == "SIGNED_OUT"
     assert fake.submitted == []
 
 
@@ -847,7 +1109,13 @@ def test_only_recent_unresolved_opens_count():
     assert tools.recent_opens(ENDPOINT, ADDRESS) == []
 
 
-def test_validation_comes_before_the_session(mcp):
+def test_sign_in_comes_before_validation(mcp):
+    bad = {**OPEN_ARGS, "amount": "-1", "preview_digest": "0" * 64}
+    assert invoke(mcp, "trade_open", bad)["code"] == "SIGNED_OUT"
+
+
+def test_validation_comes_before_keeper(mcp):
+    storage.save_session(stored_session())
     error = invoke(
         mcp, "trade_open", {**OPEN_ARGS, "amount": "-1", "preview_digest": "0" * 64}
     )
@@ -918,13 +1186,11 @@ def test_passphrase_session_is_refused_without_a_prompt(mcp, monkeypatch):
 
 
 def test_expired_or_missing_session_is_reported(mcp):
-    assert invoke(mcp, "auth_status")["code"] == "SESSION_UNAVAILABLE"
+    assert invoke(mcp, "auth_status")["code"] == "SIGNED_OUT"
     storage.save_session(stored_session(hours=-1))
     error = invoke(mcp, "auth_status")
-    assert error == {
-        "error": "Trading session expired; sign in again",
-        "code": "SESSION_UNAVAILABLE",
-    }
+    assert error["code"] == "SESSION_EXPIRED"
+    assert "sai auth login" in error["error"]
     session = invoke(mcp, "mcp_info")["session"]
     assert session["expired"] is True and session["usable"] is False
 
@@ -1013,16 +1279,73 @@ def test_session_reports_never_include_the_token(mcp):
 # Stdio
 
 
-def test_stdio_server_lists_tools(tmp_path):
-    script = Path(sys.executable).with_name("sai-mcp")
-    command = str(script) if script.exists() else sys.executable
-    args = [] if script.exists() else ["-m", "sai_cli.mcp_server.server"]
+def sai_command() -> list[str]:
+    """Return the installed `sai` script, or the module when it is absent."""
+    script = Path(sys.executable).with_name("sai.exe" if os.name == "nt" else "sai")
+    return [str(script)] if script.exists() else [sys.executable, "-m", "sai_cli"]
 
-    async def listing(mode: str, errlog: TextIO) -> tuple[set[str], dict[str, Any]]:
+
+def rpc(message_id: int | None, method: str, params: dict[str, Any]) -> str:
+    message: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
+    if message_id is not None:
+        message["id"] = message_id
+    return json.dumps(message) + "\n"
+
+
+def test_sai_mcp_serve_writes_only_protocol_to_stdout(tmp_path):
+    """initialize and tools/list over a real `sai mcp serve` process; every
+    stdout line is a JSON-RPC message."""
+    initialize = {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"},
+    }
+    command = [*sai_command(), "mcp", "serve", "--endpoint", "http://127.0.0.1:9/query"]
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"SAI_HOME": str(tmp_path), "PATH": os.defpath},
+        text=True,
+    ) as process:
+        assert process.stdin is not None and process.stdout is not None
+
+        def ask(message_id: int, method: str, params: dict[str, Any]) -> Any:
+            assert process.stdin is not None and process.stdout is not None
+            process.stdin.write(rpc(message_id, method, params))
+            process.stdin.flush()
+            reply = json.loads(process.stdout.readline())
+            assert reply["jsonrpc"] == "2.0" and reply["id"] == message_id
+            return reply["result"]
+
+        started = ask(1, "initialize", initialize)
+        process.stdin.write(rpc(None, "notifications/initialized", {}))
+        listed = ask(2, "tools/list", {})
+        called = ask(3, "tools/call", {"name": "mcp_info", "arguments": {}})
+        process.stdin.close()
+        rest = process.stdout.read()
+        stderr = process.stderr.read() if process.stderr else ""
+        assert process.wait(timeout=30) == 0, stderr
+    assert rest == ""
+    assert started["serverInfo"]["name"] == "sai"
+    assert "sai auth login" in started["instructions"]
+    assert {tool["name"] for tool in listed["tools"]} == READ_TOOLS | TRADE_TOOLS
+    info = json.loads(called["content"][0]["text"])
+    assert info["endpoints"]["keeper"] == "http://127.0.0.1:9/query"
+    assert info["endpoints"]["websocket"] == "ws://127.0.0.1:9/query"
+    assert info["trading"]["reason"] == "signed-out"
+    assert "agent client should launch it" not in stderr
+
+
+def test_stdio_client_lists_every_tool_from_sai_mcp_serve(tmp_path):
+    command, *args = sai_command()
+
+    async def listing(errlog: TextIO) -> tuple[set[str], dict[str, Any]]:
         params = StdioServerParameters(
             command=command,
-            args=args,
-            env={"SAI_HOME": str(tmp_path), server.ENV_MODE: mode},
+            args=[*args, "mcp", "serve"],
+            env={"SAI_HOME": str(tmp_path)},
         )
         async with (
             stdio_client(params, errlog=errlog) as (read, write),
@@ -1034,8 +1357,40 @@ def test_stdio_server_lists_tools(tmp_path):
         return {tool.name for tool in listed.tools}, json.loads(text_of(called.content))
 
     with open(tmp_path / "stderr.log", "w") as errlog:
-        names, info = asyncio.run(listing("read-only", errlog))
-        assert names == READ_TOOLS
-        assert info["exposedTools"] == "read-only"
-        names, _ = asyncio.run(listing("all", errlog))
+        names, info = asyncio.run(listing(errlog))
         assert names == READ_TOOLS | TRADE_TOOLS
+        assert info["trading"]["available"] is False
+        storage.save_session(stored_session())
+        signed_in, info = asyncio.run(listing(errlog))
+        assert signed_in == names
+        assert info["trading"] == {
+            "available": True,
+            "reason": "signed-in",
+            "account": ADDRESS,
+        }
+
+
+def test_bare_sai_mcp_prints_help():
+    result = CliRunner().invoke(main, ["mcp"])
+    assert result.exit_code == 0
+    assert "serve" in result.output
+    assert "claude mcp add sai -- sai mcp serve" in result.output
+
+
+def test_sai_mcp_serve_takes_the_root_endpoint(monkeypatch):
+    """`sai --endpoint X mcp serve` serves X; serve's own flags win."""
+    seen: list[dict[str, str | None] | None] = []
+    monkeypatch.setattr(server, "serve", seen.append)
+    runner = CliRunner()
+    url = "http://127.0.0.1:9/query"
+    assert runner.invoke(main, ["--endpoint", url, "mcp", "serve"]).exit_code == 0
+    assert runner.invoke(main, ["mcp", "serve"]).exit_code == 0
+    own = ["--endpoint", url, "mcp", "serve", "--endpoint", "http://127.0.0.1:5/q"]
+    assert runner.invoke(main, own).exit_code == 0
+    keys = ("keeper.endpoint", "keeper.ws_endpoint", "lcd.endpoint")
+    unset = dict.fromkeys(keys)
+    assert seen == [
+        {**unset, "keeper.endpoint": url},
+        unset,
+        {**unset, "keeper.endpoint": "http://127.0.0.1:5/q"},
+    ]

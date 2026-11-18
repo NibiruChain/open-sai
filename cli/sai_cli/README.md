@@ -7,7 +7,7 @@ The CLI connects to mainnet Keeper by default.
 ## Settings
 
 `$SAI_HOME/config.toml` (default `~/.sai/config.toml`) holds settings for both
-the CLI and `sai-mcp`. Each setting comes from the first of these that sets
+the CLI and `sai mcp serve`. Each setting comes from the first of these that sets
 it: a flag, an environment variable, the file, the mainnet default.
 
 | Key                  | Flag             | Variable           | Default                 |
@@ -118,6 +118,25 @@ or `sai auth login` again. A single-account `session.json` from before
 multiple accounts still loads and moves into `sessions.json` at the next
 sign-in or switch.
 
+
+## MCP Server
+
+`sai mcp serve` runs the stdio MCP server for agent clients, for example
+`claude mcp add sai -- sai mcp serve`. A bare `sai mcp` prints help. The
+server writes only MCP messages to stdout and logs to stderr; run on a
+terminal, it prints one stderr line saying an agent client should launch it.
+`--endpoint`, `--ws-endpoint`, and `--lcd-endpoint` pick the network as the
+top layer of [Settings](#settings), falling back to the same `sai` global
+flags, then `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
+the config file, then mainnet. They resolve once, at start.
+
+It lists every tool regardless of sign-in. Each `trade_*` call checks the
+session of the account it acts as (the active one, or its `address`) before
+it rebuilds the preview: no session returns
+`SIGNED_OUT`, an expired one `SESSION_EXPIRED`, and one for another endpoint
+or an unreadable file `SESSION_UNAVAILABLE`. Each message tells the agent to
+have the user run `sai auth login` or `sai auth import`. A signed-in trade
+still needs the `previewDigest` of the preview the user confirmed.
 
 ## Commands
 
