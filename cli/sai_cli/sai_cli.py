@@ -11,13 +11,13 @@ import sys
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
-from importlib import metadata, resources
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 import click
 
-from . import mcp_install
+from . import mcp_install, skill
 from .core import (
     clipboard,
     keeper,
@@ -39,35 +39,11 @@ def package_version() -> str:
     return metadata.version(PACKAGE)
 
 
-def check_skill(data: bytes) -> bytes:
-    """Reject a packaged skill that is not a skill file.
-
-    The package copy is a symlink to skills/sai/SKILL.md. A checkout without
-    symlink support, such as Windows without core.symlinks, stores the link
-    target path as file text instead.
-    """
-    if not data.startswith(b"---"):
-        raise click.ClickException(
-            "Packaged SKILL.md has no frontmatter; this build may contain a"
-            " symlink path instead of the skill. Reinstall from a checkout"
-            " with symlinks enabled."
-        )
-    return data
-
-
-def read_packaged_skill() -> bytes:
-    return resources.files("sai_cli").joinpath("skills/SKILL.md").read_bytes()
-
-
-def skill_bytes() -> bytes:
-    """Return the agent skill packaged with this version of the CLI."""
-    return check_skill(read_packaged_skill())
-
-
 def print_skill(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    """`sai --skill`: the same output as `sai skill show`."""
     if not value or ctx.resilient_parsing:
         return
-    click.echo(skill_bytes(), nl=False)
+    click.echo(skill.skill_bytes(), nl=False)
     ctx.exit()
 
 
@@ -111,7 +87,7 @@ def session(ctx: click.Context) -> dict[str, str]:
     is_eager=True,
     expose_value=False,
     callback=print_skill,
-    help="Print the agent skill file and exit.",
+    help="Print the agent skill and exit; same as `sai skill show`.",
 )
 @click.option(
     "--endpoint",
@@ -1402,6 +1378,89 @@ def print_update_report(report: dict[str, Any]) -> None:
     click.echo(f"A newer version is available. {guide['note']}")
     if guide["command"]:
         click.echo(f"  {guide['command']}")
+
+
+@main.group("skill")
+def skill_group() -> None:
+    """Read, locate, and install the agent skill packaged with this CLI.
+
+    The skill is a SKILL.md router plus child pages for the CLI, the MCP
+    server, trading safety, and Sai protocol references. It is edited in
+    jiyuu and copied here; `sai skill source` names the commit.
+    """
+
+
+@skill_group.command("show")
+@click.option(
+    "--page",
+    metavar="NAME",
+    help="Print a child page instead, such as cli, mcp, trading-safety, or"
+    " references/contracts.",
+)
+def skill_show(page: str | None) -> None:
+    """Print the skill's SKILL.md, or one child page with --page.
+
+    Output is the raw Markdown, also under --json.
+
+    \b
+    Examples:
+      sai skill show
+      sai skill show --page trading-safety
+      sai skill show --page references/contracts
+    """
+    files = skill.packaged_files()
+    data = files["SKILL.md"] if page is None else skill.find_page(files, page)
+    click.echo(data, nl=False)
+
+
+@skill_group.command("source")
+@click.pass_context
+def skill_source(ctx: click.Context) -> None:
+    """Show where the packaged skill lives and where it came from.
+
+    Prints the packaged path, its pages, the CLI and skill repositories, the
+    jiyuu commit the skill was synced from, and the install commands.
+    """
+    info = skill.source_info(skill.packaged_files(), package_version())
+    if ctx.obj["json"]:
+        emit(ctx, info)
+    else:
+        click.echo(skill.render_source(info))
+
+
+@skill_group.command("install")
+@click.option(
+    "--dir",
+    "target",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory to write the skill into. [default: ~/.agents/skills/sai]",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Replace a symlink, or a sai skill whose content differs.",
+)
+@click.pass_context
+def skill_install(ctx: click.Context, target: Path | None, force: bool) -> None:
+    """Copy the packaged skill directory to where agents load skills.
+
+    Writes SKILL.md and every child page into DIR itself. Running it again
+    with the same version reports `unchanged`. It refuses to replace a
+    symlink or a directory that differs unless --force is given, and never
+    replaces a directory that is not a sai skill.
+
+    \b
+    Examples:
+      sai skill install
+      sai skill install --dir ~/.claude/skills/sai
+      sai skill install --force
+    """
+    destination = (target or skill.default_dir()).expanduser()
+    result = skill.install(skill.packaged_files(), destination, force)
+    if ctx.obj["json"]:
+        emit(ctx, result.as_dict())
+    else:
+        click.echo(skill.render_installed(result))
 
 
 @main.command("update")

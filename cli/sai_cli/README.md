@@ -237,6 +237,28 @@ otherwise run in parallel and stop after 7 seconds in total. The
 endpoints come from [Settings](#settings); `sai doctor --ws-endpoint` and
 `--lcd-endpoint` override them for one run.
 
+## Agent Skill
+
+The CLI ships the `sai` agent skill as a directory: `SKILL.md`, which routes
+to child pages `cli`, `mcp`, and `trading-safety`, and protocol references
+under `references/`.
+
+- `sai skill show` prints `SKILL.md`. `sai --skill` is the same command.
+  `--page NAME` prints one child page; `NAME` is a path without `.md`, such
+  as `references/contracts`, or a file name only one page has, such as
+  `vaults`. Output is raw Markdown, under `--json` too.
+- `sai skill source` prints the packaged path, the page names, the CLI and
+  skill repositories, the jiyuu commit the skill was synced from, and the
+  install commands. `sai --json skill source` prints the same as JSON.
+- `sai skill install [--dir DIR] [--force]` copies the directory into
+  `~/.agents/skills/sai`, or into `DIR` itself. It reports `installed`,
+  `unchanged`, or `replaced`. Without `--force` it refuses a `DIR` that is a
+  symlink, which another tool manages, and a `sai` skill whose files differ,
+  naming them. With `--force` it replaces the link with a copy and leaves
+  the link's target alone, or replaces the whole directory. It refuses a
+  non-empty directory that is not a `sai` skill even with `--force`, so a
+  mistyped `--dir` cannot delete other files.
+
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.
 In a terminal, the shell keeps command history in `$SAI_HOME/trader/history`.

@@ -30,7 +30,8 @@ namespaces = true
 include = ["sai_cli*"]
 
 [tool.setuptools.package-data]
-"sai_cli" = ["skills/SKILL.md"]
+# cli/sai_cli/skills is a symlink to skills/sai, the whole agent skill.
+"sai_cli" = ["skills/.source.json", "skills/*.md", "skills/*/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["cli/sai_cli/tests"]
