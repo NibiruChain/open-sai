@@ -1,7 +1,7 @@
 """Read-only update support: release tags, the latest release, install kind,
 and the cached check result.
 
-Nothing here installs anything. Release tags are `sai-cli/vMAJOR.MINOR.PATCH`,
+Nothing here installs anything; `updater` does. Release tags are `sai-cli/vMAJOR.MINOR.PATCH`,
 so other components of the repository can release under their own prefixes.
 Pre-release tags such as `sai-cli/v0.2.0-rc.1` never count as the latest
 version.
@@ -323,9 +323,9 @@ OTHER = "other"
 class Install:
     """How this copy of sai-cli was installed.
 
-    Only an official install can be updated in place by a later release of
-    `sai update`: a `uv tool install` of a release wheel (UV_TOOL_RELEASE) or
-    of this repository's Git source (UV_TOOL_GIT).
+    `sai update` only changes an official install: a `uv tool install` of a
+    release wheel (UV_TOOL_RELEASE) or of this repository's Git source
+    (UV_TOOL_GIT).
     """
 
     kind: str
@@ -342,19 +342,46 @@ class Install:
         return asdict(self)
 
 
-def _direct_url(prefix: Path) -> dict[str, Any] | None:
-    """Read direct_url.json of the sai-cli dist-info under PREFIX."""
+def _dist_info(prefix: Path) -> Path | None:
+    """The sai-cli dist-info directory of the environment at PREFIX."""
     patterns = (
-        "lib/python*/site-packages/sai_cli-*.dist-info/direct_url.json",
-        "Lib/site-packages/sai_cli-*.dist-info/direct_url.json",
+        "lib/python*/site-packages/sai_cli-*.dist-info",
+        "Lib/site-packages/sai_cli-*.dist-info",
     )
     for pattern in patterns:
         for path in sorted(prefix.glob(pattern)):
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, ValueError):
-                return None
-            return data if isinstance(data, dict) else None
+            return path
+    return None
+
+
+def _direct_url(prefix: Path) -> dict[str, Any] | None:
+    """Read direct_url.json of the sai-cli dist-info under PREFIX."""
+    info = _dist_info(prefix)
+    if info is None:
+        return None
+    try:
+        data = json.loads((info / "direct_url.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def installed_version(prefix: Path | None = None) -> str | None:
+    """The sai-cli version installed at PREFIX (default: sys.prefix), read
+    from disk so it is current after a reinstall."""
+    info = _dist_info(Path(sys.prefix if prefix is None else prefix))
+    if info is None:
+        return None
+    try:
+        lines = (info / "METADATA").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if not line.strip():
+            break
+        name, _, value = line.partition(":")
+        if name.lower() == "version":
+            return value.strip()
     return None
 
 
@@ -373,6 +400,22 @@ def _is_release_wheel(url: str, web_base: str = WEB_BASE) -> bool:
         and unquote(parts.path).lower().startswith(prefix.lower())
         and parts.path.endswith(".whl")
     )
+
+
+_CACHED_WHEEL = re.compile(r"^sai_cli-\d+\.\d+\.\d+-py3-none-any\.whl$")
+
+
+def _is_cached_wheel(url: str) -> bool:
+    """True for a release wheel `sai update` verified and kept in its cache."""
+    parts = urlsplit(url)
+    if parts.scheme != "file":
+        return False
+    path = Path(unquote(parts.path))
+    try:
+        inside = path.parent.resolve() == wheel_cache().resolve()
+    except OSError:
+        return False
+    return inside and _CACHED_WHEEL.match(path.name) is not None
 
 
 def _public(url: str | None) -> str | None:
@@ -394,7 +437,8 @@ def install_kind(prefix: Path | None = None, web_base: str = WEB_BASE) -> Instal
     """Classify the environment at PREFIX (default: sys.prefix).
 
     - checkout: an editable install, as `uv sync` makes in a clone.
-    - uv-tool-release: `uv tool install` of a sai-cli release wheel.
+    - uv-tool-release: `uv tool install` of a sai-cli release wheel, from
+      GitHub or from the cache `sai update` installs out of.
     - uv-tool-git: `uv tool install` from this repository's Git source.
     - uv-tool-other: `uv tool install` from a directory, fork, or index.
     - uvx: a cached `uvx` environment.
@@ -414,7 +458,10 @@ def install_kind(prefix: Path | None = None, web_base: str = WEB_BASE) -> Instal
     if isinstance(directory, dict) and directory.get("editable"):
         return made(CHECKOUT)
     if (root / "uv-receipt.toml").is_file():
-        if url and not vcs and _is_release_wheel(url, web_base):
+        from_release = bool(url) and (
+            _is_release_wheel(url, web_base) or _is_cached_wheel(url)
+        )
+        if not vcs and from_release:
             return made(UV_TOOL_RELEASE)
         is_git = vcs.get("vcs") == "git" if vcs else False
         if is_git and url and _is_this_repo(url.removeprefix("git+")):
@@ -442,7 +489,7 @@ def guidance(install: Install) -> Guidance:
     if install.kind == CHECKOUT:
         return Guidance("This is a source checkout; pull, then run `uv sync`.")
     if install.official:
-        return Guidance("Install the latest release with:", INSTALL_COMMAND)
+        return Guidance("Run `sai update` to install it.")
     return Guidance(
         f"Only uv tool installs from {REPO} are supported. To switch to one, run:",
         INSTALL_COMMAND,
@@ -458,6 +505,11 @@ def sai_home() -> Path:
 
 def cache_path() -> Path:
     return sai_home() / "update.json"
+
+
+def wheel_cache() -> Path:
+    """Where `sai update` keeps the wheels it verified and installed."""
+    return sai_home() / "cache" / "wheels"
 
 
 @dataclass(frozen=True)

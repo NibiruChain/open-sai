@@ -14,7 +14,6 @@ import pytest
 from click.testing import CliRunner
 from sai_cli.core import update
 from sai_cli.sai_cli import (
-    EXIT_UNSUPPORTED,
     main,
     package_version,
     print_update_report,
@@ -458,6 +457,39 @@ def test_install_kind_strips_credentials_and_survives_corrupt_files(tmp_path):
 # Cache
 
 
+def test_installed_version_is_read_from_the_prefix(tmp_path):
+    prefix = make_prefix(tmp_path / "tools" / "sai-cli", GIT, receipt=True)
+    assert update.installed_version(prefix) == "0.1.0"
+    assert update.installed_version(tmp_path / "empty") is None
+
+
+def test_install_kind_release_wheel_kept_by_sai_update(tmp_path, sai_home):
+    cache = update.wheel_cache()
+    assert cache == sai_home / "cache" / "wheels"
+    kept = {"url": (cache / "sai_cli-0.2.0-py3-none-any.whl").as_uri()}
+    prefix = make_prefix(tmp_path / "kept", {**kept, "archive_info": {}}, receipt=True)
+    assert update.install_kind(prefix).kind == update.UV_TOOL_RELEASE
+    elsewhere = {"url": (tmp_path / "sai_cli-0.2.0-py3-none-any.whl").as_uri()}
+    other = {"url": (cache / "evil-1.0.0-py3-none-any.whl").as_uri()}
+    for name, direct in (("elsewhere", elsewhere), ("other", other)):
+        prefix = make_prefix(
+            tmp_path / name, {**direct, "archive_info": {}}, receipt=True
+        )
+        assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER, name
+
+
+def test_check_keeps_the_last_update_result(sai_home):
+    from sai_cli.core import updater
+
+    updater.write_state({"result": {"status": "failed", "to": "0.2.0"}})
+    with Stub({API_PATH: listing("sai-cli/v0.3.0")}) as stub:
+        result = check(stub)
+    assert result.exit_code == 0, result.output
+    state = updater.read_state()
+    assert state["latest"] == "sai-cli/v0.3.0"
+    assert state["result"] == {"status": "failed", "to": "0.2.0"}
+
+
 def test_cache_round_trip(sai_home):
     assert update.read_cache() is None
     update.write_cache(update.Cache("sai-cli/v0.2.0", "2026-11-18T00:00:00+00:00"))
@@ -569,14 +601,6 @@ def test_update_check_failure_exits_1_without_stdout_or_cache():
     assert update.read_cache() is None
 
 
-def test_update_without_check_does_not_install():
-    result = invoke("update")
-    assert result.exit_code == EXIT_UNSUPPORTED
-    assert result.stdout == ""
-    assert "cannot install updates yet" in result.stderr
-    assert "uv tool install" not in result.stderr
-
-
 LATEST = update.release_for("sai-cli/v0.2.0")
 
 
@@ -587,12 +611,12 @@ def advice(install: update.Install, capsys) -> tuple[dict, str]:
 
 
 @pytest.mark.parametrize("kind", [update.UV_TOOL_RELEASE, update.UV_TOOL_GIT])
-def test_an_official_install_is_told_to_install_the_latest_release(capsys, kind):
+def test_an_official_install_is_told_to_run_sai_update(capsys, kind):
     guide, out = advice(update.Install(kind, "/p"), capsys)
-    assert guide["command"] == update.INSTALL_COMMAND
+    assert guide["command"] is None
     assert f"installed  0.1.0 ({kind})" in out
-    assert "Install the latest release with:" in out
-    assert update.INSTALL_COMMAND in out
+    assert "Run `sai update` to install it." in out
+    assert "install.py" not in out
 
 
 def test_the_advised_command_names_no_version():
