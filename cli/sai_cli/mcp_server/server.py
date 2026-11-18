@@ -11,6 +11,7 @@ offers a trade tool.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -21,7 +22,11 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from ..core import settings as sai_settings
+from ..core.settings import Settings
 from . import info, tools
+
+log = logging.getLogger("sai_cli.mcp_server")
 
 ENV_MODE = "SAI_MCP_EXPOSED_TOOLS"
 MODES = ("read-only", "all")
@@ -96,9 +101,26 @@ def destructive(title: str) -> ToolAnnotations:
     )
 
 
+# Resolved once, so endpoints cannot change mid-session. `main` resolves at
+# start; `create_server` clears it, and the first tool call resolves it then.
+_settings: Settings | None = None
+
+
+def server_settings() -> Settings:
+    """Settings from the environment, then $SAI_HOME/config.toml, then
+    mainnet defaults, resolved on first use and kept."""
+    global _settings
+    if _settings is None:
+        _settings = sai_settings.load(warn=log.warning)
+    return _settings
+
+
 async def call(action: Callable[..., Any], /, *args: Any, **kwargs: Any) -> str:
     """Run a blocking tool implementation off the event loop."""
-    config = tools.load_config()
+    try:
+        config = server_settings()
+    except sai_settings.SettingsError as exc:
+        return json.dumps(tools.error(str(exc), "BAD_SETTINGS"))
     return await asyncio.to_thread(tools.run, partial(action, config, *args, **kwargs))
 
 
@@ -641,13 +663,16 @@ TRADE_TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
 )
 
 
-def create_server(mode: str = "read-only") -> FastMCP:
+def create_server(mode: str = "read-only", settings: Settings | None = None) -> FastMCP:
     """Build a server for exposure MODE.
 
     Trade tools are registered only when MODE is `all`. The check goes by
     name, so a read tool that is mislabeled cannot carry a trade through.
+    SETTINGS, when None, resolve on the first tool call.
     """
+    global _settings
     mode = exposed_tools_mode(mode)
+    _settings = settings
     server = FastMCP("sai", instructions=INSTRUCTIONS)
 
     async def mcp_info() -> str:
@@ -658,11 +683,7 @@ def create_server(mode: str = "read-only") -> FastMCP:
         can hold secrets. The report never includes the session token.
         """
 
-        def report(config: tools.Config) -> dict[str, Any]:
-            try:
-                ws: str | None = config.ws_endpoint
-            except ValueError:
-                ws = None
+        def report(config: Settings) -> dict[str, Any]:
             names = sorted(tool.name for tool in server._tool_manager.list_tools())
             return {
                 "name": "sai",
@@ -671,10 +692,11 @@ def create_server(mode: str = "read-only") -> FastMCP:
                 "mcpVersion": info.version("mcp"),
                 "provenance": info.provenance(),
                 "endpoints": {
-                    "keeper": info.public_url(config.endpoint),
-                    "websocket": info.public_url(ws),
-                    "lcd": info.public_url(config.lcd_endpoint),
+                    "keeper": sai_settings.public_url(config.endpoint),
+                    "websocket": sai_settings.public_url(config.ws_endpoint),
+                    "lcd": sai_settings.public_url(config.lcd_endpoint),
                 },
+                "configFile": str(sai_settings.config_path(os.environ)),
                 "exposedTools": mode,
                 "tools": names,
                 "session": tools.session_state(config),
@@ -712,12 +734,18 @@ mcp = create_server(exposed_tools_mode())
 
 
 def main() -> None:
-    """Serve over stdio with the exposure mode chosen at import."""
+    """Serve over stdio with the exposure mode chosen at import and settings
+    resolved once, at start."""
+    global _settings
     logging.basicConfig(
         level=logging.WARNING,
         stream=sys.stderr,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    try:
+        _settings = sai_settings.load(warn=log.warning)
+    except sai_settings.SettingsError as exc:
+        raise SystemExit(f"sai-mcp: {exc}") from None
     mcp.run()
 
 

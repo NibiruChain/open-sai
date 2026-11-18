@@ -16,9 +16,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
-from sai_cli.core import keeper, margin, storage, stream
+from sai_cli.core import keeper, margin, settings, storage, stream
 from sai_cli.core import session as sessions
-from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 
 ADDRESS = "0x" + "b" * 40
@@ -65,6 +64,7 @@ def isolated_env(tmp_path, monkeypatch):
         "SAI_ENDPOINT",
         "SAI_WS_ENDPOINT",
         "SAI_LCD_ENDPOINT",
+        "SAI_UPDATE_AUTO",
         server.ENV_MODE,
     ):
         monkeypatch.delenv(name, raising=False)
@@ -233,17 +233,38 @@ def test_mode_defaults_to_read_only_and_rejects_unknown_values(monkeypatch):
         server.exposed_tools_mode()
 
 
-def test_config_reads_endpoints_from_the_environment(monkeypatch):
-    config = tools.load_config()
+def test_server_settings_resolve_once_from_the_environment(monkeypatch):
+    server.create_server()
+    config = server.server_settings()
     assert config.endpoint == ENDPOINT
     assert config.ws_endpoint == keeper.MAINNET_WS
     monkeypatch.setenv("SAI_ENDPOINT", "http://127.0.0.1:9/query")
+    assert server.server_settings() is config
     monkeypatch.setenv("SAI_LCD_ENDPOINT", "http://127.0.0.1:8")
-    config = tools.load_config()
+    server.create_server()
+    config = server.server_settings()
     assert config.ws_endpoint == "ws://127.0.0.1:9/query"
     assert config.lcd_endpoint == "http://127.0.0.1:8"
     monkeypatch.setenv("SAI_WS_ENDPOINT", "ws://127.0.0.1:7/query")
-    assert tools.load_config().ws_endpoint == "ws://127.0.0.1:7/query"
+    server.create_server()
+    assert server.server_settings().ws_endpoint == "ws://127.0.0.1:7/query"
+
+
+def test_server_reads_the_config_file_and_reports_its_path(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        '[keeper]\nendpoint = "http://127.0.0.1:9/query"\n'
+    )
+    info = invoke(server.create_server(), "mcp_info")
+    assert info["endpoints"]["keeper"] == "http://127.0.0.1:9/query"
+    assert info["endpoints"]["websocket"] == "ws://127.0.0.1:9/query"
+    assert info["configFile"] == str(tmp_path / "config.toml")
+
+
+def test_bad_config_file_is_a_tool_error_naming_the_path(tmp_path):
+    (tmp_path / "config.toml").write_text("[keeper\n")
+    error = invoke(server.create_server(), "market_list")
+    assert error["code"] == "BAD_SETTINGS"
+    assert str(tmp_path / "config.toml") in error["error"]
 
 
 # Reads
@@ -974,7 +995,7 @@ def test_mcp_info_strips_credentials_from_endpoints(monkeypatch):
     text = json.dumps(info)
     for secret in ("user:pw", "key=", "apikey", "u:p@", "t=s"):
         assert secret not in text
-    assert sai_info.public_url("http://[::1]:9/q?x=1") == "http://[::1]:9/q"
+    assert settings.public_url("http://[::1]:9/q?x=1") == "http://[::1]:9/q"
 
 
 def test_session_reports_never_include_the_token(mcp):
