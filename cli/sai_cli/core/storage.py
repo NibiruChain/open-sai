@@ -22,6 +22,8 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from . import log
+
 
 def home() -> Path:
     return Path(os.environ.get("SAI_HOME", Path.home() / ".sai")) / "trader"
@@ -218,6 +220,13 @@ def save_session(session: dict[str, str]) -> None:
         accounts["sessions"][address] = session
         accounts["active"] = address
         _save_accounts(accounts)
+    log.event(
+        "session.saved",
+        addr=session["evmAddress"],
+        expiresAt=session["expiresAt"],
+        endpoint=log.url(session.get("endpoint")),
+        connectedAccounts=len(accounts["sessions"]),
+    )
 
 
 def load_session(address: str | None = None) -> dict[str, str]:
@@ -242,6 +251,7 @@ def use_session(address: str) -> dict[str, str]:
         key = _find(accounts, address)
         accounts["active"] = key
         _save_accounts(accounts)
+        log.event("session.active", addr=accounts["sessions"][key]["evmAddress"])
         return accounts["sessions"][key]
 
 
@@ -267,6 +277,7 @@ def delete_session(address: str | None = None) -> str | None:
             if address is not None:
                 raise
             _remove_files()
+            log.event("session.removed", "warn", reason="unreadable session file")
             return UNREADABLE_REMOVED
         if address is None:
             key = accounts["active"]
@@ -283,6 +294,9 @@ def delete_session(address: str | None = None) -> str | None:
             _save_accounts(accounts)
         else:
             _remove_files()
+        log.event(
+            "session.removed", addr=removed, connectedAccounts=len(accounts["sessions"])
+        )
         return removed
 
 
@@ -356,14 +370,44 @@ def pending(key: str, endpoint: str, account: str, kind: str, entity: str) -> No
             "INSERT INTO intents (id, endpoint, account, kind, status, entity, created_at) VALUES (?, ?, ?, ?, 'unknown', ?, ?)",
             (key, endpoint, account.lower(), kind, entity, time.time()),
         )
+    log.event(
+        "intent.reserved",
+        intentKey=key,
+        kind=kind,
+        status="unknown",
+        addr=account,
+        tradeId=entity or None,
+        endpoint=log.url(endpoint),
+    )
 
 
 def set_status(key: str, endpoint: str, account: str, status: str) -> None:
     with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT kind, status FROM intents WHERE id=? AND endpoint=? AND account=?",
+            (key, endpoint, account.lower()),
+        ).fetchone()
         connection.execute(
             "UPDATE intents SET status=? WHERE id=? AND endpoint=? AND account=?",
             (status, key, endpoint, account.lower()),
         )
+    if row is not None and row[1] != status:
+        _log_status(key, endpoint, account, row[0], row[1], status)
+
+
+def _log_status(
+    key: str, endpoint: str, account: str, kind: str, previous: str, status: str
+) -> None:
+    log.event(
+        "intent.status",
+        intentKey=key,
+        kind=kind,
+        previous=previous,
+        status=status,
+        addr=account,
+        endpoint=log.url(endpoint),
+    )
 
 
 def list_pending(endpoint: str, account: str) -> list[dict[str, Any]]:
@@ -396,12 +440,12 @@ def mark_absent(
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT status, created_at FROM intents WHERE id=? AND endpoint=? AND account=?",
+            "SELECT status, created_at, kind FROM intents WHERE id=? AND endpoint=? AND account=?",
             (key, endpoint, account.lower()),
         ).fetchone()
         if row is None:
             return None
-        status, created = row
+        status, created, kind = row
         created = created if created is not None else _key_time(key)
         if (
             status == "unknown"
@@ -412,5 +456,10 @@ def mark_absent(
                 "UPDATE intents SET status='absent' WHERE id=? AND endpoint=? AND account=?",
                 (key, endpoint, account.lower()),
             )
-            return "absent"
-        return status
+            absent = True
+        else:
+            absent = False
+    if absent:
+        _log_status(key, endpoint, account, kind, status, "absent")
+        return "absent"
+    return status

@@ -6,7 +6,7 @@ import base64
 import json
 from datetime import UTC, datetime
 
-from . import storage
+from . import log, storage
 
 
 def load_active_session(endpoint: str, address: str | None = None) -> dict[str, str]:
@@ -24,6 +24,12 @@ def check_active(result: dict[str, str], endpoint: str) -> dict[str, str]:
         raise ValueError("Stored session belongs to another Keeper endpoint")
     expiry = datetime.fromisoformat(result["expiresAt"])
     if expiry <= datetime.now(UTC):
+        log.event(
+            "session.expired",
+            "warn",
+            addr=result.get("evmAddress"),
+            expiresAt=result["expiresAt"],
+        )
         raise ValueError("Trading session expired; sign in again")
     return result
 

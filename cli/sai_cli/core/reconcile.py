@@ -6,7 +6,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
-from . import keeper, storage
+from . import keeper, log, storage
 
 WriteGate = Callable[[], AbstractContextManager[object]]
 
@@ -40,6 +40,18 @@ def reconcile(
     if key and data.get("userIntents"):
         row = data["userIntents"][0]
         step = row.get("lifecycleStep")
+        log.event(
+            "intent.keeper",
+            intentKey=key,
+            kind=row.get("kind"),
+            lifecycleStep=step,
+            execActor=row.get("execActor"),
+            errorCode=row.get("errorCode"),
+            errorMsg=row.get("errorMsg"),
+            txHash=row.get("txHash"),
+            addr=address,
+            endpoint=log.url(endpoint),
+        )
         if (
             row.get("intentKey") == key
             and str(row.get("evmAddress") or "").lower() == address.lower()
@@ -65,6 +77,14 @@ def reconcile(
                     with write():
                         storage.set_status(key, endpoint, address, "terminal")
     elif key and data.get("userIntents") == []:
+        log.event(
+            "intent.keeper",
+            intentKey=key,
+            lifecycleStep=None,
+            found=False,
+            addr=address,
+            endpoint=log.url(endpoint),
+        )
         # Keeper has no record. Past its admission expiry it never will,
         # so the key no longer blocks new trades.
         with write():

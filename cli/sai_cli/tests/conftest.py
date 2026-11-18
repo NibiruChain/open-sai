@@ -26,3 +26,18 @@ def block_external_tcp(monkeypatch):
         return original(sock, address)
 
     monkeypatch.setattr(socket.socket, "connect", connect_local_only)
+
+
+@pytest.fixture(autouse=True)
+def private_sai_home(monkeypatch, tmp_path_factory):
+    """Give every test its own SAI_HOME and fresh log state, so no test
+    writes log lines under the real ~/.sai. A test that sets SAI_HOME itself
+    overrides this."""
+    from sai_cli.core import log
+
+    monkeypatch.setenv("SAI_HOME", str(tmp_path_factory.mktemp("sai-home")))
+    for name in ("SAI_LOG", "SAI_LOG_KEEP_DAYS"):
+        monkeypatch.delenv(name, raising=False)
+    log.reset()
+    yield
+    log.reset()

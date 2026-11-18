@@ -52,8 +52,8 @@ class Setting:
 
     key: str
     env: str
-    kind: str  # "url" or "bool"
-    default: str | bool | None
+    kind: str  # "url", "bool", or "int"
+    default: str | bool | int | None
     help: str
     flag: str | None = None
     schemes: tuple[str, ...] = ()
@@ -110,6 +110,27 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help=("Install newer sai releases automatically. false means notify only."),
     ),
+    Setting(
+        key="logs.enabled",
+        env="SAI_LOG",
+        kind="bool",
+        default=True,
+        help=(
+            "Record commands, MCP tool calls, Keeper requests, and intent"
+            " status changes as JSON lines under $SAI_HOME/logs. The session"
+            " token is never written. false writes nothing."
+        ),
+    ),
+    Setting(
+        key="logs.keep_days",
+        env="SAI_LOG_KEEP_DAYS",
+        kind="int",
+        default=14,
+        help=(
+            "Days of log files to keep, counting today. Older files are"
+            " deleted, at most once a day."
+        ),
+    ),
 )
 BY_KEY: Mapping[str, Setting] = MappingProxyType({s.key: s for s in SETTINGS})
 KEYS = tuple(BY_KEY)
@@ -125,13 +146,17 @@ class Settings:
     lcd_endpoint: str
     update_auto: bool
     sources: Mapping[str, str]
+    logs_enabled: bool = True
+    logs_keep_days: int = 14
 
-    def value(self, key: str) -> str | bool:
+    def value(self, key: str) -> str | bool | int:
         return {
             "keeper.endpoint": self.endpoint,
             "keeper.ws_endpoint": self.ws_endpoint,
             "lcd.endpoint": self.lcd_endpoint,
             "update.auto": self.update_auto,
+            "logs.enabled": self.logs_enabled,
+            "logs.keep_days": self.logs_keep_days,
         }[setting(key).key]
 
 
@@ -145,7 +170,7 @@ def setting(key: str) -> Setting:
         ) from None
 
 
-def parse_value(key: str, raw: str) -> str | bool:
+def parse_value(key: str, raw: str) -> str | bool | int:
     """Parse RAW, as typed in a flag, variable, or `sai config set`."""
     spec = setting(key)
     text = raw.strip()
@@ -155,15 +180,27 @@ def parse_value(key: str, raw: str) -> str | bool:
         if text.lower() in _FALSE:
             return False
         raise SettingsError(f"Invalid value {raw!r} for {key}: expected true or false")
+    if spec.kind == "int":
+        if not text.isascii() or not text.isdigit():
+            raise SettingsError(
+                f"Invalid value {raw!r} for {key}: expected a whole number, 1 or more"
+            )
+        return check_value(key, int(text))
     return check_value(key, text)
 
 
-def check_value(key: str, value: Any) -> str | bool:
+def check_value(key: str, value: Any) -> str | bool | int:
     """Return VALUE when it has the right type and form for KEY."""
     spec = setting(key)
     if spec.kind == "bool":
         if not isinstance(value, bool):
             raise SettingsError(f"Invalid value for {key}: expected true or false")
+        return value
+    if spec.kind == "int":
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise SettingsError(
+                f"Invalid value for {key}: expected a whole number, 1 or more"
+            )
         return value
     if not isinstance(value, str):
         raise SettingsError(f"Invalid value for {key}: expected a URL string")
@@ -244,7 +281,7 @@ def resolve(
     is ignored and derived, so `--endpoint X` never pairs X with the
     configured Keeper's WebSocket.
     """
-    values: dict[str, str | bool | None] = {}
+    values: dict[str, str | bool | int | None] = {}
     sources: dict[str, str] = {}
     for spec in SETTINGS:
         raw_flag = flags.get(spec.key)
@@ -281,6 +318,8 @@ def resolve(
         lcd_endpoint=str(values["lcd.endpoint"]),
         update_auto=bool(values["update.auto"]),
         sources=MappingProxyType(sources),
+        logs_enabled=bool(values["logs.enabled"]),
+        logs_keep_days=int(values["logs.keep_days"] or 14),
     )
 
 
@@ -351,7 +390,7 @@ def _wrap(text: str, width: int = 78) -> list[str]:
     return lines
 
 
-def _toml_value(value: str | bool) -> str:
+def _toml_value(value: str | bool | int) -> str:
     return tomlkit.item(value).as_string()
 
 
@@ -456,7 +495,7 @@ def _placeholder_note(item: Any, spec: Setting) -> str | None:
 
 def set_value(
     text: str | None, key: str, raw: str, path: Path | str = FILE_NAME
-) -> tuple[str, str | bool]:
+) -> tuple[str, str | bool | int]:
     """Return config TEXT with KEY set to RAW, and the parsed value.
 
     TEXT None starts from `template()`. The key takes the place of its

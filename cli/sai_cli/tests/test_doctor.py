@@ -719,6 +719,7 @@ def test_network_checks_pass_against_stubs(http_stub):
     assert [check.id for check in checks] == [
         "install",
         "home",
+        "logs",
         "session",
         "intents",
         "keeper",
@@ -1148,6 +1149,8 @@ def test_request_and_get_json_pass_the_timeout(monkeypatch):
     seen: list[float] = []
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             return None
 

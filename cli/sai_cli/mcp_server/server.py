@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import sys
+import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any, Literal
@@ -23,6 +25,7 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ContentBlock, TextContent, ToolAnnotations
 
+from ..core import log as sai_log
 from ..core import settings as sai_settings
 from ..core.settings import Settings
 from . import info, tools
@@ -668,6 +671,36 @@ class SaiMCP(FastMCP):
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> Sequence[ContentBlock] | dict[str, Any]:
+        """Run the tool, logging `mcp.tool_call` before and
+        `mcp.tool_result` after. Events the tool writes meanwhile, such as
+        Keeper requests, carry the same `tool` and `callId`."""
+        started = time.monotonic()
+        with sai_log.bind(surface="mcp", tool=name, callId=uuid.uuid4().hex[:12]):
+            sai_log.event("mcp.tool_call", arguments=arguments)
+            try:
+                result = await self.checked_call(name, arguments)
+            except Exception as exc:
+                sai_log.event(
+                    "mcp.tool_result",
+                    "error",
+                    ok=False,
+                    code="TOOL_ERROR",
+                    error=str(exc),
+                    durationMs=round((time.monotonic() - started) * 1000),
+                )
+                raise
+            summary = result_summary(result)
+            sai_log.event(
+                "mcp.tool_result",
+                "info" if summary["ok"] else "warn",
+                durationMs=round((time.monotonic() - started) * 1000),
+                **summary,
+            )
+            return result
+
+    async def checked_call(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
         if name in TRADE_TOOL_NAMES:
             address = arguments.get("address")
             refusal = await asyncio.to_thread(
@@ -682,6 +715,37 @@ class SaiMCP(FastMCP):
                 result = (content, {"result": refusal})
                 return result  # ty: ignore[invalid-explicit-return]
         return await super().call_tool(name, arguments)
+
+
+# Result fields copied into `mcp.tool_result`: enough to follow a call
+# without storing what the tool returned.
+RESULT_FIELDS = ("code", "error", "status", "intentKey", "previewDigest")
+
+
+def result_summary(result: Any) -> dict[str, Any]:
+    """What to log about a tool's RESULT: whether it worked, its error
+    `code`, the account it acted on, and an intent key or status."""
+    content = result[0] if isinstance(result, tuple) else result
+    text = next(
+        (
+            block.text
+            for block in (content if isinstance(content, Sequence) else ())
+            if isinstance(block, TextContent)
+        ),
+        None,
+    )
+    try:
+        value = json.loads(text) if text is not None else None
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        return {"ok": True}
+    summary: dict[str, Any] = {"ok": "error" not in value}
+    summary.update({k: value[k] for k in RESULT_FIELDS if k in value})
+    account = value.get("account", value.get("address"))
+    if isinstance(account, str):
+        summary["account"] = account
+    return summary
 
 
 def session_refusal(address: str | None = None) -> str | None:
@@ -709,7 +773,11 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
     async def mcp_info() -> str:
         """Report this server's versions, provenance, endpoints, tools,
-        session state, and whether trading is available. Call this first.
+        session state, log directory, and whether trading is available. Call
+        this first.
+
+        `logs.dir` holds JSON-lines logs of every tool call, Keeper request,
+        and intent status change; `sai logs tail` in a terminal reads them.
 
         `restartNeeded` is true when a newer sai was installed after this
         server started; restart the MCP client to load it.
@@ -732,6 +800,10 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                     "lcd": sai_settings.public_url(config.lcd_endpoint),
                 },
                 "configFile": str(sai_settings.config_path(os.environ)),
+                "logs": {
+                    "dir": str(sai_log.directory()),
+                    "enabled": sai_log.enabled(),
+                },
                 "tools": names,
                 "trading": tools.trading_state(config),
                 "session": tools.session_state(config),
@@ -762,4 +834,11 @@ def serve(flags: Mapping[str, str | None] | None = None) -> None:
         settings = sai_settings.load(flags, warn=log.warning)
     except sai_settings.SettingsError as exc:
         raise SystemExit(f"sai mcp serve: {exc}") from None
-    create_server(settings).run()
+    with sai_log.bind(surface="mcp"):
+        sai_log.event(
+            "mcp.server_start",
+            keeper=sai_log.url(settings.endpoint),
+            websocket=sai_log.url(settings.ws_endpoint),
+            lcd=sai_log.url(settings.lcd_endpoint),
+        )
+        create_server(settings).run()
