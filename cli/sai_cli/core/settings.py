@@ -1,0 +1,472 @@
+"""Settings shared by the CLI and the MCP server, kept in $SAI_HOME/config.toml.
+
+Each setting resolves from the first layer that sets it: a command-line flag,
+then an environment variable, then the config file, then the built-in mainnet
+default. `resolve` is pure; `load` reads the environment and the file.
+
+The file lists every key with comments. An unset key stays in the file as a
+commented-out line that shows its default. `set_value` and `unset_value` edit
+the text with tomlkit, so comments the person adds survive.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import tomllib
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+import tomlkit
+from tomlkit.exceptions import TOMLKitError
+from tomlkit.items import Comment, Null, Table, Trivia
+
+from . import keeper, margin, stream
+
+FILE_NAME = "config.toml"
+SOURCES = ("flag", "env", "file", "default", "derived")
+# Lower rank wins.
+_RANK = {"flag": 0, "env": 1, "file": 2, "default": 3}
+_TRUE = ("true", "1", "yes", "on")
+_FALSE = ("false", "0", "no", "off")
+
+
+class SettingsError(ValueError):
+    """A setting, its value, or the config file is invalid."""
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One key: where it lives, how to set it, and what it defaults to."""
+
+    key: str
+    env: str
+    kind: str  # "url" or "bool"
+    default: str | bool | None
+    help: str
+    flag: str | None = None
+    schemes: tuple[str, ...] = ()
+
+    @property
+    def section(self) -> str:
+        return self.key.split(".", 1)[0]
+
+    @property
+    def name(self) -> str:
+        return self.key.split(".", 1)[1]
+
+
+SETTINGS: tuple[Setting, ...] = (
+    Setting(
+        key="keeper.endpoint",
+        env="SAI_ENDPOINT",
+        kind="url",
+        default=keeper.MAINNET_HTTP,
+        flag="--endpoint",
+        schemes=("https", "http"),
+        help="Sai Keeper GraphQL HTTP endpoint for queries and trading intents.",
+    ),
+    Setting(
+        key="keeper.ws_endpoint",
+        env="SAI_WS_ENDPOINT",
+        kind="url",
+        default=None,
+        flag="--ws-endpoint",
+        schemes=("wss", "ws"),
+        help=(
+            "Keeper WebSocket endpoint for balances and live feeds. Unset"
+            " derives it from keeper.endpoint (https becomes wss). A value"
+            " here is ignored when keeper.endpoint comes from a flag or"
+            " environment variable, so the two always point at one Keeper."
+        ),
+    ),
+    Setting(
+        key="lcd.endpoint",
+        env="SAI_LCD_ENDPOINT",
+        kind="url",
+        default=margin.MAINNET_LCD,
+        flag="--lcd-endpoint",
+        schemes=("https", "http"),
+        help=(
+            "Nibiru REST (LCD) endpoint that margin and partial-close quotes"
+            " read exact contract state from."
+        ),
+    ),
+    Setting(
+        key="update.auto",
+        env="SAI_UPDATE_AUTO",
+        kind="bool",
+        default=True,
+        help=("Install newer sai releases automatically. false means notify only."),
+    ),
+)
+BY_KEY: Mapping[str, Setting] = MappingProxyType({s.key: s for s in SETTINGS})
+KEYS = tuple(BY_KEY)
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Resolved settings. SOURCES maps each key to where its value came from."""
+
+    endpoint: str
+    ws_endpoint: str
+    lcd_endpoint: str
+    update_auto: bool
+    sources: Mapping[str, str]
+
+    def value(self, key: str) -> str | bool:
+        return {
+            "keeper.endpoint": self.endpoint,
+            "keeper.ws_endpoint": self.ws_endpoint,
+            "lcd.endpoint": self.lcd_endpoint,
+            "update.auto": self.update_auto,
+        }[setting(key).key]
+
+
+def setting(key: str) -> Setting:
+    """Return the registry entry for KEY, or fail listing the valid keys."""
+    try:
+        return BY_KEY[key]
+    except KeyError:
+        raise SettingsError(
+            f"Unknown setting {key!r}. Valid keys: {', '.join(KEYS)}"
+        ) from None
+
+
+def parse_value(key: str, raw: str) -> str | bool:
+    """Parse RAW, as typed in a flag, variable, or `sai config set`."""
+    spec = setting(key)
+    text = raw.strip()
+    if spec.kind == "bool":
+        if text.lower() in _TRUE:
+            return True
+        if text.lower() in _FALSE:
+            return False
+        raise SettingsError(f"Invalid value {raw!r} for {key}: expected true or false")
+    return check_value(key, text)
+
+
+def check_value(key: str, value: Any) -> str | bool:
+    """Return VALUE when it has the right type and form for KEY."""
+    spec = setting(key)
+    if spec.kind == "bool":
+        if not isinstance(value, bool):
+            raise SettingsError(f"Invalid value for {key}: expected true or false")
+        return value
+    if not isinstance(value, str):
+        raise SettingsError(f"Invalid value for {key}: expected a URL string")
+    parts = urlsplit(value)
+    if parts.scheme not in spec.schemes or not parts.netloc:
+        raise SettingsError(
+            f"Invalid value for {key}: expected a URL starting with"
+            f" {' or '.join(s + '://' for s in spec.schemes)}"
+        )
+    return value
+
+
+def sai_home(env: Mapping[str, str]) -> Path:
+    """The Sai home directory, as core.storage finds it."""
+    return Path(env.get("SAI_HOME", Path.home() / ".sai"))
+
+
+def config_path(env: Mapping[str, str]) -> Path:
+    return sai_home(env) / FILE_NAME
+
+
+def parse_file(text: str, path: Path | str) -> tuple[dict[str, Any], list[str]]:
+    """Return the known keys set in config TEXT and warnings for unknown ones.
+
+    A file that is not TOML, or a known key with a bad value, is an error
+    naming PATH. Unknown keys are only warned about, so an older sai keeps
+    working with a file a newer one wrote.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SettingsError(f"Cannot parse {path}: {exc}") from None
+    values: dict[str, Any] = {}
+    warnings: list[str] = []
+    for section, table in data.items():
+        if not isinstance(table, dict):
+            warnings.append(f"{path}: ignoring unknown setting {section!r}")
+            continue
+        for name, value in table.items():
+            key = f"{section}.{name}"
+            if key not in BY_KEY:
+                warnings.append(f"{path}: ignoring unknown setting {key!r}")
+                continue
+            try:
+                values[key] = check_value(key, value)
+            except SettingsError as exc:
+                raise SettingsError(f"{path}: {exc}") from None
+    return values, warnings
+
+
+def read_file(path: Path) -> tuple[dict[str, Any], list[str]]:
+    """Read the config file at PATH; a missing file sets nothing."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}, []
+    except OSError as exc:
+        raise SettingsError(f"Cannot read {path}: {exc.strerror}") from None
+    return parse_file(text, path)
+
+
+def resolve(
+    flags: Mapping[str, str | None],
+    env: Mapping[str, str],
+    file: Mapping[str, Any],
+) -> Settings:
+    """Resolve every setting from FLAGS, then ENV, then FILE, then defaults.
+
+    FLAGS maps keys to raw strings; None means not passed. ENV maps variable
+    names to raw strings; empty means unset. FILE holds checked values from
+    `read_file`. A WebSocket endpoint from a lower layer than keeper.endpoint
+    is ignored and derived, so `--endpoint X` never pairs X with the
+    configured Keeper's WebSocket.
+    """
+    values: dict[str, str | bool | None] = {}
+    sources: dict[str, str] = {}
+    for spec in SETTINGS:
+        raw_flag = flags.get(spec.key)
+        raw_env = env.get(spec.env, "")
+        try:
+            if raw_flag is not None:
+                values[spec.key], sources[spec.key] = (
+                    parse_value(spec.key, raw_flag),
+                    "flag",
+                )
+            elif raw_env.strip():
+                values[spec.key], sources[spec.key] = (
+                    parse_value(spec.key, raw_env),
+                    "env",
+                )
+            elif spec.key in file:
+                values[spec.key], sources[spec.key] = (
+                    check_value(spec.key, file[spec.key]),
+                    "file",
+                )
+            else:
+                values[spec.key], sources[spec.key] = spec.default, "default"
+        except SettingsError as exc:
+            origin = spec.flag or spec.key if raw_flag is not None else spec.env
+            raise SettingsError(f"{origin}: {exc}") from None
+    ws_key, http_key = "keeper.ws_endpoint", "keeper.endpoint"
+    ws_rank = _RANK[sources[ws_key]]
+    if values[ws_key] is None or ws_rank > _RANK[sources[http_key]]:
+        values[ws_key] = stream.derive_ws(str(values[http_key]))
+        sources[ws_key] = "derived"
+    return Settings(
+        endpoint=str(values[http_key]),
+        ws_endpoint=str(values[ws_key]),
+        lcd_endpoint=str(values["lcd.endpoint"]),
+        update_auto=bool(values["update.auto"]),
+        sources=MappingProxyType(sources),
+    )
+
+
+def load(
+    flags: Mapping[str, str | None] | None = None,
+    env: Mapping[str, str] | None = None,
+    warn: Callable[[str], None] | None = None,
+) -> Settings:
+    """Read the config file named by ENV (default: os.environ) and resolve."""
+    values = os.environ if env is None else env
+    file, warnings = read_file(config_path(values))
+    for message in warnings:
+        if warn is not None:
+            warn(message)
+    return resolve(flags or {}, values, file)
+
+
+# Redacted output
+
+
+def public_url(url: str | None) -> str | None:
+    """Return URL without user info, query, or fragment, which can hold
+    credentials such as API keys."""
+    if url is None:
+        return None
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def public(settings: Settings) -> dict[str, dict[str, Any]]:
+    """Every key with its value, source, variable, and default; URLs are
+    redacted with `public_url`."""
+
+    def shown(spec: Setting, value: Any) -> Any:
+        return public_url(value) if spec.kind == "url" else value
+
+    return {
+        spec.key: {
+            "value": shown(spec, settings.value(spec.key)),
+            "source": settings.sources[spec.key],
+            "env": spec.env,
+            "default": shown(spec, spec.default),
+        }
+        for spec in SETTINGS
+    }
+
+
+# Writing the file
+
+
+def _wrap(text: str, width: int = 78) -> list[str]:
+    lines: list[str] = []
+    line = "#"
+    for word in text.split():
+        if len(line) + 1 + len(word) > width and line != "#":
+            lines.append(line)
+            line = "#"
+        line += " " + word
+    lines.append(line)
+    return lines
+
+
+def _toml_value(value: str | bool) -> str:
+    return tomlkit.item(value).as_string()
+
+
+def _placeholder(spec: Setting) -> str:
+    default = spec.default
+    if spec.key == "keeper.ws_endpoint":
+        default = keeper.MAINNET_WS
+    assert default is not None
+    return f"# {spec.name} = {_toml_value(default)}"
+
+
+def template() -> str:
+    """The full config file with every key unset and explained."""
+    lines = [
+        "# Sai CLI and MCP server settings.",
+        "#",
+        "# `sai config set KEY VALUE` and `sai config unset KEY` edit this file",
+        "# and keep its comments. A commented-out key is unset and shows its",
+        "# default. Each setting comes from the first of: command-line flag,",
+        "# environment variable, this file, built-in mainnet default.",
+        "# `sai config list` shows each value and where it came from.",
+    ]
+    section = None
+    for spec in SETTINGS:
+        if spec.section != section:
+            section = spec.section
+            lines += ["", f"[{section}]"]
+        else:
+            lines.append("")
+        lines += _wrap(spec.help)
+        where = f"Environment: {spec.env}."
+        if spec.flag:
+            where = f"Flag: {spec.flag}. {where}"
+        lines.append(f"# {where}")
+        lines.append(_placeholder(spec))
+    return "\n".join(lines) + "\n"
+
+
+def _document(text: str | None, path: Path | str) -> tomlkit.TOMLDocument:
+    try:
+        return tomlkit.parse(template() if text is None else text)
+    except TOMLKitError as exc:
+        raise SettingsError(f"Cannot parse {path}: {exc}") from None
+
+
+def _table(doc: tomlkit.TOMLDocument, spec: Setting, path: Path | str) -> Table:
+    table = doc.get(spec.section)
+    if table is None:
+        table = tomlkit.table()
+        doc.add(spec.section, table)
+    if not isinstance(table, Table):
+        raise SettingsError(f"{path}: {spec.section!r} is not a table")
+    return table
+
+
+def _is_placeholder(item: Any, spec: Setting) -> bool:
+    return isinstance(item, Comment) and item.as_string().strip().startswith(
+        f"# {spec.name} ="
+    )
+
+
+def set_value(
+    text: str | None, key: str, raw: str, path: Path | str = FILE_NAME
+) -> tuple[str, str | bool]:
+    """Return config TEXT with KEY set to RAW, and the parsed value.
+
+    TEXT None starts from `template()`. The key takes the place of its
+    commented-out line when there is one; other comments are kept.
+    """
+    value = parse_value(key, raw)
+    spec = setting(key)
+    doc = _document(text, path)
+    table = _table(doc, spec, path)
+    if spec.name in table:
+        table[spec.name] = value
+        return doc.as_string(), value
+    body = table.value.body
+    for index, (name, item) in enumerate(body):
+        if name is None and _is_placeholder(item, spec):
+            table.value._insert_at(index, spec.name, tomlkit.item(value))
+            body[index + 1] = (None, Null())
+            break
+    else:
+        table.add(spec.name, value)
+    return doc.as_string(), value
+
+
+def unset_value(
+    text: str | None, key: str, path: Path | str = FILE_NAME
+) -> tuple[str, bool]:
+    """Return config TEXT with KEY back to its commented-out default, and
+    whether KEY was set."""
+    spec = setting(key)
+    doc = _document(text, path)
+    table = doc.get(spec.section)
+    if not isinstance(table, Table) or spec.name not in table:
+        return doc.as_string(), False
+    body = table.value.body
+    index = next(
+        i
+        for i, (name, _) in enumerate(body)
+        if name is not None and name.key == spec.name
+    )
+    del table[spec.name]
+    comment = Comment(Trivia(comment_ws="", comment=_placeholder(spec), trail="\n"))
+    body[index] = (None, comment)
+    return doc.as_string(), True
+
+
+def write_file(path: Path, text: str) -> None:
+    """Write TEXT to PATH atomically, mode 0600 in a 0700 directory."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    # mkstemp creates the file with mode 0600.
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".config-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(text)
+        os.replace(temp, path)
+    finally:
+        Path(temp).unlink(missing_ok=True)
+
+
+def edit_file(path: Path, edit: Callable[[str | None], str]) -> None:
+    """Apply EDIT to the text at PATH (None when missing) and save it."""
+    try:
+        text: str | None = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None
+    except OSError as exc:
+        raise SettingsError(f"Cannot read {path}: {exc.strerror}") from None
+    write_file(path, edit(text))
