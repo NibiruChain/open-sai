@@ -16,12 +16,12 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import ContentBlock, TextContent, ToolAnnotations
 
 from ..core import settings as sai_settings
 from ..core.settings import Settings
@@ -654,6 +654,46 @@ TRADE_TOOLS: tuple[tuple[Callable[..., Any], ToolAnnotations], ...] = (
     (trade_margin, destructive("Change Margin")),
     (trade_partial_close, destructive("Partial Close")),
 )
+TRADE_TOOL_NAMES = frozenset(function.__name__ for function, _ in TRADE_TOOLS)
+
+
+class SaiMCP(FastMCP):
+    """FastMCP that checks the session before a trade tool's arguments.
+
+    FastMCP validates arguments before the tool runs, so without this a
+    signed-out call with missing or bad arguments would get a validation
+    error instead of SIGNED_OUT and the sign-in guidance.
+    """
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
+        if name in TRADE_TOOL_NAMES:
+            address = arguments.get("address")
+            refusal = await asyncio.to_thread(
+                session_refusal, address if isinstance(address, str) else None
+            )
+            if refusal is not None:
+                # Shaped like FastMCP's own result for a `-> str` tool: content
+                # plus structured output. FastMCP's annotation omits the tuple.
+                content: Sequence[ContentBlock] = [
+                    TextContent(type="text", text=refusal)
+                ]
+                result = (content, {"result": refusal})
+                return result  # ty: ignore[invalid-explicit-return]
+        return await super().call_tool(name, arguments)
+
+
+def session_refusal(address: str | None = None) -> str | None:
+    """Return the JSON error for a trade without a usable session for
+    ADDRESS, or the active account, or None."""
+    try:
+        tools.require_session(server_settings(), address)
+    except sai_settings.SettingsError as exc:
+        return json.dumps(tools.error(str(exc), "BAD_SETTINGS"))
+    except tools.SessionUnavailable as exc:
+        return json.dumps(tools.describe(exc))
+    return None
 
 
 def create_server(settings: Settings | None = None) -> FastMCP:
@@ -665,7 +705,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     """
     global _settings
     _settings = settings
-    server = FastMCP("sai", instructions=INSTRUCTIONS)
+    server = SaiMCP("sai", instructions=INSTRUCTIONS)
 
     async def mcp_info() -> str:
         """Report this server's version, provenance, endpoints, tools,

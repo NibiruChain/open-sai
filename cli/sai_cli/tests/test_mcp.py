@@ -244,6 +244,66 @@ def test_trade_without_a_usable_session_submits_nothing(
     assert storage.list_pending(ENDPOINT, ADDRESS) == []
 
 
+MALFORMED = ({}, {"trade_id": "seven"}, {"preview_digest": 5, "extra": True})
+
+
+@pytest.mark.parametrize(
+    ("session", "code"),
+    (
+        (None, "SIGNED_OUT"),
+        (stored_session(hours=-1), "SESSION_EXPIRED"),
+        (stored_session(endpoint="http://127.0.0.1:9/query"), "SESSION_UNAVAILABLE"),
+    ),
+)
+def test_session_check_comes_before_argument_validation(
+    mcp, monkeypatch, session, code
+):
+    """A malformed trade call without a usable session gets the sign-in
+    error over MCP, not FastMCP's validation error."""
+    if session is not None:
+        storage.save_session(session)
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+
+    async def calls() -> list[tuple[bool, dict[str, Any], Any]]:
+        results = []
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
+            for name in sorted(TRADE_TOOLS):
+                for arguments in MALFORMED:
+                    called = await client.call_tool(name, arguments)
+                    results.append(
+                        (
+                            called.isError,
+                            json.loads(text_of(called.content)),
+                            called.structuredContent,
+                        )
+                    )
+        return results
+
+    for is_error, error, structured in asyncio.run(calls()):
+        assert is_error is False
+        assert error["code"] == code
+        assert "`sai auth login` or `sai auth import`" in error["error"]
+        assert structured == {"result": json.dumps(error)}
+    assert fake.calls == []
+
+
+def test_signed_in_malformed_trade_still_gets_validation_errors(mcp):
+    storage.save_session(stored_session())
+
+    async def call() -> Any:
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as client:
+            return await client.call_tool("trade_close", {})
+
+    called = asyncio.run(call())
+    assert called.isError is True
+    assert "trade_id" in text_of(called.content)
+
+
 def test_signed_out_trade_close_over_the_client_returns_signed_out(mcp, monkeypatch):
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
