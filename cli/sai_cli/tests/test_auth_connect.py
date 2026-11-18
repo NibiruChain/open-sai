@@ -193,7 +193,7 @@ def test_logout_deletes_the_session_without_network(env: Env) -> None:
     assert output["removed"] is True
     assert "cannot revoke" in output["note"]
     assert token not in result.stdout + result.stderr
-    assert not (env.home / "trader" / "session.json").exists()
+    assert not (env.home / "trader" / "sessions.json").exists()
     status = env.run("auth", "status")
     assert status.returncode != 0
     assert "No Sai session" in status.stderr
@@ -254,7 +254,7 @@ def test_agent_import_without_clipboard_asks_for_a_terminal(env: Env) -> None:
     result = env.run("auth", "import")
     assert result.returncode != 0
     assert "Ask the person to run `sai auth import`" in result.stderr
-    assert not (env.home / "trader" / "session.json").exists()
+    assert not (env.home / "trader" / "sessions.json").exists()
 
 
 def test_invalid_clipboard_is_not_echoed_or_cleared(env: Env) -> None:
@@ -355,24 +355,107 @@ def test_session_envelope_uses_the_built_in_key(env: Env) -> None:
     env.clip.write_text(token)
     result = env.run("--json", "auth", "import")
     assert result.returncode == 0, result.stderr
-    path = env.home / "trader" / "session.json"
+    path = env.home / "trader" / "sessions.json"
     assert path.stat().st_mode & 0o777 == 0o600
     envelope = json.loads(path.read_text())
-    assert set(envelope) == {"version", "backend", "nonce", "ciphertext"}
-    assert (envelope["version"], envelope["backend"]) == (2, "test")
-    # Sessions written by the old default backend `test` still load.
+    assert set(envelope) == {"version", "nonce", "ciphertext"}
+    assert envelope["version"] == 3
+    assert token not in path.read_text()
+
+
+def write_v2_session(home: Path, session: dict[str, str]) -> None:
+    """Store SESSION the way sai did before multiple accounts."""
     nonce = os.urandom(12)
     key = hashlib.sha256(b"sai-cli keyring-backend test; not a secret").digest()
-    session = session_for(token)
     ciphertext = AESGCM(key).encrypt(
         nonce, json.dumps(session).encode(), b"sai-session-v2-test"
     )
-    envelope["nonce"] = base64.b64encode(nonce).decode()
-    envelope["ciphertext"] = base64.b64encode(ciphertext).decode()
-    path.write_text(json.dumps(envelope))
+    write_envelope(
+        home,
+        {
+            "version": 2,
+            "backend": "test",
+            "nonce": base64.b64encode(nonce).decode(),
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+        },
+    )
+
+
+def test_single_session_from_before_accounts_migrates(env: Env) -> None:
+    write_v2_session(env.home, session_for(make_token()))
     status = env.run("--json", "auth", "status")
     assert status.returncode == 0, status.stderr
     assert json.loads(status.stdout)["address"] == ADDRESS
+    # The next sign-in rewrites it as version 3 and keeps the old account.
+    other = "0x" + "ab" * 20
+    env.clipboard()
+    env.clip.write_text(make_token(address=other))
+    assert env.run("auth", "import").returncode == 0
+    trader = env.home / "trader"
+    assert not (trader / "session.json").exists()
+    rows = json.loads(env.run("--json", "auth", "list").stdout)["accounts"]
+    assert {r["address"] for r in rows} == {ADDRESS, other}
+
+
+def import_as(env: Env, address: str) -> str:
+    token = make_token(address=address)
+    env.clipboard()
+    env.clip.write_text(token)
+    result = env.run("--json", "auth", "import")
+    assert result.returncode == 0, result.stderr
+    return token
+
+
+def test_accounts_connect_switch_and_disconnect(env: Env) -> None:
+    first, second = ADDRESS, "0x" + "ab" * 20
+    tokens = [import_as(env, first), import_as(env, second)]
+
+    def rows() -> dict[str, bool]:
+        result = env.run("--json", "auth", "list")
+        assert result.returncode == 0, result.stderr
+        assert not any(t in result.stdout for t in tokens)
+        return {
+            r["address"]: r["active"] for r in json.loads(result.stdout)["accounts"]
+        }
+
+    # Signing in adds an account and makes it active.
+    assert rows() == {first: False, second: True}
+    status = env.run("--json", "auth", "status")
+    assert json.loads(status.stdout)["address"] == second
+
+    # --as acts as another connected account for one command.
+    status = env.run(
+        "--json", "--as", first.upper().replace("0X", "0x"), "auth", "status"
+    )
+    assert status.returncode == 0, status.stderr
+    assert json.loads(status.stdout)["address"] == first
+    assert rows() == {first: False, second: True}
+
+    used = env.run("--json", "auth", "use", first)
+    assert used.returncode == 0, used.stderr
+    assert rows() == {first: True, second: False}
+
+    unknown = env.run("auth", "use", "0x" + "cd" * 20)
+    assert unknown.returncode != 0
+    assert "is not connected" in unknown.stderr
+    assert env.run("--as", "0x" + "cd" * 20, "auth", "status").returncode != 0
+
+    # Logging out of one account keeps the other.
+    out = env.run("--json", "auth", "logout", second)
+    assert json.loads(out.stdout) | {"note": ""} == {
+        "removed": True,
+        "address": second,
+        "note": "",
+    }
+    assert rows() == {first: True}
+
+    # Removing the active account leaves none active.
+    import_as(env, second)
+    assert env.run("auth", "logout").returncode == 0
+    assert rows() == {first: False}
+    status = env.run("auth", "status")
+    assert status.returncode != 0
+    assert "No active Sai account" in status.stderr
 
 
 def test_tampered_session_cannot_be_unlocked(env: Env) -> None:

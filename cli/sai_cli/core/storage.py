@@ -1,14 +1,18 @@
-"""Encrypted sessions and durable, non-secret pending intent identities."""
+"""Encrypted sessions for connected accounts and durable, non-secret pending
+intent identities."""
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import time
+from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,58 +32,64 @@ def directory() -> Path:
     return path
 
 
-# The session is encrypted with this fixed key, which ships in the source, like
-# the Cosmos SDK `test` keyring. It keeps the token out of plaintext files,
-# logs, and backups that grep for JWTs. It does not protect against anyone who
-# can read the file and this code; the file mode (0600) does that part.
+# Sessions are encrypted with this fixed key, which ships in the source, like
+# the Cosmos SDK `test` keyring. It keeps tokens out of plaintext files, logs,
+# and backups that grep for JWTs. It does not protect against anyone who can
+# read the file and this code; the file mode (0600) does that part.
 _SESSION_KEY = hashlib.sha256(b"sai-cli keyring-backend test; not a secret").digest()
-_VERSION = 2
-_BACKEND = "test"
-_AAD = b"sai-session-v2-test"
+# Version 3 holds every connected account and which one is active.
+_VERSION = 3
+_AAD = b"sai-sessions-v3"
+# Version 2 held one session; it is read once and rewritten as version 3.
+_V2_AAD = b"sai-session-v2-test"
 
 SIGN_IN_AGAIN = "run `sai auth import` or `sai auth login` again"
+NO_SESSION = "No Sai session; run `sai auth import` or `sai auth login`"
+SESSION_FIELDS = ("token", "evmAddress", "expiresAt")
+# What delete_session reports after deleting a store it could not read.
+UNREADABLE_REMOVED = "unreadable session file"
 
 
-def _session_path() -> Path:
-    return directory() / "session.json"
+def _sessions_path() -> Path:
+    # home(), not directory(): reading must not create the directory.
+    return home() / "sessions.json"
 
 
-def save_session(session: dict[str, str]) -> None:
-    """Encrypt the session with the built-in key and store it at mode 0600."""
-    nonce = os.urandom(12)
-    ciphertext = AESGCM(_SESSION_KEY).encrypt(nonce, json.dumps(session).encode(), _AAD)
-    envelope = {
-        "version": _VERSION,
-        "backend": _BACKEND,
-        "nonce": base64.b64encode(nonce).decode(),
-        "ciphertext": base64.b64encode(ciphertext).decode(),
-    }
-    root = directory()
-    # mkstemp creates the file with mode 0600.
-    fd, temp = tempfile.mkstemp(dir=root, prefix=".session-")
+def _v2_path() -> Path:
+    return home() / "session.json"
+
+
+def _decrypt(fields: dict[str, Any], aad: bytes) -> Any:
+    nonce, ciphertext = (
+        base64.b64decode(fields[k], validate=True) for k in ("nonce", "ciphertext")
+    )
+    return json.loads(AESGCM(_SESSION_KEY).decrypt(nonce, ciphertext, aad))
+
+
+def _check_session(session: Any) -> dict[str, str]:
+    if not isinstance(session, dict) or not all(
+        isinstance(session.get(k), str) for k in SESSION_FIELDS
+    ):
+        raise ValueError("Invalid session")
+    return session
+
+
+def _read_envelope(path: Path) -> dict[str, Any] | None:
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as output:
-            output.write(json.dumps(envelope))
-        os.replace(temp, root / "session.json")
-    finally:
-        Path(temp).unlink(missing_ok=True)
-
-
-def load_session() -> dict[str, str]:
-    """Decrypt the stored session.
-
-    Sessions from older versions that used a passphrase (envelope version 1,
-    or version 2 with backend `file`) are refused, never prompted for.
-    """
-    try:
-        envelope = json.loads(_session_path().read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ValueError(
-            "No Sai session; run `sai auth import` or `sai auth login`"
-        ) from exc
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
     except (OSError, ValueError) as exc:
         raise ValueError(f"Stored session is unreadable; {SIGN_IN_AGAIN}") from exc
-    fields = envelope if isinstance(envelope, dict) else {}
+    return envelope if isinstance(envelope, dict) else {}
+
+
+def _load_v2(fields: dict[str, Any]) -> dict[str, Any]:
+    """Read a version 2 single-session file as a version 3 account set.
+
+    Sessions from versions that used a passphrase (envelope version 1, or
+    version 2 with backend `file`) are refused, never prompted for.
+    """
     if fields.get("version") == 1 or (
         fields.get("version") == 2 and fields.get("backend") == "file"
     ):
@@ -87,35 +97,191 @@ def load_session() -> dict[str, str]:
             "Stored session is passphrase-encrypted, which sai no longer"
             f" supports; {SIGN_IN_AGAIN}"
         )
-    if fields.get("version") != _VERSION or fields.get("backend") != _BACKEND:
+    if fields.get("version") != 2 or fields.get("backend") != "test":
         raise ValueError(f"Unsupported session version; {SIGN_IN_AGAIN}")
     try:
-        nonce, ciphertext = (
-            base64.b64decode(fields[k], validate=True) for k in ("nonce", "ciphertext")
-        )
-        session = json.loads(AESGCM(_SESSION_KEY).decrypt(nonce, ciphertext, _AAD))
-        if not isinstance(session, dict) or not all(
-            isinstance(session.get(k), str)
-            for k in ("token", "evmAddress", "expiresAt")
-        ):
-            raise ValueError("Invalid session")
-        return session
+        session = _check_session(_decrypt(fields, _V2_AAD))
     except (ValueError, KeyError, TypeError, InvalidTag) as exc:
         raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
+    address = session["evmAddress"].lower()
+    return {"active": address, "sessions": {address: session}}
+
+
+def load_accounts() -> dict[str, Any]:
+    """Decrypt every connected account.
+
+    Returns {"active": address or None, "sessions": {address: session}}, with
+    addresses in lowercase. An empty set means nobody is signed in. A version
+    2 `session.json` is read in place; the next save rewrites it.
+    """
+    fields = _read_envelope(_sessions_path())
+    if fields is None:
+        old = _read_envelope(_v2_path())
+        if old is not None:
+            return _load_v2(old)
+        # A sign-in may have migrated the old file between the two reads.
+        fields = _read_envelope(_sessions_path())
+        if fields is None:
+            return {"active": None, "sessions": {}}
+    if fields.get("version") != _VERSION:
+        raise ValueError(f"Unsupported session version; {SIGN_IN_AGAIN}")
+    try:
+        accounts = _decrypt(fields, _AAD)
+        stored = accounts["sessions"]
+        if not isinstance(stored, dict):
+            raise TypeError("Invalid session set")
+        sessions = {k: _check_session(v) for k, v in stored.items()}
+        active = accounts.get("active")
+        if active is not None and active not in sessions:
+            active = None
+    except (ValueError, KeyError, TypeError, InvalidTag) as exc:
+        raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
+    return {"active": active, "sessions": sessions}
+
+
+def _save_accounts(accounts: dict[str, Any]) -> None:
+    """Encrypt ACCOUNTS and store them at mode 0600; drop the version 2 file."""
+    nonce = os.urandom(12)
+    plaintext = json.dumps(accounts).encode()
+    ciphertext = AESGCM(_SESSION_KEY).encrypt(nonce, plaintext, _AAD)
+    envelope = {
+        "version": _VERSION,
+        "nonce": base64.b64encode(nonce).decode(),
+        "ciphertext": base64.b64encode(ciphertext).decode(),
+    }
+    root = directory()
+    # mkstemp creates the file with mode 0600.
+    fd, temp = tempfile.mkstemp(dir=root, prefix=".sessions-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(json.dumps(envelope))
+        os.replace(temp, root / "sessions.json")
+    finally:
+        Path(temp).unlink(missing_ok=True)
+    _v2_path().unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def _locked() -> Generator[None]:
+    """Hold an exclusive lock across one read-modify-write of the accounts,
+    so concurrent sign-ins, switches, and logouts do not lose each other."""
+    with open(directory() / "sessions.lock", "a+b") as handle:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _remove_files() -> None:
+    _sessions_path().unlink(missing_ok=True)
+    _v2_path().unlink(missing_ok=True)
+
+
+def _find(accounts: dict[str, Any], address: str) -> str:
+    key = address.lower()
+    if key not in accounts["sessions"]:
+        raise ValueError(
+            f"{address} is not connected; run `sai auth list` to see connected"
+            " accounts, or sign in with `sai auth login` or `sai auth import`"
+        )
+    return key
+
+
+def save_session(session: dict[str, str]) -> None:
+    """Add or replace the account for SESSION's address and make it active.
+
+    A store that cannot be read (damaged, or from a passphrase version) is
+    replaced, since signing in is how the person recovers from it.
+    """
+    with _locked():
+        try:
+            accounts = load_accounts()
+        except ValueError:
+            accounts: dict[str, Any] = {"active": None, "sessions": {}}
+        address = session["evmAddress"].lower()
+        accounts["sessions"][address] = session
+        accounts["active"] = address
+        _save_accounts(accounts)
+
+
+def load_session(address: str | None = None) -> dict[str, str]:
+    """Return the session for ADDRESS, or the active account's session."""
+    accounts = load_accounts()
+    if address is not None:
+        return accounts["sessions"][_find(accounts, address)]
+    if accounts["active"] is None:
+        if accounts["sessions"]:
+            raise ValueError(
+                "No active Sai account; run `sai auth use ADDRESS` with an"
+                " address from `sai auth list`"
+            )
+        raise ValueError(NO_SESSION)
+    return accounts["sessions"][accounts["active"]]
+
+
+def use_session(address: str) -> dict[str, str]:
+    """Make the connected ADDRESS the active account and return its session."""
+    with _locked():
+        accounts = load_accounts()
+        key = _find(accounts, address)
+        accounts["active"] = key
+        _save_accounts(accounts)
+        return accounts["sessions"][key]
 
 
 def session_exists() -> bool:
-    """Report whether a session file is stored, without reading it."""
-    return (home() / "session.json").is_file()
+    """Report whether any session file is stored, without reading it."""
+    return (home() / "sessions.json").is_file() or _v2_path().is_file()
 
 
-def delete_session() -> bool:
-    """Delete the stored session file. Returns False when there was none."""
-    try:
-        _session_path().unlink()
-    except FileNotFoundError:
-        return False
-    return True
+def delete_session(address: str | None = None) -> str | None:
+    """Remove ADDRESS, or the active account, from this machine.
+
+    Returns the removed address, or None when there was nothing to remove.
+    Removing the active account leaves no account active. Without ADDRESS, a
+    store that cannot be read is deleted and reported as removed.
+    """
+    with _locked():
+        # Checked under the lock: a sign-in may be migrating the old file.
+        if not session_exists():
+            return None
+        try:
+            accounts = load_accounts()
+        except ValueError:
+            if address is not None:
+                raise
+            _remove_files()
+            return UNREADABLE_REMOVED
+        if address is None:
+            key = accounts["active"]
+            if key is None:
+                return None
+        else:
+            key = address.lower()
+            if key not in accounts["sessions"]:
+                return None
+        removed = accounts["sessions"].pop(key)["evmAddress"]
+        if accounts["active"] == key:
+            accounts["active"] = None
+        if accounts["sessions"]:
+            _save_accounts(accounts)
+        else:
+            _remove_files()
+        return removed
 
 
 # Version 1 adds `created_at`, the Unix time when the CLI reserved the key.

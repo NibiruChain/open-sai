@@ -50,18 +50,34 @@ challenge nonce.
 address` and saves one password prompt. With `--wallet`, the CLI refuses to
 sign when it differs from the wallet's address.
 
-`auth logout` deletes the stored session. It makes no network call, and since
-Keeper cannot revoke tokens yet, a copy of the token elsewhere, such as in Sai
-Web, stays valid until it expires.
+### Several Accounts
 
-The session is bound to its account and Keeper endpoint and expires with the
-token. The CLI writes `$SAI_HOME/trader/session.json` with mode 0600,
+Each `auth login` or `auth import` connects an account and makes it active.
+Signing in with another account keeps the ones already connected; signing in
+again with the same address refreshes its session.
+
+- `auth list` shows each connected account, its expiry, and which is active.
+- `auth use ADDRESS` makes another connected account active.
+- `--as ADDRESS`, before the command, runs one command as another connected
+  account: `sai --as 0x... trade close 3`.
+- `auth logout [ADDRESS]` removes one account, by default the active one.
+  The others stay connected. After removing the active account, none is
+  active until `auth use`.
+
+`auth logout` makes no network call, and since Keeper cannot revoke tokens
+yet, a copy of the token elsewhere, such as in Sai Web, stays valid until it
+expires.
+
+Each session is bound to its account and Keeper endpoint and expires with
+the token. The CLI writes `$SAI_HOME/trader/sessions.json` with mode 0600,
 encrypted by AES-GCM with a fixed key built into the CLI, like the Cosmos SDK
 `test` keyring. Nothing prompts, so agents can run authenticated commands.
 This only keeps the token out of plaintext; anyone who can read the file and
 this source can decrypt it. Older versions could encrypt the session with a
 passphrase. The CLI refuses those files and asks you to run `sai auth import`
-or `sai auth login` again.
+or `sai auth login` again. A single-account `session.json` from before
+multiple accounts still loads and moves into `sessions.json` at the next
+sign-in or switch.
 
 
 ## Commands

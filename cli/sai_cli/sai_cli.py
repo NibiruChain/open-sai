@@ -7,6 +7,7 @@ import shlex
 import shutil
 import sys
 import time
+from datetime import UTC, datetime
 from importlib import metadata, resources
 from typing import Any
 
@@ -61,7 +62,7 @@ def emit(ctx: click.Context, value: Any) -> None:
 
 
 def session(ctx: click.Context) -> dict[str, str]:
-    return sessions.load_active_session(ctx.obj["endpoint"])
+    return sessions.load_active_session(ctx.obj["endpoint"], ctx.obj["as_address"])
 
 
 @click.group(invoke_without_command=True)
@@ -83,11 +84,20 @@ def session(ctx: click.Context) -> dict[str, str]:
 @click.option(
     "--json", "json_output", is_flag=True, help="Compact machine-readable JSON."
 )
+@click.option(
+    "--as",
+    "as_address",
+    metavar="ADDRESS",
+    help="Run this command as another connected account instead of the"
+    " active one. See `sai auth list`.",
+)
 @click.pass_context
-def main(ctx: click.Context, endpoint: str, json_output: bool) -> None:
+def main(
+    ctx: click.Context, endpoint: str, json_output: bool, as_address: str | None
+) -> None:
     """Inspect Sai markets and account data, and submit trading intents."""
     ctx.ensure_object(dict)
-    ctx.obj.update(endpoint=endpoint, json=json_output)
+    ctx.obj.update(endpoint=endpoint, json=json_output, as_address=as_address)
     if ctx.invoked_subcommand is None:
         repl(ctx)
 
@@ -133,6 +143,7 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
                         "--endpoint",
                         ctx.obj["endpoint"],
                         *(["--json"] if ctx.obj["json"] else []),
+                        *(["--as", a] if (a := ctx.obj.get("as_address")) else []),
                         *args,
                     ],
                     prog_name="sai",
@@ -146,7 +157,7 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
 
 @main.group()
 def auth() -> None:
-    """Sign in, check, and remove the local trading session."""
+    """Connect, list, switch, and remove Sai accounts on this machine."""
 
 
 @auth.command("login")
@@ -298,28 +309,76 @@ def import_token(ctx: click.Context) -> None:
 
 
 @auth.command("logout")
+@click.argument("address", required=False)
 @click.pass_context
-def logout(ctx: click.Context) -> None:
-    """Delete the stored session from this machine.
+def logout(ctx: click.Context, address: str | None) -> None:
+    """Remove ADDRESS, or the active account, from this machine.
 
-    Makes no network call. Keeper cannot revoke session tokens yet, so a
-    token copied elsewhere stays valid until it expires.
+    Other connected accounts stay connected; when the active one is removed,
+    none is active until `sai auth use`. Makes no network call. Keeper cannot
+    revoke session tokens yet, so a token copied elsewhere stays valid until
+    it expires.
     """
-    removed = storage.delete_session()
+    try:
+        removed = storage.delete_session(address or ctx.obj["as_address"])
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     emit(
         ctx,
         {
-            "removed": removed,
+            "removed": removed is not None,
+            "address": None if removed == storage.UNREADABLE_REMOVED else removed,
             "note": "Keeper cannot revoke session tokens yet; the token stays"
             " valid until it expires.",
         },
     )
 
 
+def account_rows(endpoint: str) -> list[dict[str, Any]]:
+    """Describe each connected account without its token."""
+    accounts = storage.load_accounts()
+    now = datetime.now(UTC)
+    return [
+        {
+            **sessions.summary(result),
+            "active": key == accounts["active"],
+            "expired": datetime.fromisoformat(result["expiresAt"]) <= now,
+            "endpointMatches": result.get("endpoint") == endpoint,
+        }
+        for key, result in sorted(accounts["sessions"].items())
+    ]
+
+
+@auth.command("list")
+@click.pass_context
+def auth_list(ctx: click.Context) -> None:
+    """List connected accounts, their expiry, and which one is active."""
+    try:
+        emit(ctx, {"accounts": account_rows(ctx.obj["endpoint"])})
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@auth.command("use")
+@click.argument("address")
+@click.pass_context
+def auth_use(ctx: click.Context, address: str) -> None:
+    """Make the connected ADDRESS the active account.
+
+    Commands without `--as` act on the active account. Sign in again to
+    connect a new one: `sai auth login` and `sai auth import` add accounts.
+    """
+    try:
+        emit(ctx, {**sessions.summary(storage.use_session(address)), "active": True})
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @auth.command("status")
 @click.pass_context
 def auth_status(ctx: click.Context) -> None:
-    """Show the account and expiration without showing the token."""
+    """Show the active account, or the --as account, and its expiry without
+    showing the token."""
     try:
         result = session(ctx)
         emit(ctx, sessions.summary(result))
@@ -428,9 +487,50 @@ def trade() -> None:
     """Submit authenticated trading intents."""
 
 
-def loader(ctx: click.Context) -> trading.SessionLoader:
-    """Return a loader for the active session that prompts only when called."""
-    return lambda: session(ctx)
+class PinnedSession:
+    """Load the --as account, or the active one, and keep using that address.
+
+    The first load fixes the address, so the output names the account that
+    submitted even if another process switches accounts meanwhile.
+    """
+
+    def __init__(self, ctx: click.Context) -> None:
+        self.ctx = ctx
+        self.address: str | None = None
+
+    def __call__(self) -> dict[str, str]:
+        if self.address is None:
+            result = session(self.ctx)
+        else:
+            result = sessions.load_active_session(
+                self.ctx.obj["endpoint"], self.address
+            )
+        self.address = result["evmAddress"]
+        return result
+
+
+def loader(ctx: click.Context) -> PinnedSession:
+    """Return this command's session loader; it loads only when called."""
+    return ctx.obj.setdefault("loader", PinnedSession(ctx))
+
+
+def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
+    """Print a trade result with the account it used or would use.
+
+    A dry run without a usable session names no account, unless --as asked
+    for one, which then must be connected.
+    """
+    load = loader(ctx)
+    account = load.address
+    if account is None:
+        try:
+            account = load()["evmAddress"]
+        except ValueError:
+            # A dry run needs no session, but a requested account must exist.
+            if ctx.obj["as_address"]:
+                raise
+            account = None
+    emit(ctx, {"account": account, **result})
 
 
 def warn(message: str) -> None:
@@ -472,7 +572,7 @@ def trade_open(
 ) -> None:
     """Open a market, limit, or stop trade."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.open_trade(
                 ctx.obj["endpoint"],
@@ -508,7 +608,7 @@ def trade_close(
 ) -> None:
     """Close a position or cancel a pending order."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.close_trade(
                 ctx.obj["endpoint"],
@@ -541,7 +641,7 @@ def trade_tpsl(
 ) -> None:
     """Set or clear take-profit and stop-loss prices."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.set_tpsl(
                 ctx.obj["endpoint"],
@@ -568,7 +668,7 @@ def trade_leverage(
 ) -> None:
     """Set target leverage without changing TP or SL."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.set_leverage(
                 ctx.obj["endpoint"],
@@ -611,7 +711,7 @@ def trade_margin(
     The amount is a quote, not a cap: collateral can change before execution.
     """
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.change_margin(
                 ctx.obj["endpoint"],
@@ -643,7 +743,7 @@ def partial_close(
 ) -> None:
     """Reduce an open USDC position by a whole percentage."""
     try:
-        emit(
+        emit_trade(
             ctx,
             trading.partial_close(
                 ctx.obj["endpoint"],

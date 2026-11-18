@@ -52,8 +52,16 @@ does not prompt.
 one.
 
 Once connected, commands need no prompt until the session expires. `auth
-status` shows the address and expiry without revealing the token. `auth
-logout` deletes the stored session; it does not revoke the token. Tell the
+status` shows the active account's address and expiry without revealing the
+token.
+
+The person can connect several accounts; each sign-in adds one and makes it
+active. `auth list` shows them and which is active. `auth use ADDRESS`
+switches the active account; switch only when the person asks. To act on
+another connected account for one command, put `--as ADDRESS` before the
+command instead. Before a trade, say which account it will use. `auth logout
+[ADDRESS]` removes one account, by default the active one; it does not revoke
+the token. Tell the
 person what the token is if they ask: it is their Sai Web browser session
 token, lasts as long as Keeper issues it (30 days in production), authorizes
 all trading on their deposited funds, and cannot be revoked yet. Signing out

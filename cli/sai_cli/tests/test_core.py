@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -28,7 +29,7 @@ def session():
 
 def test_encrypted_session_and_permissions(session):
     storage.save_session(session)
-    path = storage.home() / "session.json"
+    path = storage.home() / "sessions.json"
     assert b"sensitive-token" not in path.read_bytes()
     assert path.stat().st_mode & 0o777 == 0o600
     assert storage.load_session() == session
@@ -136,6 +137,91 @@ def test_cli_dry_run_does_not_create_session_or_send():
     assert result.exit_code == 0
     assert '"CLOSE_POSITION"' in result.output
     assert not storage.home().exists()
+
+
+def test_cli_dry_run_names_the_account_it_would_use(session):
+    other = {**session, "evmAddress": "0x" + "c" * 40, "token": "other-token"}
+    storage.save_session(session)
+    storage.save_session(other)
+    args = ["--json", "trade", "close", "4", "--dry-run"]
+    active = CliRunner().invoke(main, args)
+    assert json.loads(active.output)["account"] == other["evmAddress"]
+    chosen = CliRunner().invoke(main, ["--as", session["evmAddress"], *args])
+    assert json.loads(chosen.output)["account"] == session["evmAddress"]
+    assert "token" not in active.output + chosen.output
+    missing = CliRunner().invoke(main, ["--as", "0x" + "d" * 40, *args])
+    assert missing.exit_code != 0
+    assert "is not connected" in missing.output
+
+
+def test_trade_session_stays_on_the_account_it_first_loaded(session):
+    import click
+    from sai_cli.sai_cli import loader
+
+    other = {**session, "evmAddress": "0x" + "c" * 40, "token": "other-token"}
+    storage.save_session(other)
+    storage.save_session(session)
+    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "as_address": None})
+    load = loader(ctx)
+    assert load()["evmAddress"] == session["evmAddress"]
+    # Another process switches accounts while the trade is in flight.
+    storage.use_session(other["evmAddress"])
+    assert load()["evmAddress"] == session["evmAddress"]
+    assert loader(ctx) is load
+
+
+def test_read_retries_when_a_sign_in_migrates_between_reads(session, monkeypatch):
+    storage.save_session(session)
+    real = storage._read_envelope
+    missed: list[str] = []
+
+    def racy(path):
+        # The first look at sessions.json happens just before the migrating
+        # sign-in writes it.
+        if path.name == "sessions.json" and not missed:
+            missed.append(path.name)
+            return None
+        return real(path)
+
+    monkeypatch.setattr(storage, "_read_envelope", racy)
+    assert storage.load_session() == session
+    assert missed == ["sessions.json"]
+
+
+def _sign_in(index: int) -> None:
+    storage.save_session(
+        {
+            "token": f"token-{index}",
+            "evmAddress": "0x" + f"{index:040x}",
+            "endpoint": keeper.MAINNET_HTTP,
+            "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        }
+    )
+
+
+def test_concurrent_sign_ins_keep_every_account():
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    workers = [context.Process(target=_sign_in, args=(i,)) for i in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(30)
+        assert worker.exitcode == 0
+    assert len(storage.load_accounts()["sessions"]) == 8
+
+
+def test_sign_in_and_logout_recover_from_an_unreadable_store(session):
+    path = storage.directory() / "sessions.json"
+    path.write_text("not json")
+    with pytest.raises(ValueError, match="unreadable"):
+        storage.load_session()
+    storage.save_session(session)
+    assert storage.load_session() == session
+    path.write_text(json.dumps({"version": 99}))
+    assert storage.delete_session() == storage.UNREADABLE_REMOVED
+    assert not storage.session_exists()
 
 
 @pytest.mark.parametrize("failure", ["expired", "wrong_endpoint"])
