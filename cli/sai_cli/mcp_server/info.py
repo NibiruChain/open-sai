@@ -11,28 +11,10 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 PACKAGE = "sai-cli"
 # cli/sai_cli/mcp_server/info.py -> repository root
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
-
-
-def public_url(url: str | None) -> str | None:
-    """Return URL without user info, query, or fragment, which can hold
-    credentials such as API keys."""
-    if url is None:
-        return None
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parts.port
-    except ValueError:
-        port = None
-    netloc = host if port is None else f"{host}:{port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def version(name: str = PACKAGE) -> str:

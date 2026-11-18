@@ -123,8 +123,12 @@ active account.
 With several accounts connected, `auth_list` shows them, `auth_use` switches
 the active one (for the CLI too), and preview and trade tools take an
 optional `address` to act as another connected account. A preview names its
-account, and a trade refuses if the account changed after the preview. `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`
-select another network.
+account, and a trade refuses if the account changed after the preview.
+
+The server reads the same settings as the CLI when it starts:
+`SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
+`~/.sai/config.toml`, which `sai config set` edits. See
+[Settings](cli/sai_cli/README.md#settings).
 
 ## Development
 

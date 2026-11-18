@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import sys
 import time
 from datetime import UTC, datetime
 from importlib import metadata, resources
+from pathlib import Path
 from typing import Any
 
 import click
 
-from .core import clipboard, keeper, margin, reconcile, storage, stream, trading
+from .core import clipboard, keeper, reconcile, storage, stream, trading
 from .core import session as sessions
+from .core import settings as sai_settings
 from .utils.repl_skin import ReplSkin
 
 PACKAGE = "sai-cli"
@@ -61,8 +64,32 @@ def emit(ctx: click.Context, value: Any) -> None:
     click.echo(json.dumps(value, indent=None if ctx.obj["json"] else 2, default=str))
 
 
+# Global flags that override a setting: option name, setting key.
+GLOBAL_FLAGS = (
+    ("--endpoint", "keeper.endpoint"),
+    ("--ws-endpoint", "keeper.ws_endpoint"),
+    ("--lcd-endpoint", "lcd.endpoint"),
+)
+
+
+def settings(ctx: click.Context) -> sai_settings.Settings:
+    """Resolve settings once per command: flags, environment, config file,
+    then mainnet defaults."""
+    obj = ctx.find_root().obj
+    if obj.get("settings") is None:
+        try:
+            obj["settings"] = sai_settings.load(obj["flags"], warn=warn)
+        except sai_settings.SettingsError as exc:
+            raise click.ClickException(str(exc)) from exc
+    return obj["settings"]
+
+
+def keeper_url(ctx: click.Context) -> str:
+    return settings(ctx).endpoint
+
+
 def session(ctx: click.Context) -> dict[str, str]:
-    return sessions.load_active_session(ctx.obj["endpoint"], ctx.obj["as_address"])
+    return sessions.load_active_session(keeper_url(ctx), ctx.obj["as_address"])
 
 
 @click.group(invoke_without_command=True)
@@ -77,9 +104,17 @@ def session(ctx: click.Context) -> dict[str, str]:
 )
 @click.option(
     "--endpoint",
-    default=keeper.MAINNET_HTTP,
-    show_default=True,
-    help="Keeper GraphQL HTTP endpoint.",
+    help="Keeper GraphQL HTTP endpoint. Overrides SAI_ENDPOINT and"
+    " keeper.endpoint in the config file.",
+)
+@click.option(
+    "--ws-endpoint",
+    help="Keeper WebSocket endpoint. Overrides SAI_WS_ENDPOINT and"
+    " keeper.ws_endpoint; derived from the Keeper endpoint when unset.",
+)
+@click.option(
+    "--lcd-endpoint",
+    help="Nibiru REST endpoint. Overrides SAI_LCD_ENDPOINT and lcd.endpoint.",
 )
 @click.option(
     "--json", "json_output", is_flag=True, help="Compact machine-readable JSON."
@@ -93,13 +128,39 @@ def session(ctx: click.Context) -> dict[str, str]:
 )
 @click.pass_context
 def main(
-    ctx: click.Context, endpoint: str, json_output: bool, as_address: str | None
+    ctx: click.Context,
+    endpoint: str | None,
+    ws_endpoint: str | None,
+    lcd_endpoint: str | None,
+    json_output: bool,
+    as_address: str | None,
 ) -> None:
-    """Inspect Sai markets and account data, and submit trading intents."""
+    """Inspect Sai markets and account data, and submit trading intents.
+
+    Settings come from flags, then SAI_* environment variables, then
+    $SAI_HOME/config.toml (see `sai config`), then mainnet defaults.
+    """
     ctx.ensure_object(dict)
-    ctx.obj.update(endpoint=endpoint, json=json_output, as_address=as_address)
+    passed = (endpoint, ws_endpoint, lcd_endpoint)
+    flags = {key: value for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)}
+    ctx.obj.update(flags=flags, settings=None, json=json_output, as_address=as_address)
     if ctx.invoked_subcommand is None:
         repl(ctx)
+
+
+def forwarded_flags(obj: dict[str, Any]) -> list[str]:
+    """The global flags the person passed when starting the REPL, so each
+    command still reads the config file for the rest."""
+    args: list[str] = []
+    for option, key in GLOBAL_FLAGS:
+        value = obj["flags"].get(key)
+        if value is not None:
+            args += [option, value]
+    if obj["json"]:
+        args.append("--json")
+    if obj.get("as_address"):
+        args += ["--as", obj["as_address"]]
+    return args
 
 
 def repl_args(line: str) -> list[str]:
@@ -139,13 +200,7 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
             args = repl_args(line)
             if args:
                 main.main(
-                    args=[
-                        "--endpoint",
-                        ctx.obj["endpoint"],
-                        *(["--json"] if ctx.obj["json"] else []),
-                        *(["--as", a] if (a := ctx.obj.get("as_address")) else []),
-                        *args,
-                    ],
+                    args=[*forwarded_flags(ctx.obj), *args],
                     prog_name="sai",
                     standalone_mode=False,
                 )
@@ -191,8 +246,8 @@ def login(
     if bool(account) == bool(wallet):
         raise click.UsageError("Pass exactly one of --account or --wallet")
     try:
-        result = signed_login(ctx.obj["endpoint"], account, wallet, address)
-        result["endpoint"] = ctx.obj["endpoint"]
+        result = signed_login(keeper_url(ctx), account, wallet, address)
+        result["endpoint"] = keeper_url(ctx)
         storage.save_session(result)
         emit(ctx, sessions.summary(result))
     except (ValueError, keeper.KeeperError) as exc:
@@ -296,7 +351,7 @@ def import_token(ctx: click.Context) -> None:
     """
     try:
         token = read_token()
-        result = sessions.import_session(token, ctx.obj["endpoint"])
+        result = sessions.import_session(token, keeper_url(ctx))
         storage.save_session(result)
         # Re-read: the person may have copied something else since, and that
         # must survive.
@@ -354,7 +409,7 @@ def account_rows(endpoint: str) -> list[dict[str, Any]]:
 def auth_list(ctx: click.Context) -> None:
     """List connected accounts, their expiry, and which one is active."""
     try:
-        emit(ctx, {"accounts": account_rows(ctx.obj["endpoint"])})
+        emit(ctx, {"accounts": account_rows(keeper_url(ctx))})
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -414,7 +469,7 @@ def perform_query(
     ctx: click.Context, query: str, variables: dict[str, Any] | None = None
 ) -> None:
     try:
-        emit(ctx, keeper.request(ctx.obj["endpoint"], query, variables))
+        emit(ctx, keeper.request(keeper_url(ctx), query, variables))
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -437,9 +492,7 @@ def history(ctx: click.Context, address: str) -> None:
 
 @account.command("balances")
 @click.argument("address")
-@click.option(
-    "--ws-endpoint", help="Override the WebSocket endpoint derived from --endpoint."
-)
+@click.option("--ws-endpoint", help="Override the keeper.ws_endpoint setting.")
 @click.pass_context
 def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
     """Read one account balance snapshot from Keeper's subscription."""
@@ -469,7 +522,7 @@ def intent() -> None:
 def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
     """Read Keeper's latest intent records; reconcile a known key."""
     try:
-        emit(ctx, reconcile.reconcile(ctx.obj["endpoint"], address, key))
+        emit(ctx, reconcile.reconcile(keeper_url(ctx), address, key))
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -479,7 +532,7 @@ def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
 @click.pass_context
 def intent_local(ctx: click.Context, address: str) -> None:
     """List locally recorded intent identities for ADDRESS."""
-    emit(ctx, storage.list_pending(ctx.obj["endpoint"], address))
+    emit(ctx, storage.list_pending(keeper_url(ctx), address))
 
 
 @main.group()
@@ -502,9 +555,7 @@ class PinnedSession:
         if self.address is None:
             result = session(self.ctx)
         else:
-            result = sessions.load_active_session(
-                self.ctx.obj["endpoint"], self.address
-            )
+            result = sessions.load_active_session(keeper_url(self.ctx), self.address)
         self.address = result["evmAddress"]
         return result
 
@@ -575,7 +626,7 @@ def trade_open(
         emit_trade(
             ctx,
             trading.open_trade(
-                ctx.obj["endpoint"],
+                keeper_url(ctx),
                 loader(ctx),
                 market_id=market_id,
                 side=side,
@@ -611,7 +662,7 @@ def trade_close(
         emit_trade(
             ctx,
             trading.close_trade(
-                ctx.obj["endpoint"],
+                keeper_url(ctx),
                 loader(ctx),
                 trade_id=trade_id,
                 cancel_order=cancel_order,
@@ -644,7 +695,7 @@ def trade_tpsl(
         emit_trade(
             ctx,
             trading.set_tpsl(
-                ctx.obj["endpoint"],
+                keeper_url(ctx),
                 loader(ctx),
                 trade_id=trade_id,
                 take_profit=take_profit,
@@ -671,7 +722,7 @@ def trade_leverage(
         emit_trade(
             ctx,
             trading.set_leverage(
-                ctx.obj["endpoint"],
+                keeper_url(ctx),
                 loader(ctx),
                 trade_id=trade_id,
                 leverage=leverage,
@@ -692,9 +743,8 @@ def trade_leverage(
 )
 @click.option(
     "--lcd-endpoint",
-    default=margin.MAINNET_LCD,
-    show_default=True,
-    help="Nibiru REST endpoint for exact contract state.",
+    help="Nibiru REST endpoint for exact contract state. Defaults to the"
+    " lcd.endpoint setting.",
 )
 @click.option("--dry-run", is_flag=True)
 @click.pass_context
@@ -703,7 +753,7 @@ def trade_margin(
     trade_id: int,
     direction: str,
     amount: str,
-    lcd_endpoint: str,
+    lcd_endpoint: str | None,
     dry_run: bool,
 ) -> None:
     """Add or remove margin through a target-leverage intent.
@@ -714,12 +764,12 @@ def trade_margin(
         emit_trade(
             ctx,
             trading.change_margin(
-                ctx.obj["endpoint"],
+                keeper_url(ctx),
                 loader(ctx),
                 trade_id=trade_id,
                 direction=direction,
                 amount=amount,
-                lcd_endpoint=lcd_endpoint,
+                lcd_endpoint=lcd_url(ctx, lcd_endpoint),
                 dry_run=dry_run,
             ),
         )
@@ -732,25 +782,28 @@ def trade_margin(
 @click.option("--percent", type=click.IntRange(1, 99), required=True)
 @click.option(
     "--lcd-endpoint",
-    default=margin.MAINNET_LCD,
-    show_default=True,
-    help="Nibiru REST endpoint for exact contract state.",
+    help="Nibiru REST endpoint for exact contract state. Defaults to the"
+    " lcd.endpoint setting.",
 )
 @click.option("--dry-run", is_flag=True)
 @click.pass_context
 def partial_close(
-    ctx: click.Context, trade_id: int, percent: int, lcd_endpoint: str, dry_run: bool
+    ctx: click.Context,
+    trade_id: int,
+    percent: int,
+    lcd_endpoint: str | None,
+    dry_run: bool,
 ) -> None:
     """Reduce an open USDC position by a whole percentage."""
     try:
         emit_trade(
             ctx,
             trading.partial_close(
-                ctx.obj["endpoint"],
+                keeper_url(ctx),
                 loader(ctx),
                 trade_id=trade_id,
                 percent=percent,
-                lcd_endpoint=lcd_endpoint,
+                lcd_endpoint=lcd_url(ctx, lcd_endpoint),
                 dry_run=dry_run,
             ),
         )
@@ -803,10 +856,13 @@ def watch_price(ctx: click.Context, token_id: int, ws_endpoint: str | None) -> N
 
 
 def ws_url(ctx: click.Context, ws_endpoint: str | None) -> str:
-    try:
-        return ws_endpoint or stream.derive_ws(ctx.obj["endpoint"])
-    except stream.StreamError as exc:
-        raise click.ClickException(str(exc)) from exc
+    """The command's --ws-endpoint, else the resolved WebSocket setting."""
+    return ws_endpoint or settings(ctx).ws_endpoint
+
+
+def lcd_url(ctx: click.Context, lcd_endpoint: str | None) -> str:
+    """The command's --lcd-endpoint, else the resolved LCD setting."""
+    return lcd_endpoint or settings(ctx).lcd_endpoint
 
 
 def watch_stream(ws_endpoint: str, query: str, variables: dict[str, Any]) -> None:
@@ -828,6 +884,128 @@ def watch_stream(ws_endpoint: str, query: str, variables: dict[str, Any]) -> Non
                 time.sleep(2)
     except stream.StreamError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.group("config")
+def config_group() -> None:
+    """Show and change settings in $SAI_HOME/config.toml.
+
+    Keys: keeper.endpoint, keeper.ws_endpoint, lcd.endpoint, update.auto.
+    A flag or SAI_* environment variable still overrides the file.
+    """
+
+
+def config_key(key: str) -> sai_settings.Setting:
+    """Return KEY's registry entry; an unknown key is a usage error (exit 2)."""
+    try:
+        return sai_settings.setting(key)
+    except sai_settings.SettingsError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
+def config_file() -> Path:
+    return sai_settings.config_path(os.environ)
+
+
+@config_group.command("list")
+@click.pass_context
+def config_list(ctx: click.Context) -> None:
+    """Show every setting with its value and source.
+
+    The source is flag, env, file, default, or derived. URLs are shown
+    without credentials; `sai config get` prints the exact value.
+    """
+    shown = sai_settings.public(settings(ctx))
+    if ctx.obj["json"]:
+        emit(ctx, {"path": str(config_file()), "settings": shown})
+        return
+    click.echo(f"# {config_file()}")
+    for key, entry in shown.items():
+        value = json.dumps(entry["value"])
+        click.echo(f"{key} = {value}  # {entry['source']}, {entry['env']}")
+
+
+@config_group.command("get")
+@click.argument("key")
+@click.pass_context
+def config_get(ctx: click.Context, key: str) -> None:
+    """Print the exact value of KEY as resolved now."""
+    spec = config_key(key)
+    resolved = settings(ctx)
+    value = resolved.value(spec.key)
+    if ctx.obj["json"]:
+        emit(
+            ctx,
+            {"key": spec.key, "value": value, "source": resolved.sources[spec.key]},
+        )
+        return
+    click.echo(json.dumps(value) if isinstance(value, bool) else value)
+
+
+@config_group.command("set")
+@click.argument("key")
+@click.argument("value")
+@click.pass_context
+def config_set(ctx: click.Context, key: str, value: str) -> None:
+    """Set KEY to VALUE in the config file, keeping its comments."""
+    spec = config_key(key)
+    path = config_file()
+    try:
+        parsed = sai_settings.parse_value(spec.key, value)
+    except sai_settings.SettingsError as exc:
+        raise click.UsageError(
+            f"{exc}. Valid keys: {', '.join(sai_settings.KEYS)}"
+        ) from exc
+    try:
+        sai_settings.edit_file(
+            path, lambda text: sai_settings.set_value(text, spec.key, value, path)[0]
+        )
+    except sai_settings.UneditableSection as exc:
+        raise click.UsageError(str(exc)) from exc
+    except sai_settings.SettingsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    report_change(ctx, spec, {"key": spec.key, "value": parsed, "path": str(path)})
+
+
+@config_group.command("unset")
+@click.argument("key")
+@click.pass_context
+def config_unset(ctx: click.Context, key: str) -> None:
+    """Remove KEY from the config file so the default applies again."""
+    spec = config_key(key)
+    path = config_file()
+    removed: list[bool] = []
+
+    def edit(text: str | None) -> str | None:
+        new, was_set = sai_settings.unset_value(text, spec.key, path)
+        removed.append(was_set)
+        # An already unset key leaves the file untouched.
+        return new if was_set else None
+
+    try:
+        sai_settings.edit_file(path, edit)
+    except sai_settings.UneditableSection as exc:
+        raise click.UsageError(str(exc)) from exc
+    except sai_settings.SettingsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    report_change(
+        ctx, spec, {"key": spec.key, "removed": removed[0], "path": str(path)}
+    )
+
+
+def report_change(
+    ctx: click.Context, spec: sai_settings.Setting, result: dict[str, Any]
+) -> None:
+    """Print RESULT, and warn when a flag or variable still overrides it."""
+    if ctx.obj["json"]:
+        emit(ctx, result)
+    elif "value" in result:
+        click.echo(f"Set {spec.key} in {result['path']}")
+    else:
+        verb = "Unset" if result["removed"] else "Already unset:"
+        click.echo(f"{verb} {spec.key} in {result['path']}")
+    if os.environ.get(spec.env, "").strip():
+        warn(f"Warning: {spec.env} is set and overrides {spec.key} in the file")
 
 
 if __name__ == "__main__":

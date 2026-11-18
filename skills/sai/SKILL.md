@@ -13,9 +13,16 @@ and stays correct when two builds report the same `sai --version`. The
 installed `sai --help` is the authority for commands and options.
 
 Use `sai --help` to inspect commands. Add `--json` before the
-command for machine-readable output. Mainnet is the default. Override the
-Keeper HTTP endpoint with `--endpoint`; WebSocket commands derive their endpoint
-from it unless `--ws-endpoint` is supplied.
+command for machine-readable output. Mainnet is the default.
+
+Settings live in `~/.sai/config.toml` (under `$SAI_HOME` when set), shared
+with the MCP server. Change them with `sai config set KEY VALUE` and `sai
+config unset KEY`, not by editing the file or MCP client config. `sai --json
+config list` shows each key's value and source (`flag`, `env`, `file`,
+`default`, `derived`). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
+derives it from the Keeper endpoint), `lcd.endpoint`, `update.auto`. A flag
+such as `--endpoint` or a variable such as `SAI_ENDPOINT` overrides the file
+for one run.
 
 Use `market list`, `market prices`, `account positions ADDRESS`, `account
 balances ADDRESS`, and `account history ADDRESS` for data. Use `watch price
