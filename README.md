@@ -133,7 +133,7 @@ Keeper. An expired session returns `SESSION_EXPIRED`. The server reads the
 stored session without a prompt, never asks for the token, and never returns
 it.
 
-Each preview names the signed-in `account`, and each trade must carry the
+Each preview names the signed-in account in `addr`, and each trade must carry the
 `previewDigest` from a preview the user confirmed. Before submitting, the
 server rebuilds the trade and refuses it with a fresh preview when it no
 longer matches:
