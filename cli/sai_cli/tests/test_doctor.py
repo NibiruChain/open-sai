@@ -286,6 +286,50 @@ def test_tighten_refuses_a_path_swapped_for_a_symlink(isolated_home, tmp_path_fa
     assert outside.stat().st_mode & 0o777 == 0o755
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard links")
+def test_hard_linked_history_is_not_chmodded(isolated_home, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside") / "shared"
+    outside.write_text("x")
+    outside.chmod(0o644)
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    os.link(outside, root / "history")
+    check = one(doctor.check_home, ctx(fix=True))
+    assert check.status == "fail"
+    assert check.fix == f"{root / 'history'} has other hard links; fix by hand"
+    assert outside.stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard links")
+def test_hard_linked_ledger_is_not_migrated(isolated_home, tmp_path_factory):
+    outside = old_ledger(tmp_path_factory.mktemp("elsewhere"))
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    os.link(outside, root / "intents.sqlite3")
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fail"
+    assert "hard links" in check.summary
+    assert user_version(outside) == 0
+
+
+def test_ledger_replaced_before_a_write_is_not_written(isolated_home, monkeypatch):
+    path = old_ledger(isolated_home)
+    replacement = isolated_home / "replacement.sqlite3"
+    replacement.write_bytes(path.read_bytes())
+    read = doctor.read_ledger
+
+    def read_then_swap(target):
+        result = read(target)
+        os.replace(replacement, path)
+        return result
+
+    monkeypatch.setattr(doctor, "read_ledger", read_then_swap)
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fail"
+    assert "changed during the check" in check.summary
+    assert user_version(path) == 0
+
+
 # Intents
 
 

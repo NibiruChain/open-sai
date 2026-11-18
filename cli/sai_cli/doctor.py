@@ -225,7 +225,11 @@ def tighten(root: Path, names: Sequence[str]) -> tuple[list[str], list[str]]:
                 failed.append(f"chmod go-rwx {path}")
                 continue
             try:
-                mode = stat.S_IMODE(os.fstat(fd).st_mode)
+                info_ = os.fstat(fd)
+                if name is not None and info_.st_nlink > 1:
+                    failed.append(f"{path} has other hard links; fix by hand")
+                    continue
+                mode = stat.S_IMODE(info_.st_mode)
                 if mode & 0o077:
                     os.fchmod(fd, mode & ~0o077)
                     changes.append(f"chmod {path} {mode:o} -> {mode & ~0o077:o}")
@@ -523,12 +527,43 @@ def reconcile_keys(
     return outcome
 
 
+LEDGER_FILES = ("", "-wal", "-shm", "-journal")
+
+
+def ledger_identity(path: Path) -> tuple[int, int] | None:
+    """The ledger's (st_dev, st_ino) without following a symlink."""
+    try:
+        info_ = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info_.st_mode):
+        return None
+    return info_.st_dev, info_.st_ino
+
+
+def hard_linked(path: Path) -> list[Path]:
+    """Return the ledger or its journals that have other hard links.
+
+    A write to one would also change the file at the other name, which may
+    be outside `$SAI_HOME/trader`.
+    """
+    shared: list[Path] = []
+    for suffix in LEDGER_FILES:
+        file = path.with_name(path.name + suffix)
+        try:
+            if file.lstat().st_nlink > 1:
+                shared.append(file)
+        except OSError:
+            continue
+    return shared
+
+
 def check_intents(ctx: Context) -> Check:
     path = ledger_path()
     links = symlinks(
         [
             "intents.sqlite3",
-            *(f"intents.sqlite3{s}" for s in ("-wal", "-shm", "-journal")),
+            *(f"intents.sqlite3{s}" for s in LEDGER_FILES[1:]),
         ]
     )
     if links:
@@ -542,6 +577,33 @@ def check_intents(ctx: Context) -> Check:
         )
     if not path.is_file():
         return Check("intents", "pass", "No intent ledger yet", None, {})
+    identity = ledger_identity(path)
+    shared = hard_linked(path)
+    if shared:
+        return Check(
+            "intents",
+            "fail",
+            f"{', '.join(map(str, shared))} has other hard links; fix by hand",
+            "Replace the hard link with a copy of the file",
+            {"hardLinks": [str(link) for link in shared]},
+        )
+
+    def moved() -> Check | None:
+        """Refuse to write if the ledger is no longer the file checked above.
+
+        SQLite opens by path, so this narrows the window but cannot close it.
+        """
+        if ledger_identity(path) == identity and not hard_linked(path):
+            return None
+        return Check(
+            "intents",
+            "fail",
+            f"{path} changed during the check; doctor did not write it",
+            "Run sai doctor again; replace any link with a real file by hand",
+            {},
+            changes=changes,
+        )
+
     fix_corrupt = (
         f"Copy {path} aside before any trade and restore it from a backup; it"
         " records intents that may still execute"
@@ -567,6 +629,8 @@ def check_intents(ctx: Context) -> Check:
                 {"userVersion": version},
             )
         if version < storage.SCHEMA_VERSION and ctx.fix:
+            if refused := moved():
+                return refused
             storage.db().close()
             changes.append(
                 f"migrated the ledger from schema {version} to {storage.SCHEMA_VERSION}"
@@ -588,6 +652,8 @@ def check_intents(ctx: Context) -> Check:
     blocking = [key for key, endpoint, owner in rows if blocks(endpoint, owner)]
     details: dict[str, Any] = {"userVersion": version}
     if blocking and ctx.fix and not ctx.offline and address is not None:
+        if refused := moved():
+            return refused
         outcome = reconcile_keys(
             ctx.config.endpoint, address, blocking, NETWORK_DEADLINE
         )
