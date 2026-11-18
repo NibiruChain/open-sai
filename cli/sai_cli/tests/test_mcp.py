@@ -858,6 +858,21 @@ def test_trade_checks_sign_in_for_the_requested_account(mcp, monkeypatch):
     assert fake.calls == []
 
 
+def test_sign_in_for_the_requested_account_comes_before_validation(mcp, monkeypatch):
+    """The gate ahead of argument validation reads `addr`: a malformed trade
+    for an expired account is refused for the session, not the arguments,
+    even while the active account is signed in."""
+    storage.save_session(stored_session(hours=-1))
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    error = invoke(mcp, "trade_close", {"trade_id": "not-a-number", "addr": ADDR})
+    assert error["code"] == "SESSION_EXPIRED"
+    assert fake.calls == []
+
+
 def test_switching_accounts_after_a_preview_refuses_the_trade(mcp, monkeypatch):
     connect_two_accounts()
     fake = FakeKeeper()
