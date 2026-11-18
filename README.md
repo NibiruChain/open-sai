@@ -19,8 +19,7 @@ sai --help
 ```
 
 The [install script](scripts/install.py) finds the newest `sai-cli` release
-and runs `uv tool install` on its wheel. Run the same command again to move to
-a newer release. Until the first release is published, the script says so and
+and runs `uv tool install` on its wheel. Until the first release is published, the script says so and
 installs from `main`.
 
 To build from source instead, install from Git:
@@ -35,9 +34,16 @@ To try the CLI without installing it:
 uvx --from git+https://github.com/SaiDotFun/open-sai sai --json market prices
 ```
 
-Both Git commands build `main`. `sai --version` prints the installed version,
-and `sai update --check` compares it with the newest release. `sai update`
-does not install updates by itself yet.
+Both Git commands build `main`. `sai --version` prints the installed version.
+
+`sai` keeps itself current. About once a day, a command you run in a terminal
+starts an update in the background, and a later command tells you once that
+it happened. `sai update` does the same right away, and `sai update --check`
+only reports. The `sai` path and everything under `~/.sai` stay the same, so
+registered agent clients keep working; restart them to load the new version.
+To be told about updates without installing them, run
+`sai config set update.auto false`. See
+[Updates](cli/sai_cli/README.md#updates).
 
 The package is `sai-cli` and is not on PyPI yet, so `uv tool install sai`
 installs an unrelated PyPI package.
@@ -190,5 +196,5 @@ It is a dry run that checks the tree and prints the Git commands; add `--run`
 to create and push the tag. The tag starts the
 [Release workflow](.github/workflows/release.yml), which runs the tests,
 builds the wheel and sdist, writes `SHA256SUMS`, and publishes all three as a
-GitHub Release. The install script and `sai update --check` look for the
-highest `sai-cli/v*` release that is not a pre-release.
+GitHub Release. The install script and `sai update` look for the highest
+`sai-cli/v*` release that is not a pre-release.

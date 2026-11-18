@@ -45,6 +45,47 @@ and the CLI derives the WebSocket from the Keeper endpoint instead. So
 file. The per-command `--ws-endpoint` and `--lcd-endpoint` options still
 work and override the setting for that command.
 
+## Updates
+
+```bash
+sai update                # install the latest release
+sai update --check        # report the installed and latest versions only
+sai update --to 0.2.0     # install that release; the only way to go back
+sai update --source       # build the release from Git instead of its wheel
+```
+
+`sai update` downloads the release wheel and `SHA256SUMS`, checks the hash,
+and installs the wheel with `uv tool install --force`. It then runs the new
+`sai --version` and imports the CLI and the MCP server. If the download, the
+hash, the install, or that check fails, the previous version stays, or
+`sai update` installs it again from the wheel it kept in
+`$SAI_HOME/cache/wheels`. It exits 0 when sai is updated or already current
+and 1 on a failure.
+
+Only a `uv tool install` of a release, or of this repository's Git source, is
+updated. A checkout, a `uvx` run, a fork, or any other install gets a note and
+exit code 3; `sai doctor` warns about those in its `install` check. sai never
+moves to an older version by itself.
+
+The update does not move `~/.local/bin/sai` or change anything else under
+`$SAI_HOME`, so MCP registrations keep working. A running `sai mcp serve`
+keeps the old code until its client restarts; `mcp_info` reports
+`restartNeeded`.
+
+With `update.auto` on, which is the default, sai also updates by itself. A
+command run in a terminal starts `sai update --background` detached, at most
+once a day, and does not wait for it. A later command prints one line on
+stderr when the update finished or failed. With `update.auto` off, the
+background run only checks, and the notice says a release is available.
+Nothing is started or printed under `--json`, when `CI` is set, without a
+terminal, or by `sai mcp`, `sai update`, and `sai doctor`. On Windows the
+background run only notifies.
+
+`$SAI_HOME/update.json` holds the last check and the last update result,
+`update.lock` keeps two updates from running at once, and `update.stamp`
+marks when the last background run started. `sai doctor` reads them for its
+`version` check, which warns when sai is behind or the last update failed.
+
 ## Connecting
 
 The CLI trades with a Keeper session token, the same HS256 JWT Sai Web keeps
@@ -218,7 +259,7 @@ marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
 admission does not establish execution or finality.
 
-`sai doctor` checks the install, `$SAI_HOME/trader`, the session, the intent
+`sai doctor` checks the install, the version, `$SAI_HOME/trader`, the session, the intent
 ledger, and the Keeper HTTP, WebSocket, and LCD endpoints, and fixes what it
 safely can. It creates `$SAI_HOME/trader`, removes group and other access
 from it and the files sai keeps there (the connected accounts, the ledger and its
