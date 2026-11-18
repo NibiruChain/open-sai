@@ -10,6 +10,7 @@ env values, headers, or URLs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ from typing import Any
 
 NAME = "sai"
 HIDDEN = "<hidden>"
+STILL_ACTIVE = "a project .codex/config.toml entry is still active"
 CLIENTS = ("claude", "codex", "cursor")
 ALIASES = {"claude-code": "claude", "claude_code": "claude"}
 SCOPES = ("user", "project")
@@ -61,6 +63,9 @@ class Registration:
     sai_home: str | None = None
     stale_env: tuple[str, ...] = ()
     disabled: bool = False
+    # Hash of the whole entry (env values, URL, and all), so two entries can
+    # be compared without keeping or printing their values.
+    fingerprint: str = ""
 
     def shown(self, target: Target | None) -> dict[str, Any]:
         """The argv to print: in full only when it is the expected command.
@@ -266,6 +271,8 @@ def entry_registration(
     """
     if not isinstance(entry, dict):
         return None
+    canonical = json.dumps([entry, disabled], sort_keys=True, default=str)
+    fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
     command = entry.get("command")
     args = entry.get("args") or []
     argv = [command] if isinstance(command, str) else []
@@ -285,17 +292,13 @@ def entry_registration(
         home if isinstance(home, str) else None,
         tuple(sorted(stale)),
         disabled,
+        fingerprint,
     )
 
 
 def same_entry(a: Registration, b: Registration) -> bool:
-    """Equal apart from scope."""
-    return (a.argv, a.sai_home, a.stale_env, a.disabled) == (
-        b.argv,
-        b.sai_home,
-        b.stale_env,
-        b.disabled,
-    )
+    """Equal apart from scope, env values and transport URL included."""
+    return a.fingerprint == b.fingerprint
 
 
 def servers(data: dict[str, Any] | None) -> dict[str, Any]:
@@ -403,6 +406,14 @@ class Client:
     def remove_steps(self, scope: str) -> list[list[str]]:
         raise NotImplementedError
 
+    def verify(self, scope: str, target: Target | None) -> None:
+        """Re-read after a change: the entry matches target, or is gone."""
+        reg = self.registration(scope)
+        if target is not None and (reg is None or not reg.matches(target)):
+            raise ClientError(f"{self.name} does not show the new sai entry")
+        if target is None and reg is not None:
+            raise ClientError(f"{self.name} still shows the sai entry")
+
     def apply(self, steps: list[list[str]]) -> None:
         for argv in steps:
             run(argv)
@@ -466,9 +477,7 @@ class Codex(Client):
         $CODEX_HOME for the user entry, once from the working directory for
         the entry Codex would use here. A difference is a project override.
         """
-        neutral = self.home_dir()
-        if not neutral.is_dir():
-            neutral = Path(tempfile.gettempdir())
+        neutral = self.neutral_dir()
         user = self.get(neutral, "user")
         found = [user] if user is not None else []
         if self.cwd.resolve() != neutral.resolve():
@@ -476,6 +485,25 @@ class Codex(Client):
             if here is not None and (user is None or not same_entry(here, user)):
                 found.append(here)
         return self.ordered(found)
+
+    def neutral_dir(self) -> Path:
+        home = self.home_dir()
+        return home if home.is_dir() else Path(tempfile.gettempdir())
+
+    def verify(self, scope: str, target: Target | None) -> None:
+        """Ask Codex again, from $CODEX_HOME and from the working directory.
+
+        Equal user and project entries look like one entry before a change,
+        so only the answer from the working directory afterwards shows
+        whether a project entry is still what Codex runs here.
+        """
+        super().verify(scope, target)
+        here = self.get(self.cwd, "project")
+        if target is None and here is None:
+            return
+        if target is not None and here is not None and here.matches(target):
+            return
+        raise ClientError(STILL_ACTIVE)
 
     def get(self, cwd: Path, scope: str) -> Registration | None:
         """Run `codex mcp get sai --json` from cwd; keep command and args."""
@@ -677,6 +705,7 @@ def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Re
             client.write(scope, target)
         else:
             client.apply(steps)
+        client.verify(scope, target)
         result.action = action
     except (ClientError, OSError) as exc:
         result.action, result.error = "failed", str(exc)
@@ -742,6 +771,7 @@ def uninstall_one(
             client.write(scope, None)
         else:
             client.apply(steps)
+        client.verify(scope, None)
         result.action = "removed"
     except (ClientError, OSError) as exc:
         result.action, result.error = "failed", str(exc)

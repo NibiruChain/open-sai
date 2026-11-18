@@ -99,6 +99,8 @@ path.write_text(json.dumps(state))
 # Codex is asked twice: from CODEX_HOME for the user entry, then from the
 # working directory for the entry it uses here.
 GETS = [["mcp", "get", "sai", "--json"]] * 2
+# After a change, Codex is asked again: both reads, then the working directory.
+CHECK = [["mcp", "get", "sai", "--json"]] * 3
 
 
 def write_exe(path: Path, body: str) -> Path:
@@ -189,6 +191,7 @@ def test_install_runs_each_clients_add_command(env: Env):
         ["mcp", "add", "--scope", "user", "sai", "--", sai, "mcp", "serve"],
         *GETS,
         ["mcp", "add", "sai", "--", sai, "mcp", "serve"],
+        *CHECK,
     ]
     assert env.claude_json()["mcpServers"]["sai"]["command"] == sai
     cursor = json.loads(env.cursor_path().read_text())
@@ -222,6 +225,7 @@ def test_an_old_entry_is_removed_then_added(env: Env):
         *GETS,
         ["mcp", "remove", "sai"],
         ["mcp", "add", "sai", "--", sai, "mcp", "serve"],
+        *CHECK,
     ]
 
 
@@ -284,6 +288,7 @@ def test_uninstall_runs_remove_and_reports_absent(env: Env):
         ["mcp", "remove", "--scope", "user", "sai"],
         *GETS,
         ["mcp", "remove", "sai"],
+        *CHECK,
     ]
     env.clear()
     again = invoke("mcp", "uninstall", "claude", "codex", "--dry-run")
@@ -700,9 +705,29 @@ def test_registered_args_are_hidden_unless_they_are_the_expected_command(env: En
         assert "host.example" not in result.stdout + result.stderr
 
 
-def codex_project(env: Env, argv: list[str]) -> None:
+def codex_transport(argv: list[str], env: dict[str, str] | None = None) -> dict:
+    """The transport shape real Codex and the fake both report."""
+    return {
+        "type": "stdio",
+        "command": argv[0],
+        "args": argv[1:],
+        "env": env or {},
+        "env_vars": [],
+        "cwd": None,
+    }
+
+
+def codex_project(
+    env: Env, argv: list[str], extra: dict[str, str] | None = None
+) -> None:
     (env.project / "fake-codex-project.json").write_text(
-        json.dumps({"type": "stdio", "command": argv[0], "args": argv[1:]})
+        json.dumps(codex_transport(argv, extra))
+    )
+
+
+def codex_user(env: Env, argv: list[str], extra: dict[str, str] | None = None) -> None:
+    (env.codex_home / "fake-state.json").write_text(
+        json.dumps({"sai": codex_transport(argv, extra)})
     )
 
 
@@ -756,3 +781,49 @@ def test_shadowed_by_names_only_a_higher_precedence_scope(env: Env):
     only = payload(result)["results"][0]
     assert only["action"] == "added"
     assert "shadowedBy" not in only
+
+
+def test_codex_override_differing_only_in_env_values_is_found(env: Env):
+    """Same command and env keys, different SAI_ENDPOINT values."""
+    stale = "https://stale-endpoint.example/query"
+    codex_user(env, serve(env), {"SAI_ENDPOINT": "https://user.example/query"})
+    codex_project(env, serve(env), {"SAI_ENDPOINT": stale})
+    listed = invoke("mcp", "list")
+    row = payload(listed)["clients"][1]
+    assert [r["scope"] for r in row["registrations"]] == ["project", "user"]
+    install = invoke("mcp", "install", "codex")
+    assert install.exit_code == 1
+    assert actions(install) == {"codex": "failed"}
+    assert [c for c in env.calls() if c[1] != "get"] == []
+    for result in (listed, install):
+        assert "example" not in result.stdout + result.stderr
+
+
+def test_codex_identical_project_entry_fails_the_post_check(env: Env):
+    """User and project entries are equal, so they read as one entry; only
+    asking Codex again after the change shows the project entry remains."""
+    old = ["/opt/old/sai", "mcp", "serve"]
+    codex_user(env, old)
+    codex_project(env, old)
+    uninstall = invoke("mcp", "uninstall", "codex")
+    assert uninstall.exit_code == 1
+    result = payload(uninstall)["results"][0]
+    assert (result["scope"], result["action"]) == ("user", "failed")
+    assert result["error"] == "a project .codex/config.toml entry is still active"
+    codex_user(env, old)
+    install = invoke("mcp", "install", "codex")
+    assert install.exit_code == 1
+    result = payload(install)["results"][0]
+    assert (result["action"], result["error"]) == (
+        "failed",
+        "a project .codex/config.toml entry is still active",
+    )
+
+
+def test_claude_post_check_catches_an_add_that_did_not_land(env: Env):
+    write_exe(env.bin / "claude", "import sys\nsys.exit(0)\n")
+    result = invoke("mcp", "install", "claude")
+    assert result.exit_code == 1
+    assert payload(result)["results"][0]["error"] == (
+        "claude does not show the new sai entry"
+    )
