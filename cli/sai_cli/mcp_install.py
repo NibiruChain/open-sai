@@ -17,12 +17,14 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 NAME = "sai"
+HIDDEN = "<hidden>"
 CLIENTS = ("claude", "codex", "cursor")
 ALIASES = {"claude-code": "claude", "claude_code": "claude"}
 SCOPES = ("user", "project")
@@ -60,6 +62,25 @@ class Registration:
     sai_home: str | None = None
     stale_env: tuple[str, ...] = ()
     disabled: bool = False
+    # Config file holding the entry, for scopes sai will not edit.
+    path: str | None = None
+    # True for an entry the client ignores, such as an untrusted Codex project.
+    inactive: bool = False
+
+    def shown(self, target: Target | None) -> dict[str, Any]:
+        """The argv to print: in full only when it is the expected command.
+
+        Any other entry's args may hold a token or a credential URL, so only
+        the command's file name is shown.
+        """
+        if target is not None and self.argv == target.argv:
+            return {"command": self.argv}
+        if not self.argv:
+            return {"command": []}
+        out: dict[str, Any] = {"command": [Path(self.argv[0]).name]}
+        if len(self.argv) > 1:
+            out["args"] = HIDDEN
+        return out
 
     def matches(self, target: Target) -> bool:
         return (
@@ -72,10 +93,12 @@ class Registration:
     def to_json(self, target: Target | None, effective: bool) -> dict[str, Any]:
         out: dict[str, Any] = {
             "scope": self.scope,
-            "command": self.argv,
+            **self.shown(target),
             "current": target is not None and self.matches(target),
             "effective": effective,
         }
+        if self.path is not None:
+            out["path"] = self.path
         if self.stale_env:
             out["staleEnv"] = list(self.stale_env)
         if self.disabled:
@@ -88,6 +111,7 @@ class Result:
     client: str
     action: str
     command: list[str] | None = None
+    args: str | None = None
     argv: list[list[str]] | None = None
     path: str | None = None
     would: str | None = None
@@ -102,6 +126,7 @@ class Result:
             "scope",
             "would",
             "command",
+            "args",
             "argv",
             "path",
             "shadowed_by",
@@ -237,7 +262,11 @@ def load_json(path: Path) -> dict[str, Any] | None:
 
 
 def entry_registration(
-    entry: Any, scope: str, disabled: bool = False
+    entry: Any,
+    scope: str,
+    disabled: bool = False,
+    path: str | None = None,
+    inactive: bool = False,
 ) -> Registration | None:
     """Keep command, args, SAI_HOME, and other env names from a `sai` entry.
 
@@ -265,6 +294,8 @@ def entry_registration(
         home if isinstance(home, str) else None,
         tuple(sorted(stale)),
         disabled,
+        path,
+        inactive,
     )
 
 
@@ -347,14 +378,22 @@ class Client:
 
     # Scopes in the order the client prefers them; the first found wins.
     precedence: tuple[str, ...] = ("user",)
+    # Scopes sai reads but never edits.
+    read_only_scopes: frozenset[str] = frozenset()
 
     def registrations(self) -> list[Registration]:
         """Every `sai` entry, the effective one first."""
         raise NotImplementedError
 
+    def rank(self, scope: str) -> int:
+        order = self.precedence
+        return order.index(scope) if scope in order else len(order)
+
     def ordered(self, found: list[Registration]) -> list[Registration]:
-        rank = {scope: i for i, scope in enumerate(self.precedence)}
-        return sorted(found, key=lambda r: rank.get(r.scope, len(rank)))
+        return sorted(found, key=lambda r: (r.inactive, self.rank(r.scope)))
+
+    def effective(self, found: list[Registration]) -> Registration | None:
+        return found[0] if found and not found[0].inactive else None
 
     def registration(self, scope: str) -> Registration | None:
         return next((r for r in self.registrations() if r.scope == scope), None)
@@ -417,13 +456,73 @@ class Codex(Client):
         configured = self.environ.get("CODEX_HOME")
         return Path(configured) if configured else self.home / ".codex"
 
+    precedence = ("project", "user")
+    read_only_scopes = frozenset({"project"})
+
     def registrations(self) -> list[Registration]:
+        found = self.user_registration() + self.project_registration()
+        return self.ordered(found)
+
+    def user_config(self) -> dict[str, Any]:
+        try:
+            with (self.home_dir() / "config.toml").open("rb") as handle:
+                return tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            return {}
+
+    def trusted(self, directory: Path) -> bool | None:
+        """Whether Codex trusts a project directory; None when unknown."""
+        config = self.user_config()
+        projects = config.get("projects")
+        if not isinstance(projects, dict):
+            return None if not config else False
+        for candidate in (directory, *directory.parents):
+            entry = projects.get(str(candidate))
+            if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+                return True
+        return False
+
+    def project_registration(self) -> list[Registration]:
+        """The nearest `.codex/config.toml` above cwd that defines sai.
+
+        Codex layers a trusted project's config over the user's, and `codex
+        mcp add|remove` edit only the user file, so sai only reports this one.
+        """
+        user_file = (self.home_dir() / "config.toml").resolve()
+        for directory in (self.cwd, *self.cwd.parents):
+            path = directory / ".codex" / "config.toml"
+            if not path.is_file() or path.resolve() == user_file:
+                continue
+            try:
+                with path.open("rb") as handle:
+                    data = tomllib.load(handle)
+            except (OSError, tomllib.TOMLDecodeError):
+                raise ClientError(f"could not read {path}") from None
+            table = data.get("mcp_servers")
+            entry = table.get(NAME) if isinstance(table, dict) else None
+            if not isinstance(entry, dict):
+                continue
+            trusted = self.trusted(directory)
+            found = entry_registration(
+                entry,
+                "project",
+                entry.get("enabled") is False,
+                str(path),
+                inactive=trusted is False,
+            )
+            return [found] if found is not None else []
+        return []
+
+    def user_registration(self) -> list[Registration]:
         exe = self.exe()
         if exe is None:
             return []
+        # Run outside any project so a project config cannot answer instead.
+        home = self.home_dir()
         try:
             done = subprocess.run(
                 [exe, "mcp", "get", NAME, "--json"],
+                cwd=home if home.is_dir() else tempfile.gettempdir(),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -447,6 +546,12 @@ class Codex(Client):
         disabled = data.get("enabled") is False
         found = entry_registration(data.get("transport"), "user", disabled)
         return [found] if found is not None else []
+
+    def project_message(self, reg: Registration) -> str:
+        return (
+            f"the sai entry in {reg.path} overrides the user entry in this"
+            " project; edit or remove it there, then run this again"
+        )
 
     def check_scope(self, scope: str) -> None:
         if scope != "user":
@@ -556,17 +661,19 @@ def list_clients(
         except ClientError as exc:
             row["error"] = str(exc)
             found = []
-        row["registrations"] = [
-            reg.to_json(target, i == 0) for i, reg in enumerate(found)
-        ]
+        effective = client.effective(found)
+        row["registrations"] = [reg.to_json(target, reg is effective) for reg in found]
         if found:
-            reg = found[0]
+            reg = effective or found[0]
+            shown = reg.shown(target)
             row.update(
                 registered=True,
-                current=target is not None and reg.matches(target),
-                registeredCommand=reg.argv,
+                current=reg is effective and target is not None and reg.matches(target),
+                registeredCommand=shown["command"],
                 scope=reg.scope,
             )
+            if "args" in shown:
+                row["args"] = shown["args"]
             if reg.stale_env:
                 row["staleEnv"] = list(reg.stale_env)
             if reg.disabled:
@@ -580,8 +687,15 @@ def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Re
     try:
         found = client.registrations()
         existing = next((r for r in found if r.scope == scope), None)
-        if found and found[0].scope != scope and not found[0].matches(target):
-            result.shadowed_by = found[0].scope
+        winner = client.effective(found)
+        if (
+            winner is not None
+            and client.rank(winner.scope) < client.rank(scope)
+            and not winner.matches(target)
+        ):
+            if winner.scope in client.read_only_scopes and isinstance(client, Codex):
+                raise ClientError(client.project_message(winner))
+            result.shadowed_by = winner.scope
         if existing is not None and existing.matches(target):
             result.action = "unchanged"
             return result
@@ -606,29 +720,54 @@ def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Re
     return result
 
 
-def uninstall_client(client: Client, scope: str | None, dry_run: bool) -> list[Result]:
-    """Remove sai from one scope, or from every scope it is registered in."""
+def uninstall_client(
+    client: Client, scope: str | None, dry_run: bool, target: Target | None = None
+) -> list[Result]:
+    """Remove sai from one scope, or from every scope it is registered in.
+
+    An effective entry in a scope sai does not edit is reported as failed
+    with its path, since removing the others leaves it running.
+    """
     try:
         found = client.registrations()
     except ClientError as exc:
         return [Result(client.name, "failed", scope=scope, error=str(exc))]
+    active = [r for r in found if not r.inactive]
     if scope is not None:
-        existing = next((r for r in found if r.scope == scope), None)
-        return [uninstall_one(client, scope, existing, dry_run)]
-    if not found:
+        existing = next((r for r in active if r.scope == scope), None)
+        results = [uninstall_one(client, scope, existing, dry_run, target)]
+    elif not active:
         return [Result(client.name, "absent")]
-    return [uninstall_one(client, r.scope, r, dry_run) for r in found]
+    else:
+        results = [uninstall_one(client, r.scope, r, dry_run, target) for r in active]
+    winner = client.effective(found)
+    done = {r.scope for r in results}
+    if (
+        winner is not None
+        and winner.scope in client.read_only_scopes
+        and winner.scope not in done
+    ):
+        results.append(uninstall_one(client, winner.scope, winner, dry_run, target))
+    return results
 
 
 def uninstall_one(
-    client: Client, scope: str, existing: Registration | None, dry_run: bool
+    client: Client,
+    scope: str,
+    existing: Registration | None,
+    dry_run: bool,
+    target: Target | None = None,
 ) -> Result:
     result = Result(client.name, "failed", scope=scope)
     try:
         if existing is None:
             result.action = "absent"
             return result
-        result.command = existing.argv
+        shown = existing.shown(target)
+        result.command, result.args = shown["command"], shown.get("args")
+        if scope in client.read_only_scopes and isinstance(client, Codex):
+            result.path = existing.path
+            raise ClientError(client.project_message(existing))
         if isinstance(client, Cursor):
             result.path = str(client.config_path(scope))
             steps: list[list[str]] = []

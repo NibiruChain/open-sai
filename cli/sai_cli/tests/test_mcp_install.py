@@ -648,3 +648,111 @@ def test_cursor_gives_up_when_the_file_keeps_changing(env: Env, monkeypatch):
     assert "kept changing" in payload(result)["results"][0]["error"]
     assert "sai" not in json.loads(path.read_text())["mcpServers"]
     assert [p.name for p in path.parent.iterdir()] == ["mcp.json"]
+
+
+def test_registered_args_are_hidden_unless_they_are_the_expected_command(env: Env):
+    wrapper = ["/opt/bin/wrap", "--url", f"https://user:{SECRET}@host.example/mcp"]
+    (env.home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"sai": claude_entry(wrapper)}})
+    )
+    (env.codex_home / "fake-state.json").write_text(
+        json.dumps(
+            {
+                "sai": {
+                    "type": "stdio",
+                    "command": str(env.sai),
+                    "args": ["mcp", "serve"],
+                }
+            }
+        )
+    )
+    listed = invoke("mcp", "list")
+    rows = {r["client"]: r for r in payload(listed)["clients"]}
+    assert rows["claude"]["registeredCommand"] == ["wrap"]
+    assert rows["claude"]["args"] == "<hidden>"
+    assert rows["claude"]["registrations"][0]["args"] == "<hidden>"
+    assert rows["codex"]["registeredCommand"] == serve(env)
+    assert "args" not in rows["codex"]
+    outputs = [
+        listed,
+        invoke("mcp", "uninstall"),
+        invoke("mcp", "uninstall", "claude", "--dry-run"),
+        invoke("mcp", "uninstall", "claude"),
+    ]
+    removed = payload(outputs[-1])["results"][0]
+    assert (removed["action"], removed["command"], removed["args"]) == (
+        "removed",
+        ["wrap"],
+        "<hidden>",
+    )
+    for result in outputs:
+        assert SECRET not in result.stdout + result.stderr
+        assert "host.example" not in result.stdout + result.stderr
+
+
+def codex_project(env: Env, trusted: bool) -> Path:
+    path = env.project / ".codex" / "config.toml"
+    path.parent.mkdir()
+    path.write_text(
+        f'[mcp_servers.sai]\ncommand = "old-wrapper"\nargs = ["--token", "{SECRET}"]\n'
+    )
+    level = "trusted" if trusted else "untrusted"
+    (env.codex_home / "config.toml").write_text(
+        f'[projects."{env.project}"]\ntrust_level = "{level}"\n'
+    )
+    return path
+
+
+def test_codex_trusted_project_entry_is_effective_and_not_edited(env: Env):
+    path = codex_project(env, trusted=True)
+    listed = invoke("mcp", "list")
+    row = payload(listed)["clients"][1]
+    assert row["client"] == "codex"
+    assert (row["scope"], row["current"]) == ("project", False)
+    assert row["registrations"] == [
+        {
+            "scope": "project",
+            "command": ["old-wrapper"],
+            "args": "<hidden>",
+            "current": False,
+            "effective": True,
+            "path": str(path),
+        }
+    ]
+    install = invoke("mcp", "install", "codex")
+    assert install.exit_code == 1
+    result = payload(install)["results"][0]
+    assert result["action"] == "failed"
+    assert str(path) in result["error"]
+    uninstall = invoke("mcp", "uninstall", "codex")
+    assert uninstall.exit_code == 1
+    got = payload(uninstall)["results"]
+    assert [(r["scope"], r["action"]) for r in got] == [("project", "failed")]
+    assert str(path) in got[0]["error"]
+    # A user entry removed under a project override still reports the override.
+    assert invoke("mcp", "uninstall", "codex", "--scope", "user").exit_code == 1
+    assert [c for c in env.calls() if c[1] != "get"] == []
+    assert SECRET in path.read_text()
+    for result in (listed, install, uninstall):
+        assert SECRET not in result.stdout + result.stderr
+
+
+def test_codex_untrusted_project_entry_is_not_effective(env: Env):
+    codex_project(env, trusted=False)
+    row = payload(invoke("mcp", "list"))["clients"][1]
+    assert row["registrations"][0]["effective"] is False
+    assert row["current"] is False
+    result = invoke("mcp", "install", "codex")
+    assert actions(result) == {"codex": "added"}
+    row = payload(invoke("mcp", "list"))["clients"][1]
+    assert (row["scope"], row["current"]) == ("user", True)
+
+
+def test_shadowed_by_names_only_a_higher_precedence_scope(env: Env):
+    (env.home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"sai": claude_entry([OLD_COMMAND])}})
+    )
+    result = invoke("mcp", "install", "claude", "--scope", "project")
+    only = payload(result)["results"][0]
+    assert only["action"] == "added"
+    assert "shadowedBy" not in only

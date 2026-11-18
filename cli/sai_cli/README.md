@@ -148,8 +148,16 @@ disabled Codex entry, is not current and gets replaced. `list` shows every
 scope's entry under `registrations` and marks the one the client uses as
 `effective` (Claude Code: local, then project, then user; Cursor: project,
 then user). `uninstall` removes every scope's entry unless `--scope` names
-one. The Cursor edit re-reads the file just before the rename and merges
-again once if something else changed it. Results report `added`, `replaced`, `unchanged`, `removed`,
+one. Output shows a registered command in full only when it is the one
+`install` would register; any other entry shows only its program name and
+`args: "<hidden>"`, since its args may hold a token or credential URL. A
+trusted Codex project's `.codex/config.toml` can define its own `sai` entry
+that overrides the user's. `list` reports it with scope `project` and its
+path, and `install` and `uninstall` fail for Codex with that path rather than
+edit project files. The Cursor edit re-reads the file just before the rename
+and merges again once if something else changed it. A plain file has no
+compare-and-swap, so a write in the instant between that re-read and the
+rename can still be lost. Results report `added`, `replaced`, `unchanged`, `removed`,
 `absent`, `failed`, or `planned` (with `--dry-run`) per client, and the
 command exits 1 if any client failed. Without a terminal, `install` with no
 client lists clients and changes nothing, and `uninstall` with no client is a

@@ -1144,6 +1144,20 @@ def server_target(ctx: click.Context) -> mcp_install.Target:
     return target
 
 
+def quiet_target(ctx: click.Context) -> mcp_install.Target | None:
+    """The command install would register, or None; prints nothing."""
+    try:
+        target, _ = mcp_install.server_target(
+            ctx.meta.get("server_argv"),
+            os.environ,
+            Path.home(),
+            mcp_install.running_prefix(),
+        )
+    except mcp_install.InstallError:
+        return None
+    return target
+
+
 def refuse(ctx: click.Context, exc: mcp_install.InstallError) -> None:
     emit(ctx, {"error": str(exc), "code": exc.code})
     ctx.exit(1)
@@ -1274,10 +1288,11 @@ def mcp_uninstall(
     """
     found = mcp_clients()
     names = chosen_clients(clients)
+    target = quiet_target(ctx)
     if all_clients:
         names = list(found)
     if not names:
-        rows = mcp_install.list_clients(found, None)
+        rows = mcp_install.list_clients(found, target)
         registered = [r["client"] for r in rows if r["registered"]]
         where = ", ".join(
             f"{r['client']} ({', '.join(e['scope'] for e in r['registrations'])})"
@@ -1294,7 +1309,9 @@ def mcp_uninstall(
             raise click.UsageError("Sai is not registered with any client.")
         names = pick("Remove Sai from (numbers, names, or all)", registered)
     results = [
-        r for n in names for r in mcp_install.uninstall_client(found[n], scope, dry_run)
+        r
+        for n in names
+        for r in mcp_install.uninstall_client(found[n], scope, dry_run, target)
     ]
     finish(ctx, results)
 
