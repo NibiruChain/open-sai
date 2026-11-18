@@ -84,6 +84,12 @@ confirmation. Then call the `trade_*` tool with the preview's `previewDigest`
 unknown outcome, call `intent_local` and `intent_status`; never resubmit
 blindly.
 
+`auth_list` shows the connected accounts and which is active. Preview and
+trade tools act on the active account, or on another connected account
+passed as `address`. Name the account when you show a preview. Call
+`auth_use` only when the person asks to switch; it also changes the CLI's
+active account.
+
 ## Trading
 
 Trade commands are `trade open`, `trade close`, `trade partial-close`, and
