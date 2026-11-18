@@ -17,7 +17,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,10 +61,6 @@ class Registration:
     sai_home: str | None = None
     stale_env: tuple[str, ...] = ()
     disabled: bool = False
-    # Config file holding the entry, for scopes sai will not edit.
-    path: str | None = None
-    # True for an entry the client ignores, such as an untrusted Codex project.
-    inactive: bool = False
 
     def shown(self, target: Target | None) -> dict[str, Any]:
         """The argv to print: in full only when it is the expected command.
@@ -97,8 +92,6 @@ class Registration:
             "current": target is not None and self.matches(target),
             "effective": effective,
         }
-        if self.path is not None:
-            out["path"] = self.path
         if self.stale_env:
             out["staleEnv"] = list(self.stale_env)
         if self.disabled:
@@ -265,8 +258,6 @@ def entry_registration(
     entry: Any,
     scope: str,
     disabled: bool = False,
-    path: str | None = None,
-    inactive: bool = False,
 ) -> Registration | None:
     """Keep command, args, SAI_HOME, and other env names from a `sai` entry.
 
@@ -294,8 +285,16 @@ def entry_registration(
         home if isinstance(home, str) else None,
         tuple(sorted(stale)),
         disabled,
-        path,
-        inactive,
+    )
+
+
+def same_entry(a: Registration, b: Registration) -> bool:
+    """Equal apart from scope."""
+    return (a.argv, a.sai_home, a.stale_env, a.disabled) == (
+        b.argv,
+        b.sai_home,
+        b.stale_env,
+        b.disabled,
     )
 
 
@@ -390,10 +389,10 @@ class Client:
         return order.index(scope) if scope in order else len(order)
 
     def ordered(self, found: list[Registration]) -> list[Registration]:
-        return sorted(found, key=lambda r: (r.inactive, self.rank(r.scope)))
+        return sorted(found, key=lambda r: self.rank(r.scope))
 
     def effective(self, found: list[Registration]) -> Registration | None:
-        return found[0] if found and not found[0].inactive else None
+        return found[0] if found else None
 
     def registration(self, scope: str) -> Registration | None:
         return next((r for r in self.registrations() if r.scope == scope), None)
@@ -460,69 +459,33 @@ class Codex(Client):
     read_only_scopes = frozenset({"project"})
 
     def registrations(self) -> list[Registration]:
-        found = self.user_registration() + self.project_registration()
+        """The user entry, plus a project override when Codex reports one.
+
+        Codex decides which project configs load here (project root, trust),
+        so sai asks it twice instead of reading project files: once from
+        $CODEX_HOME for the user entry, once from the working directory for
+        the entry Codex would use here. A difference is a project override.
+        """
+        neutral = self.home_dir()
+        if not neutral.is_dir():
+            neutral = Path(tempfile.gettempdir())
+        user = self.get(neutral, "user")
+        found = [user] if user is not None else []
+        if self.cwd.resolve() != neutral.resolve():
+            here = self.get(self.cwd, "project")
+            if here is not None and (user is None or not same_entry(here, user)):
+                found.append(here)
         return self.ordered(found)
 
-    def user_config(self) -> dict[str, Any]:
-        try:
-            with (self.home_dir() / "config.toml").open("rb") as handle:
-                return tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError):
-            return {}
-
-    def trusted(self, directory: Path) -> bool | None:
-        """Whether Codex trusts a project directory; None when unknown."""
-        config = self.user_config()
-        projects = config.get("projects")
-        if not isinstance(projects, dict):
-            return None if not config else False
-        for candidate in (directory, *directory.parents):
-            entry = projects.get(str(candidate))
-            if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
-                return True
-        return False
-
-    def project_registration(self) -> list[Registration]:
-        """The nearest `.codex/config.toml` above cwd that defines sai.
-
-        Codex layers a trusted project's config over the user's, and `codex
-        mcp add|remove` edit only the user file, so sai only reports this one.
-        """
-        user_file = (self.home_dir() / "config.toml").resolve()
-        for directory in (self.cwd, *self.cwd.parents):
-            path = directory / ".codex" / "config.toml"
-            if not path.is_file() or path.resolve() == user_file:
-                continue
-            try:
-                with path.open("rb") as handle:
-                    data = tomllib.load(handle)
-            except (OSError, tomllib.TOMLDecodeError):
-                raise ClientError(f"could not read {path}") from None
-            table = data.get("mcp_servers")
-            entry = table.get(NAME) if isinstance(table, dict) else None
-            if not isinstance(entry, dict):
-                continue
-            trusted = self.trusted(directory)
-            found = entry_registration(
-                entry,
-                "project",
-                entry.get("enabled") is False,
-                str(path),
-                inactive=trusted is False,
-            )
-            return [found] if found is not None else []
-        return []
-
-    def user_registration(self) -> list[Registration]:
+    def get(self, cwd: Path, scope: str) -> Registration | None:
+        """Run `codex mcp get sai --json` from cwd; keep command and args."""
         exe = self.exe()
         if exe is None:
-            return []
-        # Run outside any project so a project config cannot answer instead.
-        home = self.home_dir()
+            return None
         try:
             done = subprocess.run(
                 [exe, "mcp", "get", NAME, "--json"],
-                cwd=home if home.is_dir() else tempfile.gettempdir(),
+                cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -533,7 +496,7 @@ class Codex(Client):
             raise ClientError(f"`codex mcp get` did not run: {type(exc).__name__}")
         if done.returncode != 0:
             if "no mcp server" in (done.stderr + done.stdout).lower():
-                return []
+                return None
             raise ClientError(
                 f"`codex mcp get` exited {done.returncode}:"
                 f" {first_line(done.stderr or done.stdout)}"
@@ -544,13 +507,13 @@ class Codex(Client):
             raise ClientError("`codex mcp get` printed something other than JSON")
         data = data if isinstance(data, dict) else {}
         disabled = data.get("enabled") is False
-        found = entry_registration(data.get("transport"), "user", disabled)
-        return [found] if found is not None else []
+        return entry_registration(data.get("transport"), scope, disabled)
 
-    def project_message(self, reg: Registration) -> str:
+    def project_message(self) -> str:
         return (
-            f"the sai entry in {reg.path} overrides the user entry in this"
-            " project; edit or remove it there, then run this again"
+            "Codex uses a project-level sai entry in this directory that"
+            " overrides the user entry; edit or remove it in the project's"
+            " .codex/config.toml, then run this again"
         )
 
     def check_scope(self, scope: str) -> None:
@@ -694,7 +657,7 @@ def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Re
             and not winner.matches(target)
         ):
             if winner.scope in client.read_only_scopes and isinstance(client, Codex):
-                raise ClientError(client.project_message(winner))
+                raise ClientError(client.project_message())
             result.shadowed_by = winner.scope
         if existing is not None and existing.matches(target):
             result.action = "unchanged"
@@ -725,21 +688,20 @@ def uninstall_client(
 ) -> list[Result]:
     """Remove sai from one scope, or from every scope it is registered in.
 
-    An effective entry in a scope sai does not edit is reported as failed
-    with its path, since removing the others leaves it running.
+    An effective entry in a scope sai does not edit is reported as failed,
+    since removing the others leaves it running.
     """
     try:
         found = client.registrations()
     except ClientError as exc:
         return [Result(client.name, "failed", scope=scope, error=str(exc))]
-    active = [r for r in found if not r.inactive]
     if scope is not None:
-        existing = next((r for r in active if r.scope == scope), None)
+        existing = next((r for r in found if r.scope == scope), None)
         results = [uninstall_one(client, scope, existing, dry_run, target)]
-    elif not active:
+    elif not found:
         return [Result(client.name, "absent")]
     else:
-        results = [uninstall_one(client, r.scope, r, dry_run, target) for r in active]
+        results = [uninstall_one(client, r.scope, r, dry_run, target) for r in found]
     winner = client.effective(found)
     done = {r.scope for r in results}
     if (
@@ -766,8 +728,7 @@ def uninstall_one(
         shown = existing.shown(target)
         result.command, result.args = shown["command"], shown.get("args")
         if scope in client.read_only_scopes and isinstance(client, Codex):
-            result.path = existing.path
-            raise ClientError(client.project_message(existing))
+            raise ClientError(client.project_message())
         if isinstance(client, Cursor):
             result.path = str(client.config_path(scope))
             steps: list[list[str]] = []

@@ -152,9 +152,11 @@ one. Output shows a registered command in full only when it is the one
 `install` would register; any other entry shows only its program name and
 `args: "<hidden>"`, since its args may hold a token or credential URL. A
 trusted Codex project's `.codex/config.toml` can define its own `sai` entry
-that overrides the user's. `list` reports it with scope `project` and its
-path, and `install` and `uninstall` fail for Codex with that path rather than
-edit project files. The Cursor edit re-reads the file just before the rename
+that overrides the user's. Codex decides which project configs load, so sai
+runs `codex mcp get sai --json` twice, from `$CODEX_HOME` for the user entry
+and from the working directory for the entry Codex uses there. When they
+differ, `list` reports a `project` entry as effective, and `install` and
+`uninstall` fail for Codex rather than edit project files. The Cursor edit re-reads the file just before the rename
 and merges again once if something else changed it. A plain file has no
 compare-and-swap, so a write in the instant between that re-read and the
 rename can still be lost. Results report `added`, `replaced`, `unchanged`, `removed`,

@@ -66,7 +66,12 @@ with open(os.environ["FAKE_LOG"], "a") as log:
 args = sys.argv[1:]
 path = Path(os.environ["CODEX_HOME"]) / "fake-state.json"
 state = json.loads(path.read_text()) if path.exists() else {}
-if args[:2] == ["mcp", "get"]:
+# Stands in for Codex's own project rules: a project entry Codex would load
+# from this directory is given in ./fake-codex-project.json.
+project = Path.cwd() / "fake-codex-project.json"
+if args[:2] == ["mcp", "get"] and project.exists():
+    print(json.dumps({"name": "sai", "enabled": True, "transport": json.loads(project.read_text())}))
+elif args[:2] == ["mcp", "get"]:
     if "sai" not in state:
         sys.stderr.write("Error: No MCP server named 'sai' found.\\n")
         sys.exit(1)
@@ -89,6 +94,11 @@ else:
     sys.exit(2)
 path.write_text(json.dumps(state))
 """
+
+
+# Codex is asked twice: from CODEX_HOME for the user entry, then from the
+# working directory for the entry it uses here.
+GETS = [["mcp", "get", "sai", "--json"]] * 2
 
 
 def write_exe(path: Path, body: str) -> Path:
@@ -177,7 +187,7 @@ def test_install_runs_each_clients_add_command(env: Env):
     sai = str(env.sai)
     assert env.calls() == [
         ["mcp", "add", "--scope", "user", "sai", "--", sai, "mcp", "serve"],
-        ["mcp", "get", "sai", "--json"],
+        *GETS,
         ["mcp", "add", "sai", "--", sai, "mcp", "serve"],
     ]
     assert env.claude_json()["mcpServers"]["sai"]["command"] == sai
@@ -193,7 +203,7 @@ def test_rerun_is_unchanged_and_runs_no_add(env: Env):
     assert result.exit_code == 0
     assert set(actions(result).values()) == {"unchanged"}
     assert payload(result)["reconnectNeeded"] is False
-    assert env.calls() == [["mcp", "get", "sai", "--json"]]
+    assert env.calls() == GETS
 
 
 def test_an_old_entry_is_removed_then_added(env: Env):
@@ -209,7 +219,7 @@ def test_an_old_entry_is_removed_then_added(env: Env):
     assert env.calls() == [
         ["mcp", "remove", "--scope", "user", "sai"],
         ["mcp", "add", "--scope", "user", "sai", "--", sai, "mcp", "serve"],
-        ["mcp", "get", "sai", "--json"],
+        *GETS,
         ["mcp", "remove", "sai"],
         ["mcp", "add", "sai", "--", sai, "mcp", "serve"],
     ]
@@ -230,8 +240,8 @@ def test_dry_run_runs_no_client_and_writes_nothing(env: Env):
         + ["--", str(env.sai), "mcp", "serve"]
     ]
     assert payload(result)["reconnectNeeded"] is False
-    # Only Codex's read-only `get` ran.
-    assert env.calls() == [["mcp", "get", "sai", "--json"]]
+    # Only Codex's read-only `get`s ran.
+    assert env.calls() == GETS
     assert not (env.home / ".claude.json").exists()
     assert not env.cursor_path().exists()
 
@@ -272,13 +282,13 @@ def test_uninstall_runs_remove_and_reports_absent(env: Env):
     }
     assert env.calls() == [
         ["mcp", "remove", "--scope", "user", "sai"],
-        ["mcp", "get", "sai", "--json"],
+        *GETS,
         ["mcp", "remove", "sai"],
     ]
     env.clear()
     again = invoke("mcp", "uninstall", "claude", "codex", "--dry-run")
     assert actions(again) == {"claude": "absent", "codex": "absent"}
-    assert env.calls() == [["mcp", "get", "sai", "--json"]]
+    assert env.calls() == GETS
 
 
 def test_uv_cache_path_is_refused(env: Env, monkeypatch: pytest.MonkeyPatch):
@@ -690,21 +700,14 @@ def test_registered_args_are_hidden_unless_they_are_the_expected_command(env: En
         assert "host.example" not in result.stdout + result.stderr
 
 
-def codex_project(env: Env, trusted: bool) -> Path:
-    path = env.project / ".codex" / "config.toml"
-    path.parent.mkdir()
-    path.write_text(
-        f'[mcp_servers.sai]\ncommand = "old-wrapper"\nargs = ["--token", "{SECRET}"]\n'
+def codex_project(env: Env, argv: list[str]) -> None:
+    (env.project / "fake-codex-project.json").write_text(
+        json.dumps({"type": "stdio", "command": argv[0], "args": argv[1:]})
     )
-    level = "trusted" if trusted else "untrusted"
-    (env.codex_home / "config.toml").write_text(
-        f'[projects."{env.project}"]\ntrust_level = "{level}"\n'
-    )
-    return path
 
 
-def test_codex_trusted_project_entry_is_effective_and_not_edited(env: Env):
-    path = codex_project(env, trusted=True)
+def test_codex_project_override_is_effective_and_not_edited(env: Env):
+    codex_project(env, ["old-wrapper", "--token", SECRET])
     listed = invoke("mcp", "list")
     row = payload(listed)["clients"][1]
     assert row["client"] == "codex"
@@ -716,36 +719,33 @@ def test_codex_trusted_project_entry_is_effective_and_not_edited(env: Env):
             "args": "<hidden>",
             "current": False,
             "effective": True,
-            "path": str(path),
         }
     ]
     install = invoke("mcp", "install", "codex")
     assert install.exit_code == 1
     result = payload(install)["results"][0]
     assert result["action"] == "failed"
-    assert str(path) in result["error"]
+    assert ".codex/config.toml" in result["error"]
     uninstall = invoke("mcp", "uninstall", "codex")
     assert uninstall.exit_code == 1
     got = payload(uninstall)["results"]
     assert [(r["scope"], r["action"]) for r in got] == [("project", "failed")]
-    assert str(path) in got[0]["error"]
-    # A user entry removed under a project override still reports the override.
+    # Removing only the user entry still reports the override.
     assert invoke("mcp", "uninstall", "codex", "--scope", "user").exit_code == 1
     assert [c for c in env.calls() if c[1] != "get"] == []
-    assert SECRET in path.read_text()
     for result in (listed, install, uninstall):
         assert SECRET not in result.stdout + result.stderr
 
 
-def test_codex_untrusted_project_entry_is_not_effective(env: Env):
-    codex_project(env, trusted=False)
+def test_codex_project_answer_equal_to_user_is_no_override(env: Env):
+    assert invoke("mcp", "install", "codex").exit_code == 0
+    codex_project(env, serve(env))
     row = payload(invoke("mcp", "list"))["clients"][1]
-    assert row["registrations"][0]["effective"] is False
-    assert row["current"] is False
-    result = invoke("mcp", "install", "codex")
-    assert actions(result) == {"codex": "added"}
-    row = payload(invoke("mcp", "list"))["clients"][1]
-    assert (row["scope"], row["current"]) == ("user", True)
+    assert [r["scope"] for r in row["registrations"]] == ["user"]
+    assert row["current"] is True
+    # Both gets ran: one from CODEX_HOME, one from the project directory.
+    gets = [c for c in env.calls() if c[1] == "get"]
+    assert len(gets) >= 2
 
 
 def test_shadowed_by_names_only_a_higher_precedence_scope(env: Env):
