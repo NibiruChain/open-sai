@@ -59,7 +59,12 @@ Trading needs a Sai session. There are two ways to get one:
   runs `cast wallet sign`, which asks for the keystore password.
 
 If you use the `ud` tool, `sai auth login --wallet NAME` signs with a ud
-wallet instead, without a prompt. `sai auth logout` deletes the stored session.
+wallet instead, without a prompt.
+
+You can connect several accounts. Each sign-in adds an account and makes it
+active. `sai auth list` shows them, `sai auth use ADDRESS` switches the active
+one, `sai --as ADDRESS ...` runs one command as another, and `sai auth logout
+[ADDRESS]` removes one.
 
 After connecting, commands run without prompts until the session expires. Know
 what the token is:
@@ -71,7 +76,7 @@ what the token is:
 - It cannot be revoked yet. Signing out of Sai Web does not sign out the CLI,
   and `sai auth logout` only deletes the local copy.
 
-The CLI stores the session in `~/.sai/trader/session.json` with mode 0600,
+The CLI stores sessions in `~/.sai/trader/sessions.json` with mode 0600,
 encrypted with a key built into the CLI, like the Cosmos SDK `test` keyring.
 That keeps the token out of plaintext files and grep, but anyone who can read
 your files can decrypt it. There is no session passphrase.
