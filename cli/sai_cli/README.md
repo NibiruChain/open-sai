@@ -121,8 +121,10 @@ sign-in or switch.
 
 ## MCP Server
 
-`sai mcp serve` runs the stdio MCP server for agent clients, for example
-`claude mcp add sai -- sai mcp serve`. A bare `sai mcp` prints help. The
+`sai mcp serve` runs the stdio MCP server for agent clients. Register it with
+`sai mcp install claude`, `codex`, or `cursor`, or `--all` for every detected
+client; `sai mcp list` and `sai mcp uninstall` show and remove registrations.
+A bare `sai mcp` prints help. The
 server writes only MCP messages to stdout and logs to stderr; run on a
 terminal, it prints one stderr line saying an agent client should launch it.
 `--endpoint`, `--ws-endpoint`, and `--lcd-endpoint` pick the network as the
@@ -130,9 +132,24 @@ top layer of [Settings](#settings), falling back to the same `sai` global
 flags, then `SAI_ENDPOINT`, `SAI_WS_ENDPOINT`, and `SAI_LCD_ENDPOINT`, then
 the config file, then mainnet. They resolve once, at start.
 
-It lists every tool regardless of sign-in. Each `trade_*` call checks the
-session of the account it acts as (the active one, or its `address`) before
-it rebuilds the preview: no session returns
+`install` registers the unresolved `sai` on `PATH` (normally the
+`~/.local/bin/sai` link that survives updates) as `<sai> mcp serve`, with no
+environment except `SAI_HOME` when it is set. It refuses a `sai` inside the uv
+cache with code `UNSTABLE_PATH`, and warns when the `sai` on `PATH` is not the
+install that is running. A server command after `--` replaces the default, for
+a dev checkout. Claude Code and Codex change through `claude mcp add|remove`
+and `codex mcp add|remove`; Cursor through an atomic edit of
+`~/.cursor/mcp.json` that keeps other servers and the file mode. Reads take
+only the `sai` entry's command and args, and never run `claude mcp get`, which
+starts the server. Results report `added`, `replaced`, `unchanged`, `removed`,
+`absent`, `failed`, or `planned` (with `--dry-run`) per client, and the
+command exits 1 if any client failed. Without a terminal, `install` with no
+client lists clients and changes nothing, and `uninstall` with no client is a
+usage error.
+
+The server lists every tool regardless of sign-in. Each `trade_*` call checks
+the session of the account it acts as (the active one, or its `address`)
+before it rebuilds the preview: no session returns
 `SIGNED_OUT`, an expired one `SESSION_EXPIRED`, and one for another endpoint
 or an unreadable file `SESSION_UNAVAILABLE`. Each message tells the agent to
 have the user run `sai auth login` or `sai auth import`. A signed-in trade
