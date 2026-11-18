@@ -315,20 +315,44 @@ def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
     """Sign in with the key named NAME.
 
     A ud wallet that can sign goes first, because ud keeps the password for
-    the keystore of the same name and signs without a prompt. Without one,
-    the Foundry keystore NAME signs through cast.
+    the keystore of the same name and signs without a prompt. If ud then
+    fails to sign, for example because the keystore has another password,
+    cast signs with the same keystore and asks for the password. Without a
+    ud wallet that can sign, the Foundry keystore NAME signs through cast.
+
+    When ud and the keystore hold different accounts under NAME, nothing
+    signs unless --addr picks the keystore's account.
     """
     if addr is not None and not keeper.is_address(addr):
         raise ValueError(f"Not an EVM addr: {addr}")
     found = keeper.ud_wallet(name)
+    has_keystore = keystore_path(name).is_file()
     if found is not None and found.can_sign:
         addr = checked_address(found.addr, addr)
-        return keeper.wallet_session(endpoint, addr, name)
-    if keystore_path(name).is_file():
+        try:
+            return keeper.wallet_session(endpoint, addr, name)
+        except keeper.SigningFailed as exc:
+            if not has_keystore:
+                raise
+            if not sys.stdin.isatty():
+                raise ValueError(
+                    f"ud could not sign with {name}. The Foundry keystore"
+                    f" ~/.foundry/keystores/{name} may have another password:"
+                    f" run `sai auth login {name}` in a terminal so cast can"
+                    " ask for it."
+                ) from exc
+            warn(
+                f"ud could not sign with {name}; signing with the Foundry"
+                f" keystore ~/.foundry/keystores/{name} instead."
+            )
+            return keeper.cast_session(endpoint, addr, name)
+    if has_keystore:
         # Check --addr before anything signs: from the keystore file when it
         # records the addr, otherwise from cast, which may ask for the
         # password.
         found_addr = keystore_addr(name) or keeper.cast_address(name)
+        if found is not None and found.addr.lower() != found_addr.lower():
+            addr = chosen_keystore_addr(name, found, found_addr, addr)
         addr = checked_address(found_addr, addr)
         return keeper.cast_session(endpoint, addr, name)
     if found is not None:
@@ -338,6 +362,32 @@ def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
         f" ~/.foundry/keystores/{name}. Run `cast wallet list` to see"
         " keystores, or connect with `sai auth import`."
     )
+
+
+def chosen_keystore_addr(
+    name: str, ud: keeper.UdWallet, keystore: str, addr: str | None
+) -> str:
+    """Return ADDR when it picks the keystore's account, or fail.
+
+    ud and the Foundry keystore hold different accounts under NAME, and ud
+    cannot sign with its own until the names stop colliding. sai never picks
+    one for the person.
+    """
+    both = (
+        f"{name} names two accounts: ud's wallet holds {ud.addr} and the"
+        f" Foundry keystore ~/.foundry/keystores/{name} holds {keystore}."
+    )
+    if addr is None:
+        raise ValueError(
+            f"{both} To sign in as the keystore's account, run `sai auth login"
+            f" {name} --addr {keystore}`. To sign in as ud's account,"
+            f" rename the keystore, then run `ud evm wallet sync {name}`."
+        )
+    if addr.lower() == ud.addr.lower():
+        raise ValueError(f"{both} {ud_state_hint(name, ud.cast_state)}")
+    if addr.lower() != keystore.lower():
+        raise ValueError(f"{both} --addr {addr} matches neither.")
+    return addr
 
 
 NO_CLIPBOARD = (
@@ -453,7 +503,7 @@ def auth_use(ctx: click.Context, addr: str) -> None:
     """Make the connected ADDR the active account.
 
     Commands without `--as` act on the active account. Sign in again to
-    connect a new one: `sai auth login` and `sai auth import` add accounts.
+    connect a new one: `sai auth login NAME` and `sai auth import` add accounts.
     """
     try:
         emit(ctx, {**sessions.summary(storage.use_session(addr)), "active": True})
@@ -1136,7 +1186,7 @@ def mcp_serve(
     """Serve Sai tools to an agent client over stdio.
 
     Stdout carries only MCP protocol messages. Every tool is listed; trade
-    tools submit only while an account is signed in with `sai auth login`
+    tools submit only while an account is signed in with `sai auth login NAME`
     or `sai auth import`. Endpoints resolve once, at start, like the CLI's:
     these flags, then SAI_* variables, then $SAI_HOME/config.toml.
     """

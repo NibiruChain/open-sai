@@ -126,7 +126,7 @@ sai mcp install claude -- uv run --directory /path/to/open-sai sai mcp serve
 ```
 
 The server lists every tool, trades included, whether or not you are signed in.
-Trading follows sign-in on each call. Sign in with `sai auth login` or `sai
+Trading follows sign-in on each call. Sign in with `sai auth login NAME` or `sai
 auth import` in a terminal, and the agent can submit trades; sign out with `sai
 auth logout`, and every `trade_*` call returns `SIGNED_OUT` without touching
 Keeper. An expired session returns `SESSION_EXPIRED`. The server reads the

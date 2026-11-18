@@ -33,6 +33,10 @@ class KeeperError(Exception):
     """Keeper rejected a query or transport failed."""
 
 
+class SigningFailed(KeeperError):
+    """The signing command did not run, exited with an error, or timed out."""
+
+
 class AdmissionRejected(KeeperError):
     """Keeper confirmed that admission was rejected."""
 
@@ -214,7 +218,7 @@ def signed_session(
                 timeout=300 if interactive else 120,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise KeeperError("Wallet signing failed") from exc
+            raise SigningFailed("Wallet signing failed") from exc
     signature = proc.stdout.strip()
     if not signature.startswith("0x") or len(signature) != 132:
         raise KeeperError("Wallet signer returned an invalid signature")

@@ -337,7 +337,7 @@ def test_passphrase_session_asks_to_sign_in_again(env: Env, envelope) -> None:
     code, stdout, stderr = env.run_tty("auth", "status", typed=[])
     assert code != 0
     assert "passphrase-encrypted" in stderr
-    assert "run `sai auth import` or `sai auth login` again" in stderr
+    assert "run `sai auth import` or `sai auth login NAME` again" in stderr
     assert "assphrase:" not in stderr
     assert stdout == ""
 
@@ -700,20 +700,27 @@ def test_login_without_a_key_named_name_says_where_it_looked(
 UD_SECRET = "ud-keystore-password"
 
 
-def fake_ud(env: Env, known: str = "dev", state: str = "matching") -> None:
-    """A ud that knows wallet KNOWN, whose Cast keystore is in STATE.
+def fake_ud(
+    env: Env,
+    known: str = "dev",
+    state: str = "matching",
+    addr: str = ADDR,
+    locked: bool = False,
+) -> None:
+    """A ud that knows wallet KNOWN as ADDR, whose Cast keystore is in STATE.
 
     `show` prints ud's real JSON shape, plus a log line and a secret on
     stderr, as a noisy real tool might. Like real ud, `run` signs only when
-    the state is `matching`.
+    the state is `matching`. With LOCKED, its password does not open the
+    keystore, so `run` fails even then.
     """
     shown = {
         "name": known,
-        "address": ADDR.upper().replace("0X", "0x"),
+        "address": addr.upper().replace("0X", "0x"),
         "notes": "",
         "cast": {
             "name": known,
-            "address": ADDR.upper().replace("0X", "0x"),
+            "address": addr.upper().replace("0X", "0x"),
             "state": state,
             "keystorePath": f"/keystores/{known}",
             "duplicateNames": [],
@@ -731,6 +738,8 @@ def fake_ud(env: Env, known: str = "dev", state: str = "matching") -> None:
         "['--', 'wallet', 'sign']:\n"
         f"    if {state!r} != 'matching':\n"
         "        sys.exit('wallet is not synchronized with Cast')\n"
+        f"    if {locked!r}:\n"
+        "        sys.exit('cast could not decrypt the keystore')\n"
         "    assert args[7:9] == ['--data', '--from-file']\n"
         "    data = json.load(open(args[-1]))\n"
         "    assert data['primaryType'] == 'UserTradingSession'\n"
@@ -878,3 +887,87 @@ def test_login_rejects_malformed_addr_before_signing(env: Env, keeper_auth) -> N
     assert "Not an EVM addr: 0xTYPO" in result.stderr
     assert "cast" not in env.log.read_text()
     assert keeper_auth["signatures"] == []
+
+
+def test_login_stops_when_ud_and_the_keystore_hold_different_accounts(
+    env: Env, keeper_auth
+) -> None:
+    # ud's `dev` is OTHER; the Foundry keystore `dev` holds ADDR.
+    fake_ud(env, state="name-conflict", addr=OTHER)
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode != 0
+    assert "dev names two accounts" in result.stderr
+    assert OTHER[2:].upper() in result.stderr and ADDR in result.stderr
+    assert f"sai auth login dev --addr {ADDR}" in result.stderr
+    assert "ud evm wallet sync dev" in result.stderr
+    assert "/cast " not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+    listed = env.run("--json", "auth", "list")
+    assert ADDR not in listed.stdout
+
+
+def test_addr_picks_the_keystore_account_in_a_name_conflict(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env, state="name-conflict", addr=OTHER)
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    # ud cannot sign with its own account while the names collide.
+    as_ud = login(env, keeper_auth, "dev", "--addr", OTHER)
+    assert as_ud.returncode != 0
+    assert "Cast keystore state name-conflict" in as_ud.stderr
+    neither = login(env, keeper_auth, "dev", "--addr", "0x" + "d" * 40)
+    assert neither.returncode != 0
+    assert "matches neither" in neither.stderr
+    assert "wallet sign" not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+
+    picked = login(env, keeper_auth, "dev", "--addr", ADDR)
+    assert picked.returncode == 0, picked.stderr
+    assert json.loads(picked.stdout)["addr"] == ADDR
+    calls = env.log.read_text()
+    assert " wallet sign --account dev --data --from-file " in calls
+    assert "wallet run" not in calls
+
+
+def test_cast_signs_in_a_terminal_when_ud_cannot_unlock_the_keystore(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env, locked=True)
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    args = ("--json", "--endpoint", keeper_auth["endpoint"], "auth", "login", "dev")
+    code, out, err = env.run_tty(*args, typed=[])
+    assert code == 0, err
+    assert json.loads(out)["addr"] == ADDR
+    assert "ud could not sign with dev" in err
+    calls = env.log.read_text().splitlines()
+    assert " evm wallet run dev -- wallet sign " in calls[1]
+    assert " wallet sign --account dev --data --from-file " in calls[2]
+    assert keeper_auth["signatures"] == [{"signature": SIGNATURE, "challenge": NONCE}]
+
+
+def test_ud_signing_failure_without_a_terminal_says_to_use_one(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env, locked=True)
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode != 0
+    assert "run `sai auth login dev` in a terminal" in result.stderr
+    assert "/cast " not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+
+
+def test_ud_signing_failure_without_a_keystore_file_fails(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env, locked=True)
+    fake_cast(env)
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode != 0
+    assert "Wallet signing failed" in result.stderr
+    assert "/cast " not in env.log.read_text()

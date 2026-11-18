@@ -84,7 +84,7 @@ of Sai Web does not sign out the CLI.
 The CLI encrypts the stored session with a key built into the CLI and never
 prompts for a passphrase. If it reports a passphrase-encrypted session from an
 older version, ask the person to sign in again with `sai auth import` or `sai
-auth login`.
+auth login NAME`.
 
 ## MCP Server
 

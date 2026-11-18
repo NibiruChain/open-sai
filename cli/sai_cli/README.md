@@ -80,12 +80,19 @@ challenge nonce.
 - If the `ud` tool is on `PATH` and `ud evm wallet show NAME` reports a
   wallet whose Cast keystore is `matching`, the CLI signs with `ud evm
   wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
-  prompt. ud holds the password for the keystore of the same name.
+  prompt. ud holds the password for the keystore of the same name. If ud
+  fails to sign, for example because the keystore has another password, the
+  CLI signs with `cast` instead when run in a terminal, and `cast` asks for
+  the password.
 - Otherwise it uses the Foundry keystore `~/.foundry/keystores/NAME`. It
   reads the addr from the keystore file (or `cast wallet address --account
   NAME` if the file has none) and runs `cast wallet sign --account NAME
   --data --from-file PATH` on your terminal, where `cast` prompts for the
   keystore password.
+- If ud and the keystore hold different accounts under `NAME`, it stops
+  before signing and names both. `--addr` with the keystore's addr signs in
+  as that account. ud cannot sign with its own until the keystore is renamed
+  and `ud evm wallet sync NAME` has run.
 - With neither, it stops and names where it looked.
 
 `--addr ADDR` is optional. The CLI refuses to sign when ud or the keystore
@@ -120,7 +127,7 @@ encrypted by AES-GCM with a fixed key built into the CLI, like the Cosmos SDK
 This only keeps the token out of plaintext; anyone who can read the file and
 this source can decrypt it. Older versions could encrypt the session with a
 passphrase. The CLI refuses those files and asks you to run `sai auth import`
-or `sai auth login` again. A single-account `session.json` from before
+or `sai auth login NAME` again. A single-account `session.json` from before
 multiple accounts still loads and moves into `sessions.json` at the next
 sign-in or switch.
 
@@ -185,7 +192,7 @@ the session of the account it acts as (the active one, or its `addr`)
 before it rebuilds the preview: no session returns
 `SIGNED_OUT`, an expired one `SESSION_EXPIRED`, and one for another endpoint
 or an unreadable file `SESSION_UNAVAILABLE`. Each message tells the agent to
-have the user run `sai auth login` or `sai auth import`. A signed-in trade
+have the user run `sai auth login NAME` or `sai auth import`. A signed-in trade
 still needs the `previewDigest` of the preview the user confirmed.
 
 ## Commands

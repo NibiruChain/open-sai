@@ -45,8 +45,8 @@ _AAD = b"sai-sessions-v3"
 # Version 2 held one session; it is read once and rewritten as version 3.
 _V2_AAD = b"sai-session-v2-test"
 
-SIGN_IN_AGAIN = "run `sai auth import` or `sai auth login` again"
-NO_SESSION = "No Sai session; run `sai auth import` or `sai auth login`"
+SIGN_IN_AGAIN = "run `sai auth import` or `sai auth login NAME` again"
+NO_SESSION = "No Sai session; run `sai auth import` or `sai auth login NAME`"
 SESSION_FIELDS = ("token", "evmAddress", "expiresAt")
 # What delete_session reports after deleting a store it could not read.
 UNREADABLE_REMOVED = "unreadable session file"
@@ -198,7 +198,7 @@ def _find(accounts: dict[str, Any], addr: str) -> str:
     if key not in accounts["sessions"]:
         raise ValueError(
             f"{addr} is not connected; run `sai auth list` to see connected"
-            " accounts, or sign in with `sai auth login` or `sai auth import`"
+            " accounts, or sign in with `sai auth login NAME` or `sai auth import`"
         )
     return key
 
