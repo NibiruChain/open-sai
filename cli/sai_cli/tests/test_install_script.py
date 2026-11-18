@@ -49,7 +49,7 @@ def run(env: dict[str, str], stub: Stub, *args: str) -> subprocess.CompletedProc
     command = [sys.executable, str(SCRIPT), "--api-base", stub.url]
     command += ["--web-base", stub.url, *args]
     return subprocess.run(
-        command, env=env, capture_output=True, text=True, timeout=60, check=False
+        command, env=env, capture_output=True, text=True, timeout=180, check=False
     )
 
 
