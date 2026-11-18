@@ -155,13 +155,17 @@ trusted Codex project's `.codex/config.toml` can define its own `sai` entry
 that overrides the user's. Codex decides which project configs load, so sai
 runs `codex mcp get sai --json` twice, from `$CODEX_HOME` for the user entry
 and from the working directory for the entry Codex uses there. When they
-differ (compared in full, env values and URL included, by hash), `list`
+differ (compared by a hash of everything Codex reports for the server, env values,
+URL, and tool filters included), `list`
 reports a `project` entry as effective, and `install` and `uninstall` fail
 for Codex rather than edit project files. After each change sai reads the
 client again: the entry must match, or be gone, and for Codex the answer from
 the working directory must agree too. Otherwise the client fails with "a
 project .codex/config.toml entry is still active", which catches a project
-entry identical to the user one. The Cursor edit re-reads the file just before the rename
+entry identical to the user one. An entry with a Codex tool filter
+(`enabled_tools` or `disabled_tools`) lists it under `extraSettings` and is not
+current. `reconnectNeeded` is true whenever a client config was written, even
+if the check afterwards failed. The Cursor edit re-reads the file just before the rename
 and merges again once if something else changed it. A plain file has no
 compare-and-swap, so a write in the instant between that re-read and the
 rename can still be lost. Results report `added`, `replaced`, `unchanged`, `removed`,

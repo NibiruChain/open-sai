@@ -70,7 +70,10 @@ state = json.loads(path.read_text()) if path.exists() else {}
 # from this directory is given in ./fake-codex-project.json.
 project = Path.cwd() / "fake-codex-project.json"
 if args[:2] == ["mcp", "get"] and project.exists():
-    print(json.dumps({"name": "sai", "enabled": True, "transport": json.loads(project.read_text())}))
+    data = json.loads(project.read_text())
+    if "transport" not in data:
+        data = {"transport": data}
+    print(json.dumps({"name": "sai", "enabled": True, **data}))
 elif args[:2] == ["mcp", "get"]:
     if "sai" not in state:
         sys.stderr.write("Error: No MCP server named 'sai' found.\\n")
@@ -810,6 +813,8 @@ def test_codex_identical_project_entry_fails_the_post_check(env: Env):
     result = payload(uninstall)["results"][0]
     assert (result["scope"], result["action"]) == ("user", "failed")
     assert result["error"] == "a project .codex/config.toml entry is still active"
+    # The user entry was removed, so clients elsewhere need to reconnect.
+    assert payload(uninstall)["reconnectNeeded"] is True
     codex_user(env, old)
     install = invoke("mcp", "install", "codex")
     assert install.exit_code == 1
@@ -827,3 +832,35 @@ def test_claude_post_check_catches_an_add_that_did_not_land(env: Env):
     assert payload(result)["results"][0]["error"] == (
         "claude does not show the new sai entry"
     )
+
+
+def test_codex_project_tool_filter_is_an_override(env: Env):
+    """Same transport, but the project limits which Sai tools Codex offers."""
+    codex_user(env, serve(env))
+    (env.project / "fake-codex-project.json").write_text(
+        json.dumps(
+            {"transport": codex_transport(serve(env)), "enabled_tools": ["market_list"]}
+        )
+    )
+    row = payload(invoke("mcp", "list"))["clients"][1]
+    assert row["registrations"][0]["scope"] == "project"
+    assert row["registrations"][0]["extraSettings"] == ["enabled_tools"]
+    assert row["current"] is False
+    result = invoke("mcp", "install", "codex")
+    assert result.exit_code == 1
+    assert actions(result) == {"codex": "failed"}
+    assert payload(result)["reconnectNeeded"] is False
+
+
+def test_reconnect_is_needed_when_a_remove_ran_before_a_failed_add(env: Env):
+    (env.home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"sai": claude_entry([OLD_COMMAND])}})
+    )
+    fails_add = FAKE_CLAUDE.replace(
+        "args = sys.argv[1:]\n",
+        "args = sys.argv[1:]\nif args[1] == 'add':\n    sys.exit(3)\n",
+    )
+    write_exe(env.bin / "claude", fails_add)
+    result = invoke("mcp", "install", "claude")
+    assert actions(result) == {"claude": "failed"}
+    assert payload(result)["reconnectNeeded"] is True

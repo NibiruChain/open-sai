@@ -25,6 +25,7 @@ from typing import Any
 
 NAME = "sai"
 HIDDEN = "<hidden>"
+CODEX_TOOL_FILTERS = ("enabled_tools", "disabled_tools")
 STILL_ACTIVE = "a project .codex/config.toml entry is still active"
 CLIENTS = ("claude", "codex", "cursor")
 ALIASES = {"claude-code": "claude", "claude_code": "claude"}
@@ -63,6 +64,9 @@ class Registration:
     sai_home: str | None = None
     stale_env: tuple[str, ...] = ()
     disabled: bool = False
+    # Names of settings that change what the server offers, such as a Codex
+    # tool allowlist; install sets none, so an entry with any is not current.
+    extra_settings: tuple[str, ...] = ()
     # Hash of the whole entry (env values, URL, and all), so two entries can
     # be compared without keeping or printing their values.
     fingerprint: str = ""
@@ -87,6 +91,7 @@ class Registration:
             self.argv == target.argv
             and self.sai_home == target.env.get("SAI_HOME")
             and not self.stale_env
+            and not self.extra_settings
             and not self.disabled
         )
 
@@ -99,6 +104,8 @@ class Registration:
         }
         if self.stale_env:
             out["staleEnv"] = list(self.stale_env)
+        if self.extra_settings:
+            out["extraSettings"] = list(self.extra_settings)
         if self.disabled:
             out["disabled"] = True
         return out
@@ -116,6 +123,8 @@ class Result:
     error: str | None = None
     scope: str | None = None
     shadowed_by: str | None = None
+    # A client config was written, even if the check afterwards failed.
+    changed: bool = False
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"client": self.client, "action": self.action}
@@ -263,15 +272,20 @@ def entry_registration(
     entry: Any,
     scope: str,
     disabled: bool = False,
+    whole: Any = None,
+    extra_settings: tuple[str, ...] = (),
 ) -> Registration | None:
     """Keep command, args, SAI_HOME, and other env names from a `sai` entry.
 
     Other env values are never kept. Codex `env_vars` (variables passed
-    through from the client's environment) count as other env too.
+    through from the client's environment) count as other env too. The
+    fingerprint hashes `whole`, everything the client reported for the
+    server, or the entry itself when that is all there is.
     """
     if not isinstance(entry, dict):
         return None
-    canonical = json.dumps([entry, disabled], sort_keys=True, default=str)
+    hashed = entry if whole is None else whole
+    canonical = json.dumps([hashed, disabled], sort_keys=True, default=str)
     fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
     command = entry.get("command")
     args = entry.get("args") or []
@@ -292,6 +306,7 @@ def entry_registration(
         home if isinstance(home, str) else None,
         tuple(sorted(stale)),
         disabled,
+        extra_settings,
         fingerprint,
     )
 
@@ -414,10 +429,6 @@ class Client:
         if target is None and reg is not None:
             raise ClientError(f"{self.name} still shows the sai entry")
 
-    def apply(self, steps: list[list[str]]) -> None:
-        for argv in steps:
-            run(argv)
-
 
 class Claude(Client):
     name = "claude"
@@ -535,7 +546,10 @@ class Codex(Client):
             raise ClientError("`codex mcp get` printed something other than JSON")
         data = data if isinstance(data, dict) else {}
         disabled = data.get("enabled") is False
-        return entry_registration(data.get("transport"), scope, disabled)
+        extras = tuple(k for k in CODEX_TOOL_FILTERS if data.get(k) is not None)
+        return entry_registration(
+            data.get("transport"), scope, disabled, whole=data, extra_settings=extras
+        )
 
     def project_message(self) -> str:
         return (
@@ -667,6 +681,8 @@ def list_clients(
                 row["args"] = shown["args"]
             if reg.stale_env:
                 row["staleEnv"] = list(reg.stale_env)
+            if reg.extra_settings:
+                row["extraSettings"] = list(reg.extra_settings)
             if reg.disabled:
                 row["disabled"] = True
         rows.append(row)
@@ -704,7 +720,12 @@ def install_one(client: Client, scope: str, target: Target, dry_run: bool) -> Re
         if isinstance(client, Cursor):
             client.write(scope, target)
         else:
-            client.apply(steps)
+            for argv in steps:
+                run(argv)
+                # Set per step: a remove that ran before a failed add still
+                # changed the client.
+                result.changed = True
+        result.changed = True
         client.verify(scope, target)
         result.action = action
     except (ClientError, OSError) as exc:
@@ -770,7 +791,12 @@ def uninstall_one(
         if isinstance(client, Cursor):
             client.write(scope, None)
         else:
-            client.apply(steps)
+            for argv in steps:
+                run(argv)
+                # Set per step: a remove that ran before a failed add still
+                # changed the client.
+                result.changed = True
+        result.changed = True
         client.verify(scope, None)
         result.action = "removed"
     except (ClientError, OSError) as exc:
@@ -779,10 +805,9 @@ def uninstall_one(
 
 
 def summarize(results: list[Result]) -> dict[str, Any]:
-    changed = {"added", "replaced", "removed"}
     return {
         "results": [r.to_json() for r in results],
-        "reconnectNeeded": any(r.action in changed for r in results),
+        "reconnectNeeded": any(r.changed for r in results),
     }
 
 
