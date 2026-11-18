@@ -898,6 +898,91 @@ def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch
     assert fake.submitted == []
 
 
+MARKET_OPEN = {**OPEN_ARGS, "order_type": "market", "price": None}
+
+
+def test_preview_with_no_account_never_authorizes_a_trade(mcp, monkeypatch):
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_OPEN)
+    assert preview["account"] is None
+    storage.save_session(stored_session())
+    error = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_OPEN,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+            "allow_concurrent_open": True,
+        },
+    )
+    assert error["code"] == "PREVIEW_MISMATCH"
+    assert error["preview"]["account"] == ADDRESS
+    assert fake.submitted == []
+
+
+def test_logout_during_the_price_refresh_refuses_the_trade(mcp, monkeypatch):
+    """A signed-out preview, then sign-in, then logout while the market
+    price refreshes: the trade must not submit with the session it loaded
+    before the logout."""
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_OPEN)
+    assert preview["account"] is None
+    storage.save_session(stored_session())
+
+    def logout_on_refresh(endpoint, query, variables=None, token=None):
+        if query == keeper.MARKETS:
+            storage.delete_session()
+        return fake(endpoint, query, variables, token)
+
+    monkeypatch.setattr(keeper, "request", logout_on_refresh)
+    error = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_OPEN,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+            "allow_concurrent_open": True,
+        },
+    )
+    assert error["code"] == "SIGNED_OUT"
+    assert "`sai auth login` or `sai auth import`" in error["error"]
+    assert any(query == keeper.MARKETS for query, _ in fake.calls[1:])
+    assert fake.submitted == []
+
+
+def test_logout_during_the_refresh_refuses_a_confirmed_signed_in_trade(
+    mcp, monkeypatch
+):
+    storage.save_session(stored_session())
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    preview = invoke(mcp, "preview_open", MARKET_OPEN)
+    assert preview["account"] == ADDRESS
+
+    def logout_on_refresh(endpoint, query, variables=None, token=None):
+        if query == keeper.MARKETS:
+            storage.delete_session()
+        return fake(endpoint, query, variables, token)
+
+    monkeypatch.setattr(keeper, "request", logout_on_refresh)
+    error = invoke(
+        mcp,
+        "trade_open",
+        {
+            **MARKET_OPEN,
+            "preview_digest": preview["previewDigest"],
+            "reference_price": preview["referencePrice"],
+            "allow_concurrent_open": True,
+        },
+    )
+    assert error["code"] == "SIGNED_OUT"
+    assert fake.submitted == []
+
+
 def test_preview_for_an_unconnected_account_fails(mcp, monkeypatch):
     connect_two_accounts()
     monkeypatch.setattr(keeper, "request", FakeKeeper())

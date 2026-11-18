@@ -473,10 +473,15 @@ def bound(
 ) -> trading.SubmitCheck:
     """Return a check that refuses any intent but the confirmed one.
 
-    The digest is recomputed for the signed-in account and, for a market
-    open, with the caller's REFERENCE_PRICE, so a changed account or
-    reference needs a new confirmation. It then refuses a market open whose
-    refreshed price moved from REFERENCE_PRICE by more than SLIPPAGE percent.
+    The check runs right before the Keeper submit, after any price refresh.
+    It loads the trade's pinned account strictly, so a logout or expiry
+    since the trade started refuses with the sign-in error instead of
+    falling back to no account. The digest is then recomputed for that
+    account and, for a market open, with the caller's REFERENCE_PRICE, so a
+    changed account or reference needs a new confirmation, and a preview
+    confirmed with no account can never match. Last, it refuses a market
+    open whose refreshed price moved from REFERENCE_PRICE by more than
+    SLIPPAGE percent.
     """
     if not digest:
         raise ValueError(NEEDS_DIGEST)
@@ -487,7 +492,9 @@ def bound(
     )
 
     def check(preview: dict[str, Any]) -> None:
-        fresh = with_digest({**preview, "account": load.account()})
+        # Strict: never None, and SessionUnavailable propagates.
+        account = load()["evmAddress"]
+        fresh = with_digest({**preview, "account": account})
         confirmed = (
             fresh
             if reference is None
