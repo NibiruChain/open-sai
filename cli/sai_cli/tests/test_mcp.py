@@ -1273,7 +1273,7 @@ def test_mcp_info_reports_versions_without_network(mcp, monkeypatch):
     assert info["restartNeeded"] is False
     assert info["latestVersion"] is None
 
-    update.write_cache(update.Cache("v9.8.7", update.now()))
+    update.write_cache(update.Cache("sai-cli/v9.8.7", update.now()))
     # A process started before a reinstall still runs its old version.
     monkeypatch.setattr(sai_info, "RUNNING_VERSION", "0.0.1")
     info = invoke(mcp, "mcp_info")

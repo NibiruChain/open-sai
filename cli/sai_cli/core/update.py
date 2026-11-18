@@ -1,8 +1,10 @@
 """Read-only update support: release tags, the latest release, install kind,
 and the cached check result.
 
-Nothing here installs anything. Release tags are `vMAJOR.MINOR.PATCH`;
-pre-release tags such as `v0.2.0-rc.1` never count as the latest version.
+Nothing here installs anything. Release tags are `sai-cli/vMAJOR.MINOR.PATCH`,
+so other components of the repository can release under their own prefixes.
+Pre-release tags such as `sai-cli/v0.2.0-rc.1` never count as the latest
+version.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -26,6 +28,11 @@ REPO = "SaiDotFun/open-sai"
 API_BASE = "https://api.github.com"
 WEB_BASE = "https://github.com"
 GIT_URL = f"https://github.com/{REPO}"
+TAG_PREFIX = "sai-cli/v"
+# Installs the newest release; scripts/install.py in this repository.
+INSTALL_COMMAND = (
+    f"uv run https://raw.githubusercontent.com/{REPO}/main/scripts/install.py"
+)
 # The check runs in the background, so the budget is generous; it is still a
 # hard wall-clock limit.
 CONNECT_TIMEOUT = 10.0
@@ -33,8 +40,13 @@ TOTAL_TIMEOUT = 30.0
 CACHE_SCHEMA = 1
 # GitHub's API limits unauthenticated clients; the web redirect is not metered.
 FALLBACK_STATUSES = frozenset({403, 429})
+# Releases are listed newest first. Other components share the list, so read
+# a few pages before deciding sai-cli has no release.
+PAGE_SIZE = 30
+MAX_PAGES = 4
 
-_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+_TAG = re.compile(rf"^{re.escape(TAG_PREFIX)}(\d+)\.(\d+)\.(\d+)$")
+_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 Version = tuple[int, int, int]
 
@@ -43,9 +55,13 @@ class UpdateError(Exception):
     """The latest release could not be determined."""
 
 
+class NoRelease(UpdateError):
+    """The repository has no sai-cli release yet."""
+
+
 def parse_tag(tag: str) -> Version | None:
-    """Return the version of a release tag, or None for anything else,
-    including pre-release tags."""
+    """Return the version of a sai-cli release tag, or None for anything else,
+    including pre-release tags and other components' tags."""
     match = _TAG.match(tag)
     if match is None:
         return None
@@ -55,7 +71,21 @@ def parse_tag(tag: str) -> Version | None:
 
 def parse_version(text: str) -> Version | None:
     """Return the version of a plain `X.Y.Z` package version, or None."""
-    return parse_tag(f"v{text}")
+    match = _VERSION.match(text)
+    if match is None:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
+
+
+def tag_for(version: str) -> str:
+    """The release tag of package version VERSION."""
+    return f"{TAG_PREFIX}{version}"
+
+
+def tag_version(tag: str) -> str:
+    """The package version a release tag names: `sai-cli/v0.2.0` is `0.2.0`."""
+    return tag.removeprefix(TAG_PREFIX)
 
 
 def is_newer(latest: str, installed: str) -> bool:
@@ -68,7 +98,35 @@ def is_newer(latest: str, installed: str) -> bool:
     return new is not None and old is not None and new > old
 
 
-# Latest release
+# Releases
+
+
+@dataclass(frozen=True)
+class Release:
+    """A published sai-cli release and where its files download from."""
+
+    tag: str
+    wheel_url: str
+    sums_url: str
+
+    @property
+    def version(self) -> str:
+        return tag_version(self.tag)
+
+
+def wheel_name(version: str) -> str:
+    """The wheel file a release of VERSION attaches. sai-cli is pure Python,
+    so every platform shares one wheel."""
+    return f"sai_cli-{version}-py3-none-any.whl"
+
+
+def release_for(tag: str, web_base: str = WEB_BASE, repo: str = REPO) -> Release:
+    """Build the release of TAG with its download URLs.
+
+    The URLs come from the tag alone, never from a URL an API answer names.
+    """
+    base = f"{web_base.rstrip('/')}/{repo}/releases/download/{quote(tag)}"
+    return Release(tag, f"{base}/{wheel_name(tag_version(tag))}", f"{base}/SHA256SUMS")
 
 
 def _headers() -> dict[str, str]:
@@ -81,13 +139,15 @@ def _headers() -> dict[str, str]:
 
 def _checked(tag: Any) -> str:
     if not isinstance(tag, str) or parse_tag(tag) is None:
-        raise UpdateError(f"latest release tag {tag!r} is not vMAJOR.MINOR.PATCH")
+        raise UpdateError(f"latest release tag {tag!r} is not {TAG_PREFIX}X.Y.Z")
     return tag
 
 
-# The API answer is a few kilobytes; refuse anything far larger.
-MAX_BODY = 1 << 20
+# A page of releases with long notes can reach a few hundred kilobytes;
+# refuse anything far larger.
+MAX_BODY = 4 << 20
 TIMED_OUT = "timed out checking the latest release"
+NO_RELEASE = "no sai-cli release is published yet"
 
 
 def _timeout(deadline: float, connect: float) -> httpx.Timeout:
@@ -109,40 +169,88 @@ def _read_body(response: httpx.Response, deadline: float) -> bytes:
     return bytes(body)
 
 
-def _from_api(
-    client: httpx.Client, url: str, deadline: float, connect: float
-) -> str | None:
-    """Return the tag from the API, or None when the fallback should run."""
-    with client.stream("GET", url, timeout=_timeout(deadline, connect)) as response:
+def latest_tag(releases: list[Any]) -> str | None:
+    """Return the highest sai-cli release tag in RELEASES, or None.
+
+    Drafts, pre-releases, and tags of other components do not count.
+    """
+    best: tuple[Version, str] | None = None
+    for item in releases:
+        if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
+            continue
+        tag = item.get("tag_name")
+        version = parse_tag(tag) if isinstance(tag, str) else None
+        if version is not None and (best is None or version > best[0]):
+            best = (version, tag)
+    return best[1] if best else None
+
+
+def _page(
+    client: httpx.Client, url: str, page: int, deadline: float, connect: float
+) -> list[Any] | None:
+    """Return one page of releases, or None when the fallback should run."""
+    params = {"per_page": PAGE_SIZE, "page": page}
+    timeout = _timeout(deadline, connect)
+    with client.stream("GET", url, params=params, timeout=timeout) as response:
         status = response.status_code
         if status in FALLBACK_STATUSES or status >= 500:
             return None
-        if status == 404:
-            raise UpdateError("no release is published yet")
         if status != 200:
             raise UpdateError(f"GitHub API answered HTTP {status}")
         body = _read_body(response, deadline)
     try:
-        return _checked(json.loads(body).get("tag_name"))
-    except (ValueError, AttributeError) as exc:
+        releases = json.loads(body)
+    except ValueError as exc:
         raise UpdateError("GitHub API answered with malformed JSON") from exc
+    if not isinstance(releases, list):
+        raise UpdateError("GitHub API answered with malformed JSON")
+    return releases
+
+
+def _from_api(
+    client: httpx.Client, url: str, deadline: float, connect: float
+) -> str | None:
+    """Return the highest sai-cli tag in the release list, or None when the
+    fallback should run.
+
+    The list is newest first, so the pages stop at the first one that holds a
+    sai-cli release; an older page cannot hold a higher version unless a
+    lower version was released after it.
+    """
+    for page in range(1, MAX_PAGES + 1):
+        releases = _page(client, url, page, deadline, connect)
+        if releases is None:
+            return None
+        tag = latest_tag(releases)
+        if tag is not None:
+            return tag
+        if len(releases) < PAGE_SIZE:
+            break
+    raise NoRelease(NO_RELEASE)
 
 
 def _from_redirect(
     client: httpx.Client, url: str, deadline: float, connect: float
 ) -> str:
-    """Read the tag from the Location of the web /releases/latest redirect."""
+    """Read the tag from the Location of the web /releases/latest redirect.
+
+    That page follows GitHub's single latest release. When another component
+    released last, the redirect names its tag and this fails; the next check
+    that reaches the API finds the sai-cli release.
+    """
     response = client.head(url, timeout=_timeout(deadline, connect))
     location = response.headers.get("location")
     if not response.is_redirect or not location:
         raise UpdateError(
             f"release page answered HTTP {response.status_code} without a redirect"
         )
-    path = urlsplit(location).path.rstrip("/")
-    prefix, _, tag = path.rpartition("/")
-    if not prefix.endswith("/releases/tag"):
+    path = unquote(urlsplit(location).path).rstrip("/")
+    if path.endswith("/releases"):
+        raise NoRelease(NO_RELEASE)
+    _, marker, tag = path.partition("/releases/tag/")
+    if not marker:
         raise UpdateError("release page redirected away from a release tag")
-    return _checked(unquote(tag))
+    return _checked(tag)
 
 
 def _fetch(api: str, web: str, deadline: float, connect: float) -> str:
@@ -164,17 +272,21 @@ def fetch_latest(
     repo: str = REPO,
     connect_timeout: float = CONNECT_TIMEOUT,
     total_timeout: float = TOTAL_TIMEOUT,
-) -> str:
-    """Return the latest release tag of REPO.
+) -> Release:
+    """Return the latest sai-cli release of REPO.
 
-    Asks the API first and falls back to the web redirect on 403, 429, or a
-    5xx. Both requests share one TOTAL_TIMEOUT wall-clock budget. HTTPX
-    timeouts apply per network operation, so a server that sends a byte at a
-    time could outlast them; the lookup runs in a daemon thread that the
-    caller stops waiting for at the deadline.
+    Lists the releases through the API and takes the highest `sai-cli/v*` tag
+    that is not a pre-release. GitHub's own "latest" is one release for the
+    whole repository, so it is only the fallback, on 403, 429, or a 5xx.
+    Raises NoRelease when sai-cli has no release yet.
+
+    All requests share one TOTAL_TIMEOUT wall-clock budget. HTTPX timeouts
+    apply per network operation, so a server that sends a byte at a time
+    could outlast them; the lookup runs in a daemon thread that the caller
+    stops waiting for at the deadline.
     """
     deadline = time.monotonic() + total_timeout
-    api = f"{api_base.rstrip('/')}/repos/{repo}/releases/latest"
+    api = f"{api_base.rstrip('/')}/repos/{repo}/releases"
     web = f"{web_base.rstrip('/')}/{repo}/releases/latest"
     outcome: dict[str, str | Exception] = {}
 
@@ -194,12 +306,13 @@ def fetch_latest(
         raise error
     tag = outcome.get("tag")
     assert isinstance(tag, str)
-    return tag
+    return release_for(tag, web_base, repo)
 
 
 # Install kind
 
 CHECKOUT = "checkout"
+UV_TOOL_RELEASE = "uv-tool-release"
 UV_TOOL_GIT = "uv-tool-git"
 UV_TOOL_OTHER = "uv-tool-other"
 UVX = "uvx"
@@ -210,8 +323,9 @@ OTHER = "other"
 class Install:
     """How this copy of sai-cli was installed.
 
-    Only UV_TOOL_GIT, a `uv tool install` from this repository on GitHub,
-    can be updated in place by a later release of `sai update`.
+    Only an official install can be updated in place by a later release of
+    `sai update`: a `uv tool install` of a release wheel (UV_TOOL_RELEASE) or
+    of this repository's Git source (UV_TOOL_GIT).
     """
 
     kind: str
@@ -219,6 +333,10 @@ class Install:
     url: str | None = None
     commit: str | None = None
     requested: str | None = None
+
+    @property
+    def official(self) -> bool:
+        return self.kind in (UV_TOOL_RELEASE, UV_TOOL_GIT)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -246,6 +364,17 @@ def _is_this_repo(url: str) -> bool:
     return parts.hostname == "github.com" and path == f"/{REPO.lower()}"
 
 
+def _is_release_wheel(url: str, web_base: str = WEB_BASE) -> bool:
+    """True for a wheel under this repository's sai-cli release downloads."""
+    parts, base = urlsplit(url), urlsplit(web_base)
+    prefix = f"{base.path.rstrip('/')}/{REPO}/releases/download/{TAG_PREFIX}"
+    return (
+        (parts.scheme, parts.netloc) == (base.scheme, base.netloc)
+        and unquote(parts.path).lower().startswith(prefix.lower())
+        and parts.path.endswith(".whl")
+    )
+
+
 def _public(url: str | None) -> str | None:
     """Drop user info, query, and fragment, which can hold credentials."""
     if not url:
@@ -261,11 +390,12 @@ def _public(url: str | None) -> str | None:
     return f"{parts.scheme}://{netloc}{parts.path}" if parts.scheme else url
 
 
-def install_kind(prefix: Path | None = None) -> Install:
+def install_kind(prefix: Path | None = None, web_base: str = WEB_BASE) -> Install:
     """Classify the environment at PREFIX (default: sys.prefix).
 
     - checkout: an editable install, as `uv sync` makes in a clone.
-    - uv-tool-git: `uv tool install` from this repository on GitHub.
+    - uv-tool-release: `uv tool install` of a sai-cli release wheel.
+    - uv-tool-git: `uv tool install` from this repository's Git source.
     - uv-tool-other: `uv tool install` from a directory, fork, or index.
     - uvx: a cached `uvx` environment.
     - other: anything else, such as pip.
@@ -284,6 +414,8 @@ def install_kind(prefix: Path | None = None) -> Install:
     if isinstance(directory, dict) and directory.get("editable"):
         return made(CHECKOUT)
     if (root / "uv-receipt.toml").is_file():
+        if url and not vcs and _is_release_wheel(url, web_base):
+            return made(UV_TOOL_RELEASE)
         is_git = vcs.get("vcs") == "git" if vcs else False
         if is_git and url and _is_this_repo(url.removeprefix("git+")):
             return made(UV_TOOL_GIT)
@@ -291,12 +423,6 @@ def install_kind(prefix: Path | None = None) -> Install:
     if root.parent.name == "archive-v0":
         return made(UVX)
     return made(OTHER)
-
-
-def reinstall_command(tag: str | None = None) -> str:
-    """The command that installs TAG, or main, from this repository."""
-    ref = f"@{tag}" if tag else ""
-    return f"uv tool install --reinstall git+{GIT_URL}{ref}"
 
 
 @dataclass(frozen=True)
@@ -307,19 +433,19 @@ class Guidance:
     command: str | None = None
 
 
-def guidance(install: Install, tag: str) -> Guidance:
-    """Say how to update INSTALL to release TAG.
+def guidance(install: Install) -> Guidance:
+    """Say how to move INSTALL to the latest release.
 
-    Only `uv tool install` from this repository is supported. A checkout
-    updates with git; anything else is pointed at the supported install.
+    Only an official uv tool install is supported. A checkout updates with
+    git; anything else is pointed at the supported install.
     """
     if install.kind == CHECKOUT:
         return Guidance("This is a source checkout; pull, then run `uv sync`.")
-    if install.kind == UV_TOOL_GIT:
-        return Guidance("Reinstall the release with uv.", reinstall_command(tag))
+    if install.official:
+        return Guidance("Install the latest release with:", INSTALL_COMMAND)
     return Guidance(
         f"Only uv tool installs from {REPO} are supported. To switch to one, run:",
-        reinstall_command(tag),
+        INSTALL_COMMAND,
     )
 
 
@@ -387,6 +513,6 @@ def now() -> str:
 
 
 def latest_version(path: Path | None = None) -> str | None:
-    """The cached latest version without the `v`, read with no network."""
+    """The cached latest version as `X.Y.Z`, read with no network."""
     cache = read_cache(path)
-    return cache.latest.removeprefix("v") if cache else None
+    return tag_version(cache.latest) if cache else None

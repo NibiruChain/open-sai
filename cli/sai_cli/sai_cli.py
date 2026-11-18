@@ -1378,22 +1378,30 @@ EXIT_UNSUPPORTED = 3
 
 
 def update_report(
-    installed: str, latest: str, install: update.Install
+    installed: str, latest: update.Release | None, install: update.Install
 ) -> dict[str, Any]:
-    newer = update.is_newer(latest, installed)
+    """Describe the installed version next to LATEST, or next to no release
+    when LATEST is None."""
+    newer = latest is not None and update.is_newer(latest.tag, installed)
     return {
         "installed": installed,
-        "latest": latest.removeprefix("v"),
-        "latestTag": latest,
+        "latest": latest.version if latest else None,
+        "latestTag": latest.tag if latest else None,
+        "wheelUrl": latest.wheel_url if latest else None,
+        "sha256sumsUrl": latest.sums_url if latest else None,
         "updateAvailable": newer,
         "install": install.to_json(),
-        "update": asdict(update.guidance(install, latest)) if newer else None,
+        "update": asdict(update.guidance(install)) if newer else None,
     }
 
 
 def print_update_report(report: dict[str, Any]) -> None:
     kind = report["install"]["kind"]
     click.echo(f"installed  {report['installed']} ({kind})")
+    if report["latest"] is None:
+        click.echo("latest     none")
+        click.echo("No sai-cli release is published yet; nothing to update to.")
+        return
     click.echo(f"latest     {report['latest']}")
     if not report["updateAvailable"]:
         click.echo("sai is up to date.")
@@ -1412,11 +1420,11 @@ def print_update_report(report: dict[str, Any]) -> None:
 def update_command(
     ctx: click.Context, check: bool, api_base: str, web_base: str
 ) -> None:
-    """Compare the installed version with the latest GitHub release.
+    """Compare the installed version with the latest sai-cli release.
 
     `--check` reports the installed and latest versions, how sai was
-    installed, and how to update it. Installing updates comes in a later
-    release.
+    installed, and how to update it. Before the first release it says so and
+    exits 0. Installing updates comes in a later release.
     """
     if not check:
         click.echo(
@@ -1426,15 +1434,20 @@ def update_command(
             err=True,
         )
         ctx.exit(EXIT_UNSUPPORTED)
+    latest: update.Release | None
     try:
         latest = update.fetch_latest(api_base=api_base, web_base=web_base)
+    except update.NoRelease:
+        latest = None
     except update.UpdateError as exc:
         raise click.ClickException(f"update check failed: {exc}") from exc
-    try:
-        update.write_cache(update.Cache(latest, update.now()))
-    except OSError as exc:
-        warn(f"Warning: could not save the update check: {exc}")
-    report = update_report(package_version(), latest, update.install_kind())
+    if latest is not None:
+        try:
+            update.write_cache(update.Cache(latest.tag, update.now()))
+        except OSError as exc:
+            warn(f"Warning: could not save the update check: {exc}")
+    install = update.install_kind(web_base=web_base)
+    report = update_report(package_version(), latest, install)
     if ctx.obj["json"]:
         emit(ctx, report)
     else:
