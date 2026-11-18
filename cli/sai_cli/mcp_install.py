@@ -150,8 +150,8 @@ def server_target(
     warnings = []
     if not inside(path, [Path(running_prefix)]):
         warnings.append(
-            f"Registering the `sai` on PATH ({path}), which is a different"
-            f" install than the one running ({running_prefix})."
+            f"The `sai` on PATH ({path}) is a different install than the one"
+            f" running ({running_prefix}); clients get the one on PATH."
         )
     return Target([str(path), "mcp", "serve"], env), warnings
 
@@ -180,8 +180,11 @@ def run(argv: list[str]) -> None:
 
 
 def first_line(text: str) -> str:
+    """Pick the error line from client output; clients also print warnings."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[0][:200] if lines else "no output"
+    errors = [line for line in lines if "error" in line.lower()]
+    chosen = errors[0] if errors else (lines[-1] if lines else "no output")
+    return chosen[:200]
 
 
 def load_json(path: Path) -> dict[str, Any] | None:

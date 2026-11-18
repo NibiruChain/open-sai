@@ -462,3 +462,9 @@ def test_unreadable_config_names_the_file_not_its_contents(env: Env):
     error = payload(result)["results"][0]["error"]
     assert ".claude.json" in error
     assert SECRET not in result.stdout + result.stderr
+
+
+def test_client_errors_skip_warning_lines():
+    out = "WARNING: could not create aliases\nError: config is locked\n"
+    assert mcp_install.first_line(out) == "Error: config is locked"
+    assert mcp_install.first_line("one\nlast words\n") == "last words"
