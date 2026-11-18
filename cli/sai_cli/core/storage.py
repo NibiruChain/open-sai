@@ -255,9 +255,10 @@ def delete_session(address: str | None = None) -> str | None:
     Removing the active account leaves no account active. Without ADDRESS, a
     store that cannot be read is deleted and reported as removed.
     """
-    if not session_exists():
-        return None
     with _locked():
+        # Checked under the lock: a sign-in may be migrating the old file.
+        if not session_exists():
+            return None
         try:
             accounts = load_accounts()
         except ValueError:
