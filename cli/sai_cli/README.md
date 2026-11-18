@@ -31,7 +31,10 @@ exact value. An unknown key or invalid value exits 2 and lists the valid keys.
 
 The first `set` or `unset` writes the whole file with every key commented out
 and explained, at mode 0600 in a 0700 directory. Later edits keep your
-comments. Keys the CLI does not know produce a warning and are ignored.
+comments, and a lock file makes concurrent edits run one at a time. An edit
+turns an inline table or dotted keys for a section into a `[section]` table
+with the same values. Keys the CLI does not know produce a warning and are
+ignored; a known section that is not a table is an error.
 
 A `keeper.ws_endpoint` from a lower layer than `keeper.endpoint` is ignored,
 and the CLI derives the WebSocket from the Keeper endpoint instead. So

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import stat
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -208,8 +210,64 @@ def test_set_and_unset_keep_the_persons_comments():
     text, _ = settings.unset_value(text, "keeper.endpoint")
     for kept in ("# my notes", "# staging Keeper", "# trailing note"):
         assert kept in text
-    assert '# endpoint = "https://sai-keeper.nibiru.fi/query"\n' in text
+    # The key's inline note stays on its commented-out line.
+    assert '# endpoint = "https://sai-keeper.nibiru.fi/query"  # pinned\n' in text
     assert "endpoint" not in tomllib.loads(text)["keeper"]
+    # Setting it again takes the note back.
+    text, _ = settings.set_value(text, "keeper.endpoint", "https://new.example/q")
+    assert 'endpoint = "https://new.example/q"  # pinned\n' in text
+    assert "# endpoint =" not in text
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        (
+            'keeper = { endpoint = "https://old.example/q", extra = 1 }\n'
+            "[update]\nauto = false\n"
+        ),
+        (
+            'keeper.endpoint = "https://old.example/q"\nkeeper.extra = 1\n'
+            "[update]\nauto = false\n"
+        ),
+        "[update]\nauto = false\n[keeper.sub]\nx = 1\n",
+    ],
+    ids=["inline", "dotted", "subtable-only"],
+)
+def test_set_and_unset_edit_every_table_form_the_reader_accepts(original):
+    before = tomllib.loads(original)
+    old = before["keeper"].get("endpoint")
+    text, removed = settings.unset_value(original, "keeper.endpoint")
+    assert removed is (old is not None)
+    after = tomllib.loads(text)
+    assert "endpoint" not in after["keeper"]
+    assert settings.parse_file(text, "x")[0] == {"update.auto": False}
+    # Other values in the section and the file survive.
+    rest = {k: v for k, v in before["keeper"].items() if k != "endpoint"}
+    assert after["keeper"] == rest
+    assert after["update"] == {"auto": False}
+
+    text, _ = settings.set_value(original, "keeper.endpoint", "https://new.example/q")
+    after = tomllib.loads(text)
+    assert after["keeper"] == {**rest, "endpoint": "https://new.example/q"}
+    assert after["update"] == {"auto": False}
+
+
+def test_known_section_that_is_not_a_table_is_an_error(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('keeper = "https://staging.example/query"\n')
+    with pytest.raises(SettingsError, match=f"{path}: 'keeper' must be a table"):
+        settings.read_file(path)
+    with pytest.raises(SettingsError, match="'keeper' must be a table"):
+        settings.load()
+    with pytest.raises(SettingsError, match="'keeper' must be a table"):
+        settings.set_value(path.read_text(), "keeper.endpoint", "https://k.example")
+    # An unknown section that is not a table is still only a warning.
+    path.write_text('theme = "dark"\n')
+    assert settings.read_file(path) == (
+        {},
+        [f"{path}: ignoring unknown setting 'theme'"],
+    )
 
 
 def test_set_refuses_bad_values_and_unknown_keys():
@@ -229,6 +287,33 @@ def test_write_file_is_private_and_atomic(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert [p.name for p in path.parent.iterdir()] == ["config.toml"]
+
+
+def test_concurrent_edits_keep_every_change(tmp_path):
+    """Each edit holds the lock across read, edit, and replace, so parallel
+    `sai config set` processes never drop one another's change."""
+    path = tmp_path / "config.toml"
+    code = (
+        "import sys; from pathlib import Path; from sai_cli.core import settings;"
+        " key, value = sys.argv[1], sys.argv[2];"
+        " settings.edit_file(Path(sys.argv[3]),"
+        " lambda t: (__import__('time').sleep(0.3),"
+        " settings.set_value(t, key, value)[0])[1])"
+    )
+    jobs = [
+        ("keeper.endpoint", "https://k.example/q"),
+        ("lcd.endpoint", "https://lcd.example"),
+        ("keeper.ws_endpoint", "wss://w.example/q"),
+        ("update.auto", "false"),
+    ]
+    procs = [
+        subprocess.Popen([sys.executable, "-c", code, key, value, str(path)])
+        for key, value in jobs
+    ]
+    assert [proc.wait(timeout=60) for proc in procs] == [0] * len(jobs)
+    values, _ = settings.read_file(path)
+    assert values == {key: settings.parse_value(key, value) for key, value in jobs}
+    assert stat.S_IMODE((tmp_path / settings.LOCK_NAME).stat().st_mode) == 0o600
 
 
 def test_edit_file_creates_the_full_file(tmp_path):

@@ -12,9 +12,11 @@ the text with tomlkit, so comments the person adds survive.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -28,6 +30,7 @@ from tomlkit.items import Comment, Null, Table, Trivia
 from . import keeper, margin, stream
 
 FILE_NAME = "config.toml"
+LOCK_NAME = ".config.lock"
 SOURCES = ("flag", "env", "file", "default", "derived")
 # Lower rank wins.
 _RANK = {"flag": 0, "env": 1, "file": 2, "default": 3}
@@ -106,6 +109,7 @@ SETTINGS: tuple[Setting, ...] = (
 )
 BY_KEY: Mapping[str, Setting] = MappingProxyType({s.key: s for s in SETTINGS})
 KEYS = tuple(BY_KEY)
+SECTIONS = frozenset(spec.section for spec in SETTINGS)
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,12 @@ def parse_file(text: str, path: Path | str) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     for section, table in data.items():
         if not isinstance(table, dict):
+            if section in SECTIONS:
+                # A known section that is not a table would otherwise fall back
+                # to the default and quietly select another Keeper.
+                raise SettingsError(
+                    f"{path}: {section!r} must be a table, such as [{section}]"
+                )
             warnings.append(f"{path}: ignoring unknown setting {section!r}")
             continue
         for name, value in table.items():
@@ -383,13 +393,46 @@ def _document(text: str | None, path: Path | str) -> tomlkit.TOMLDocument:
         raise SettingsError(f"Cannot parse {path}: {exc}") from None
 
 
-def _table(doc: tomlkit.TOMLDocument, spec: Setting, path: Path | str) -> Table:
-    table = doc.get(spec.section)
-    if table is None:
+def _is_standard(doc: tomlkit.TOMLDocument, section: str, item: Any) -> bool:
+    """True for a `[section]` header table, the form the editor writes."""
+    if not isinstance(item, Table) or item.is_super_table():
+        return False
+    return not any(
+        key is not None and key.key == section and key.is_dotted()
+        for key, _ in doc.body
+    )
+
+
+def _table(
+    doc: tomlkit.TOMLDocument, spec: Setting, path: Path | str, create: bool = True
+) -> Table | None:
+    """Return the `[section]` table for SPEC, or None when absent and not
+    CREATE.
+
+    An inline table (`keeper = { endpoint = "..." }`), dotted keys
+    (`keeper.endpoint = "..."`), or a section that exists only through
+    subtables becomes a `[section]` table at the end of the file, with the
+    same values.
+    """
+    item = doc.get(spec.section)
+    if item is None:
+        if not create:
+            return None
         table = tomlkit.table()
         doc.add(spec.section, table)
-    if not isinstance(table, Table):
-        raise SettingsError(f"{path}: {spec.section!r} is not a table")
+        return table
+    if _is_standard(doc, spec.section, item):
+        return item
+    values = item.unwrap() if hasattr(item, "unwrap") else item
+    if not isinstance(values, dict):
+        raise SettingsError(
+            f"{path}: {spec.section!r} must be a table, such as [{spec.section}]"
+        )
+    del doc[spec.section]
+    table = tomlkit.table()
+    for name, value in values.items():
+        table.add(name, value)
+    doc.add(spec.section, table)
     return table
 
 
@@ -397,6 +440,16 @@ def _is_placeholder(item: Any, spec: Setting) -> bool:
     return isinstance(item, Comment) and item.as_string().strip().startswith(
         f"# {spec.name} ="
     )
+
+
+def _placeholder_note(item: Any, spec: Setting) -> str | None:
+    """The person's note after a placeholder that `unset_value` wrote."""
+    text = item.as_string().strip()
+    prefix = _placeholder(spec)
+    if not text.startswith(prefix):
+        return None
+    rest = text[len(prefix) :].strip()
+    return rest if rest.startswith("#") else None
 
 
 def set_value(
@@ -411,13 +464,19 @@ def set_value(
     spec = setting(key)
     doc = _document(text, path)
     table = _table(doc, spec, path)
+    assert table is not None
     if spec.name in table:
         table[spec.name] = value
         return doc.as_string(), value
     body = table.value.body
     for index, (name, item) in enumerate(body):
         if name is None and _is_placeholder(item, spec):
-            table.value._insert_at(index, spec.name, tomlkit.item(value))
+            new = tomlkit.item(value)
+            note = _placeholder_note(item, spec)
+            if note:
+                new.trivia.comment_ws = "  "
+                new.trivia.comment = note
+            table.value._insert_at(index, spec.name, new)
             body[index + 1] = (None, Null())
             break
     else:
@@ -429,11 +488,12 @@ def unset_value(
     text: str | None, key: str, path: Path | str = FILE_NAME
 ) -> tuple[str, bool]:
     """Return config TEXT with KEY back to its commented-out default, and
-    whether KEY was set."""
+    whether KEY was set. An inline comment on the key's line stays on the
+    commented-out line."""
     spec = setting(key)
     doc = _document(text, path)
-    table = doc.get(spec.section)
-    if not isinstance(table, Table) or spec.name not in table:
+    table = _table(doc, spec, path, create=False)
+    if table is None or spec.name not in table:
         return doc.as_string(), False
     body = table.value.body
     index = next(
@@ -441,8 +501,12 @@ def unset_value(
         for i, (name, _) in enumerate(body)
         if name is not None and name.key == spec.name
     )
+    trivia = body[index][1].trivia
+    line = _placeholder(spec)
+    if trivia.comment:
+        line += (trivia.comment_ws or "  ") + trivia.comment
     del table[spec.name]
-    comment = Comment(Trivia(comment_ws="", comment=_placeholder(spec), trail="\n"))
+    comment = Comment(Trivia(comment_ws="", comment=line, trail="\n"))
     body[index] = (None, comment)
     return doc.as_string(), True
 
@@ -461,12 +525,37 @@ def write_file(path: Path, text: str) -> None:
         Path(temp).unlink(missing_ok=True)
 
 
-def edit_file(path: Path, edit: Callable[[str | None], str]) -> None:
-    """Apply EDIT to the text at PATH (None when missing) and save it."""
+@contextmanager
+def _locked(path: Path) -> Generator[None]:
+    """Hold an exclusive lock on PATH's sibling `.config.lock` file, so
+    concurrent edits run one after another instead of losing changes."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    fd = os.open(path.parent / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        text: str | None = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        text = None
-    except OSError as exc:
-        raise SettingsError(f"Cannot read {path}: {exc.strerror}") from None
-    write_file(path, edit(text))
+        if sys.platform == "win32":
+            import msvcrt
+
+            # LK_LOCK retries for about ten seconds, then raises OSError.
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        # Closing the descriptor releases the lock.
+        os.close(fd)
+
+
+def edit_file(path: Path, edit: Callable[[str | None], str]) -> None:
+    """Apply EDIT to the text at PATH (None when missing) and save it, holding
+    the config lock across the read, the edit, and the replace."""
+    with _locked(path):
+        try:
+            text: str | None = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = None
+        except OSError as exc:
+            raise SettingsError(f"Cannot read {path}: {exc.strerror}") from None
+        write_file(path, edit(text))
