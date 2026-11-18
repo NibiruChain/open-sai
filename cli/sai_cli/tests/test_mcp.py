@@ -1374,7 +1374,7 @@ def test_bare_sai_mcp_prints_help():
     result = CliRunner().invoke(main, ["mcp"])
     assert result.exit_code == 0
     assert "serve" in result.output
-    assert "claude mcp add sai -- sai mcp serve" in result.output
+    assert "sai mcp install claude" in result.output
 
 
 def test_sai_mcp_serve_takes_the_root_endpoint(monkeypatch):

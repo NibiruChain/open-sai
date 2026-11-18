@@ -82,9 +82,13 @@ auth login`.
 ## MCP Server
 
 If Sai tools such as `mcp_info` and `market_prices` are available, prefer
-them over shell commands. To register them with Claude Code, run `claude mcp
-add sai -- sai mcp serve`; `sai mcp serve` is meant for an agent client to
-launch, not for a person to run. Call `mcp_info` first. Every tool is listed
+them over shell commands. To register them, run `sai mcp install claude`
+(or `codex`, `cursor`, `--all`); `sai mcp list --json` shows where Sai is
+registered, and `sai mcp uninstall CLIENT` removes it. A client needs a
+restart or reconnect to load the change. If `install` returns code
+`UNSTABLE_PATH`, `sai` is running from the uv cache: run `uv tool install
+git+https://github.com/SaiDotFun/open-sai` first. `sai mcp serve` is meant for
+an agent client to launch, not for a person to run. Call `mcp_info` first. Every tool is listed
 at all times, but trades submit only while someone is signed in:
 `mcp_info.trading.available` says whether they can, and its `reason` is
 `signed-in`, `signed-out`, `expired`, or `other-endpoint`. A signed-out

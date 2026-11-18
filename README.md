@@ -85,15 +85,38 @@ your files can decrypt it. There is no session passphrase.
 
 `sai mcp serve` runs an MCP server that gives agent clients such as Claude
 Code the same reads, previews, and trades as the CLI. Install `sai` on your
-`PATH` first, then register it:
+`PATH` with `uv tool install` first, then register it:
 
 ```bash
-claude mcp add sai -- sai mcp serve
+sai mcp install claude          # or codex, cursor, or several at once
+sai mcp install --all           # every client found on this machine
+sai mcp list                    # where Sai is registered
+sai mcp uninstall codex
 ```
 
-From a checkout, use `uv run --directory /path/to/open-sai sai mcp serve` as
-the command instead. An entry registered before `sai mcp serve` existed no
-longer starts; run `claude mcp remove sai` and add it again.
+`install` registers the `sai` on your `PATH`, normally `~/.local/bin/sai`,
+which keeps its path across updates. It refuses a `sai` run through `uvx`,
+because uv cleans that copy out of its cache. Claude Code and Codex change
+through their own `mcp add` and `mcp remove` commands; for Cursor, `install`
+edits `~/.cursor/mcp.json` and keeps your other servers. Cursor may ask you to
+enable `sai` in its MCP settings. Claude Code registers for your user by
+default; `--scope project` writes the project's `.mcp.json` instead.
+
+Running `install` again reports `unchanged`. An older entry is `replaced`,
+and so is one that sets other environment variables or that Codex has
+disabled. `uninstall` removes Sai from every scope it is registered in unless
+you pass `--scope`. When Codex loads a different `sai` entry from the current project's
+`.codex/config.toml`, sai reports it but never edits it; change it there
+yourself. `--dry-run` shows the commands without running them. `install`
+asks which clients to register only on a terminal; an agent that names no
+client gets the list of detected clients and nothing changes. Restart or
+reconnect a client after a change.
+
+From a checkout, give the server command after `--`:
+
+```bash
+sai mcp install claude -- uv run --directory /path/to/open-sai sai mcp serve
+```
 
 The server lists every tool, trades included, whether or not you are signed in.
 Trading follows sign-in on each call. Sign in with `sai auth login` or `sai

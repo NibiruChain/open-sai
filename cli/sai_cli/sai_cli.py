@@ -15,6 +15,7 @@ from typing import Any
 
 import click
 
+from . import mcp_install
 from .core import clipboard, keeper, reconcile, storage, stream, trading
 from .core import session as sessions
 from .core import settings as sai_settings
@@ -1013,8 +1014,8 @@ def report_change(
 def mcp_group(ctx: click.Context) -> None:
     """Run Sai as an MCP server for agent clients.
 
-    Register it with a client, for example:
-    `claude mcp add sai -- sai mcp serve`.
+    Register it with Claude Code, Codex, or Cursor with
+    `sai mcp install claude` (or codex, cursor, --all).
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -1023,7 +1024,7 @@ def mcp_group(ctx: click.Context) -> None:
 
 SERVE_TTY_NOTICE = (
     "sai mcp serve speaks MCP over stdin and stdout; an agent client should"
-    " launch it, for example `claude mcp add sai -- sai mcp serve`."
+    " launch it; register it with `sai mcp install`."
     " Press Ctrl-C to stop."
 )
 
@@ -1084,6 +1085,235 @@ def serve_flags(
         key: value if value is not None else global_flags.get(key)
         for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)
     }
+
+
+class ArgvAfterDash(click.Command):
+    """Keep everything after `--` as the server command instead of CLIENTs."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if "--" in args:
+            at = args.index("--")
+            ctx.meta["server_argv"] = args[at + 1 :]
+            if not ctx.meta["server_argv"]:
+                raise click.UsageError("Give the server command after `--`.", ctx)
+            args = args[:at]
+        return super().parse_args(ctx, args)
+
+
+def interactive() -> bool:
+    """Prompt only when a person is at both ends; agents never see prompts."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def mcp_clients() -> dict[str, mcp_install.Client]:
+    return mcp_install.make_clients(Path.home(), os.environ, Path.cwd())
+
+
+def chosen_clients(names: tuple[str, ...]) -> list[str]:
+    try:
+        return list(dict.fromkeys(mcp_install.normalize_client(n) for n in names))
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
+def pick(prompt: str, options: list[str]) -> list[str]:
+    """Ask on the terminal which of options to act on; blank means all."""
+    for number, name in enumerate(options, 1):
+        click.echo(f"  {number}. {name}", err=True)
+    answer = click.prompt(prompt, default="all", err=True)
+    if answer.strip().lower() == "all":
+        return options
+    picked = []
+    for part in answer.replace(",", " ").split():
+        if part.isdigit() and 1 <= int(part) <= len(options):
+            picked.append(options[int(part) - 1])
+        else:
+            picked.append(part)
+    return chosen_clients(tuple(picked))
+
+
+def server_target(ctx: click.Context) -> mcp_install.Target:
+    target, warnings = mcp_install.server_target(
+        ctx.meta.get("server_argv"),
+        os.environ,
+        Path.home(),
+        mcp_install.running_prefix(),
+    )
+    for message in warnings:
+        warn(message)
+    return target
+
+
+def quiet_target(ctx: click.Context) -> mcp_install.Target | None:
+    """The command install would register, or None; prints nothing."""
+    try:
+        target, _ = mcp_install.server_target(
+            ctx.meta.get("server_argv"),
+            os.environ,
+            Path.home(),
+            mcp_install.running_prefix(),
+        )
+    except mcp_install.InstallError:
+        return None
+    return target
+
+
+def refuse(ctx: click.Context, exc: mcp_install.InstallError) -> None:
+    emit(ctx, {"error": str(exc), "code": exc.code})
+    ctx.exit(1)
+
+
+def finish(ctx: click.Context, results: list[mcp_install.Result]) -> None:
+    summary = mcp_install.summarize(results)
+    emit(ctx, summary)
+    if summary["reconnectNeeded"]:
+        warn("Restart or reconnect the changed clients to load the change.")
+    if any(r.client == "cursor" and r.action in ("added", "replaced") for r in results):
+        warn(mcp_install.Cursor.HINT)
+    if any(r.action == "failed" for r in results):
+        ctx.exit(1)
+
+
+SCOPE_OPTION = click.option(
+    "--scope",
+    type=click.Choice(mcp_install.SCOPES),
+    default="user",
+    show_default=True,
+    help="user: every project. project: this directory's shared config"
+    " (Claude Code .mcp.json, Cursor .cursor/mcp.json). Codex is user only.",
+)
+
+
+@mcp_group.command("list")
+@click.pass_context
+def mcp_list(ctx: click.Context) -> None:
+    """Show detected agent clients and where Sai is registered.
+
+    `current` is true when the entry runs the command `install` would
+    register. Only the sai entry is read; other servers are never shown.
+    """
+    try:
+        target = server_target(ctx)
+        command: list[str] | None = target.argv
+    except mcp_install.InstallError as exc:
+        warn(str(exc))
+        target, command = None, None
+    emit(
+        ctx,
+        {
+            "command": command,
+            "clients": mcp_install.list_clients(mcp_clients(), target),
+        },
+    )
+
+
+@mcp_group.command("install", cls=ArgvAfterDash)
+@click.argument("clients", nargs=-1)
+@click.option("--all", "all_clients", is_flag=True, help="Every detected client.")
+@click.option("--dry-run", is_flag=True, help="Show the changes; make none.")
+@SCOPE_OPTION
+@click.pass_context
+def mcp_install_command(
+    ctx: click.Context,
+    clients: tuple[str, ...],
+    all_clients: bool,
+    dry_run: bool,
+    scope: str,
+) -> None:
+    """Register `sai mcp serve` with Claude Code, Codex, or Cursor.
+
+    CLIENT is claude, codex, or cursor. Registers the stable `sai` on PATH,
+    normally ~/.local/bin/sai, so updates need no re-registering. For a dev
+    checkout, give the server command after `--`, for example
+    `sai mcp install claude -- uv run --directory ~/open-sai sai mcp serve`.
+
+    With no CLIENT and no --all, a terminal asks which clients to register;
+    without a terminal, this lists detected clients and changes nothing.
+    """
+    found = mcp_clients()
+    try:
+        target = server_target(ctx)
+    except mcp_install.InstallError as exc:
+        refuse(ctx, exc)
+        return
+    names = chosen_clients(clients)
+    detected = [n for n, c in found.items() if c.detected()[0]]
+    if all_clients:
+        names = list(dict.fromkeys([*names, *detected]))
+    if not names:
+        if not interactive():
+            emit(
+                ctx,
+                {
+                    "command": target.argv,
+                    "clients": mcp_install.list_clients(found, target),
+                },
+            )
+            warn(
+                "Nothing changed. Name clients, as in `sai mcp install claude`,"
+                " or pass --all."
+            )
+            return
+        if not detected:
+            raise click.UsageError("No agent clients found; name one to register.")
+        names = pick("Register Sai with (numbers, names, or all)", detected)
+    results = [mcp_install.install_one(found[n], scope, target, dry_run) for n in names]
+    finish(ctx, results)
+
+
+@mcp_group.command("uninstall")
+@click.argument("clients", nargs=-1)
+@click.option("--all", "all_clients", is_flag=True, help="Every client.")
+@click.option("--dry-run", is_flag=True, help="Show the changes; make none.")
+@click.option(
+    "--scope",
+    type=click.Choice(mcp_install.UNINSTALL_SCOPES),
+    help="Remove only this scope. Default: every scope sai is registered in"
+    " (Claude Code local entries are this directory's).",
+)
+@click.pass_context
+def mcp_uninstall(
+    ctx: click.Context,
+    clients: tuple[str, ...],
+    all_clients: bool,
+    dry_run: bool,
+    scope: str | None,
+) -> None:
+    """Remove Sai from Claude Code, Codex, or Cursor.
+
+    Removes sai from every scope it is registered in for each client, unless
+    --scope names one. With no CLIENT and no --all, a terminal asks which to
+    remove; without a terminal this is a usage error that names where Sai is
+    registered.
+    """
+    found = mcp_clients()
+    names = chosen_clients(clients)
+    target = quiet_target(ctx)
+    if all_clients:
+        names = list(found)
+    if not names:
+        rows = mcp_install.list_clients(found, target)
+        registered = [r["client"] for r in rows if r["registered"]]
+        where = ", ".join(
+            f"{r['client']} ({', '.join(e['scope'] for e in r['registrations'])})"
+            for r in rows
+            if r["registered"]
+        )
+        if not interactive():
+            raise click.UsageError(
+                "Name clients to remove, or pass --all. Sai is registered with: "
+                + (where or "no client")
+                + "."
+            )
+        if not registered:
+            raise click.UsageError("Sai is not registered with any client.")
+        names = pick("Remove Sai from (numbers, names, or all)", registered)
+    results = [
+        r
+        for n in names
+        for r in mcp_install.uninstall_client(found[n], scope, dry_run, target)
+    ]
+    finish(ctx, results)
 
 
 if __name__ == "__main__":
