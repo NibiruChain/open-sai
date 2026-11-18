@@ -487,9 +487,31 @@ def trade() -> None:
     """Submit authenticated trading intents."""
 
 
-def loader(ctx: click.Context) -> trading.SessionLoader:
-    """Return a loader for the active session that prompts only when called."""
-    return lambda: session(ctx)
+class PinnedSession:
+    """Load the --as account, or the active one, and keep using that address.
+
+    The first load fixes the address, so the output names the account that
+    submitted even if another process switches accounts meanwhile.
+    """
+
+    def __init__(self, ctx: click.Context) -> None:
+        self.ctx = ctx
+        self.address: str | None = None
+
+    def __call__(self) -> dict[str, str]:
+        if self.address is None:
+            result = session(self.ctx)
+        else:
+            result = sessions.load_active_session(
+                self.ctx.obj["endpoint"], self.address
+            )
+        self.address = result["evmAddress"]
+        return result
+
+
+def loader(ctx: click.Context) -> PinnedSession:
+    """Return this command's session loader; it loads only when called."""
+    return ctx.obj.setdefault("loader", PinnedSession(ctx))
 
 
 def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
@@ -497,10 +519,13 @@ def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
 
     A dry run without a usable session names no account.
     """
-    try:
-        account: str | None = session(ctx)["evmAddress"]
-    except ValueError:
-        account = None
+    load = loader(ctx)
+    account = load.address
+    if account is None:
+        try:
+            account = load()["evmAddress"]
+        except ValueError:
+            account = None
     emit(ctx, {"account": account, **result})
 
 

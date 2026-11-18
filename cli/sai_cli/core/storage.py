@@ -117,7 +117,12 @@ def load_accounts() -> dict[str, Any]:
     fields = _read_envelope(_sessions_path())
     if fields is None:
         old = _read_envelope(_v2_path())
-        return {"active": None, "sessions": {}} if old is None else _load_v2(old)
+        if old is not None:
+            return _load_v2(old)
+        # A sign-in may have migrated the old file between the two reads.
+        fields = _read_envelope(_sessions_path())
+        if fields is None:
+            return {"active": None, "sessions": {}}
     if fields.get("version") != _VERSION:
         raise ValueError(f"Unsupported session version; {SIGN_IN_AGAIN}")
     try:

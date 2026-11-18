@@ -151,6 +151,40 @@ def test_cli_dry_run_names_the_account_it_would_use(session):
     assert "token" not in active.output + chosen.output
 
 
+def test_trade_session_stays_on_the_account_it_first_loaded(session):
+    import click
+    from sai_cli.sai_cli import loader
+
+    other = {**session, "evmAddress": "0x" + "c" * 40, "token": "other-token"}
+    storage.save_session(other)
+    storage.save_session(session)
+    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "as_address": None})
+    load = loader(ctx)
+    assert load()["evmAddress"] == session["evmAddress"]
+    # Another process switches accounts while the trade is in flight.
+    storage.use_session(other["evmAddress"])
+    assert load()["evmAddress"] == session["evmAddress"]
+    assert loader(ctx) is load
+
+
+def test_read_retries_when_a_sign_in_migrates_between_reads(session, monkeypatch):
+    storage.save_session(session)
+    real = storage._read_envelope
+    missed: list[str] = []
+
+    def racy(path):
+        # The first look at sessions.json happens just before the migrating
+        # sign-in writes it.
+        if path.name == "sessions.json" and not missed:
+            missed.append(path.name)
+            return None
+        return real(path)
+
+    monkeypatch.setattr(storage, "_read_envelope", racy)
+    assert storage.load_session() == session
+    assert missed == ["sessions.json"]
+
+
 def _sign_in(index: int) -> None:
     storage.save_session(
         {
