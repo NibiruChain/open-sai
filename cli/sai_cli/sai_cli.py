@@ -165,8 +165,8 @@ def auth() -> None:
 @click.option(
     "--addr",
     metavar="ADDR",
-    help="EVM addr you expect NAME to hold. Sign-in stops if it differs; with"
-    " a keystore it also skips the `cast wallet address` password prompt.",
+    help="EVM addr you expect NAME to hold. Sign-in stops before signing if"
+    " NAME holds another account.",
 )
 @click.pass_context
 def login(ctx: click.Context, name: str, addr: str | None) -> None:
@@ -208,6 +208,23 @@ def keystore_path(name: str) -> Path:
     return Path.home() / ".foundry" / "keystores" / name
 
 
+def keystore_addr(name: str) -> str | None:
+    """Read the plaintext `address` a Foundry keystore records, if any.
+
+    Reading it needs no password. Keeper still verifies the signature, so a
+    wrong value can only make sign-in fail.
+    """
+    try:
+        value = json.loads(keystore_path(name).read_text(encoding="utf-8"))
+        raw = value["address"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(raw, str):
+        return None
+    addr = raw if raw.lower().startswith("0x") else "0x" + raw
+    return addr if keeper.is_address(addr) else None
+
+
 def checked_address(found: str, expected: str | None) -> str:
     """Return FOUND, or fail when the --addr cross-check disagrees."""
     if expected is not None and expected.lower() != found.lower():
@@ -242,8 +259,11 @@ def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
         addr = checked_address(found.addr, addr)
         return keeper.wallet_session(endpoint, addr, name)
     if keystore_path(name).is_file():
-        if addr is None:
-            addr = keeper.cast_address(name)
+        # Check --addr before anything signs: from the keystore file when it
+        # records the addr, otherwise from cast, which may ask for the
+        # password.
+        found_addr = keystore_addr(name) or keeper.cast_address(name)
+        addr = checked_address(found_addr, addr)
         return keeper.cast_session(endpoint, addr, name)
     if found is not None:
         raise ValueError(ud_state_hint(name, found.cast_state))

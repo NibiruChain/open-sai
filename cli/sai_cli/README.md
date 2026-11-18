@@ -43,14 +43,16 @@ challenge nonce.
   wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
   prompt. ud holds the password for the keystore of the same name.
 - Otherwise it uses the Foundry keystore `~/.foundry/keystores/NAME`. It
-  runs `cast wallet address --account NAME` and `cast wallet sign --account
-  NAME --data --from-file PATH` on your terminal, and `cast` prompts for the
+  reads the addr from the keystore file (or `cast wallet address --account
+  NAME` if the file has none) and runs `cast wallet sign --account NAME
+  --data --from-file PATH` on your terminal, where `cast` prompts for the
   keystore password.
 - With neither, it stops and names where it looked.
 
 `--addr ADDR` is optional. The CLI refuses to sign when the key holds a
-different account. With a keystore, it also replaces `cast wallet address`
-and saves one password prompt.
+different account. For a keystore it reads the addr from the keystore
+file's plaintext `address` field, which needs no password, and falls back
+to `cast wallet address` only when the file has none.
 
 ### Several Accounts
 

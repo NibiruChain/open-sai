@@ -591,11 +591,15 @@ def fake_cast(env: Env) -> None:
     )
 
 
-def keystore(env: Env, name: str = "dev") -> None:
-    """Create the Foundry keystore file NAME; fake cast holds the key."""
+def keystore(env: Env, name: str = "dev", addr: str | None = None) -> None:
+    """Create the Foundry keystore file NAME; fake cast holds the key.
+
+    With ADDR, the file records it in plaintext like Foundry's own files.
+    """
     root = env.home / ".foundry" / "keystores"
     root.mkdir(parents=True, exist_ok=True)
-    (root / name).write_text("{}")
+    value = {} if addr is None else {"address": addr[2:].lower(), "crypto": {}}
+    (root / name).write_text(json.dumps(value))
 
 
 def test_cast_login_derives_addr_and_signs(env: Env, keeper_auth) -> None:
@@ -620,9 +624,33 @@ def test_cast_login_derives_addr_and_signs(env: Env, keeper_auth) -> None:
     assert status.returncode == 0, status.stderr
 
 
+def test_keystore_addr_skips_the_cast_address_prompt(env: Env, keeper_auth) -> None:
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["addr"].lower() == ADDR.lower()
+    calls = env.log.read_text().splitlines()
+    assert len(calls) == 1
+    assert " wallet sign --account dev --data --from-file " in calls[0]
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_keystore_login_checks_addr_before_signing(
+    env: Env, keeper_auth, recorded: bool
+) -> None:
+    fake_cast(env)
+    keystore(env, addr=ADDR if recorded else None)
+    result = login(env, keeper_auth, "dev", "--addr", OTHER)
+    assert result.returncode != 0
+    assert "does not match the wallet addr" in result.stderr
+    assert "wallet sign" not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+
+
 def test_cast_login_refuses_foreign_typed_data(env: Env, keeper_auth) -> None:
     fake_cast(env)
-    keystore(env)
+    keystore(env, addr=ADDR)
     keeper_auth["typed"] = typed_data(primaryType="Permit")
     result = env.run(
         "--endpoint",
