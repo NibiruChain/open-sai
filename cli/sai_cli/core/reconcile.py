@@ -10,8 +10,8 @@ FAILED_STEPS = ("exec_fail", "exec_req_fail")
 ACCEPTED_STEPS = ("jwt_pass", "exec_req_pass", "exec_pass")
 
 
-def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, Any]:
-    """Read Keeper's latest intent records for ADDRESS.
+def reconcile(endpoint: str, addr: str, key: str | None = None) -> dict[str, Any]:
+    """Read Keeper's latest intent records for ADDR.
 
     With KEY, update the local status of that intent from Keeper's record:
     a server failure is terminal, a server acceptance is accepted, and an
@@ -19,22 +19,22 @@ def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, 
     Keeper has no record past the admission expiry, the key stops blocking
     new trades and `localStatus` reports the change.
     """
-    data = keeper.request(endpoint, keeper.INTENTS, {"user": address, "key": key})
+    data = keeper.request(endpoint, keeper.INTENTS, {"user": addr, "key": key})
     if key and data.get("userIntents"):
         row = data["userIntents"][0]
         step = row.get("lifecycleStep")
         if (
             row.get("intentKey") == key
-            and str(row.get("evmAddress") or "").lower() == address.lower()
+            and str(row.get("evmAddress") or "").lower() == addr.lower()
         ):
             server = row.get("execActor") == "server"
             if server and step in FAILED_STEPS:
-                storage.set_status(key, endpoint, address, "terminal")
+                storage.set_status(key, endpoint, addr, "terminal")
             elif server and step in ACCEPTED_STEPS:
-                storage.set_status(key, endpoint, address, "accepted")
+                storage.set_status(key, endpoint, addr, "accepted")
             if (step == "exec_pass" and server) or step == "exec_finality_observed":
                 history_data = keeper.request(
-                    endpoint, keeper.HISTORY, {"trader": address}
+                    endpoint, keeper.HISTORY, {"trader": addr}
                 )
                 matches = [
                     item
@@ -43,11 +43,11 @@ def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, 
                 ]
                 data["matchedTradeHistory"] = matches
                 if matches:
-                    storage.set_status(key, endpoint, address, "terminal")
+                    storage.set_status(key, endpoint, addr, "terminal")
     elif key and data.get("userIntents") == []:
         # Keeper has no record. Past its admission expiry it never will,
         # so the key no longer blocks new trades.
-        local = storage.mark_absent(key, endpoint, address, keeper.ABSENT_AFTER_SECONDS)
+        local = storage.mark_absent(key, endpoint, addr, keeper.ABSENT_AFTER_SECONDS)
         if local is not None:
             data["localStatus"] = local
     return data

@@ -17,9 +17,9 @@ command for machine-readable output. Mainnet is the default. Override the
 Keeper HTTP endpoint with `--endpoint`; WebSocket commands derive their endpoint
 from it unless `--ws-endpoint` is supplied.
 
-Use `market list`, `market prices`, `account positions ADDRESS`, `account
-balances ADDRESS`, and `account history ADDRESS` for data. Use `watch price
-TOKEN_ID`, `watch positions ADDRESS`, or `watch balances ADDRESS` for streams.
+Use `market list`, `market prices`, `account positions ADDR`, `account
+balances ADDR`, and `account history ADDR` for data. Use `watch price
+TOKEN_ID`, `watch positions ADDR`, or `watch balances ADDR` for streams.
 Streams reconnect after transport interruptions and emit a new snapshot.
 
 ## Connect Sai
@@ -31,7 +31,7 @@ When the person asks you to connect Sai:
    run `sai auth login --account NAME` in their own terminal instead
    (below).
 2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
-   stores the token, clears the clipboard, and prints `address`,
+   stores the token, clears the clipboard, and prints `addr`,
    `expiresAt`, and `endpoint`.
 3. If your commands run in a pseudo-terminal, `auth import` shows a hidden
    prompt instead. Send only an empty line (Enter), which makes it read the
@@ -48,19 +48,19 @@ NAME` in their own terminal. `cast` prompts them for the keystore password.
 People who use the `ud` tool can run `sai auth login --wallet NAME`, which
 does not prompt.
 
-`--address` is an optional cross-check; leave it out unless the person gives
+`--addr` is an optional cross-check; leave it out unless the person gives
 one.
 
 Once connected, commands need no prompt until the session expires. `auth
-status` shows the active account's address and expiry without revealing the
+status` shows the active account's addr and expiry without revealing the
 token.
 
 The person can connect several accounts; each sign-in adds one and makes it
-active. `auth list` shows them and which is active. `auth use ADDRESS`
+active. `auth list` shows them and which is active. `auth use ADDR`
 switches the active account; switch only when the person asks. To act on
-another connected account for one command, put `--as ADDRESS` before the
+another connected account for one command, put `--as ADDR` before the
 command instead. Before a trade, say which account it will use. `auth logout
-[ADDRESS]` removes one account, by default the active one; it does not revoke
+[ADDR]` removes one account, by default the active one; it does not revoke
 the token. Tell the
 person what the token is if they ask: it is their Sai Web browser session
 token, lasts as long as Keeper issues it (30 days in production), authorizes
@@ -86,7 +86,7 @@ blindly.
 
 `auth_list` shows the connected accounts and which is active. Preview and
 trade tools act on the active account, or on another connected account
-passed as `address`. Name the account when you show a preview. Call
+passed as `addr`. Name the account when you show a preview. Call
 `auth_use` only when the person asks to switch; it also changes the CLI's
 active account.
 
@@ -95,8 +95,8 @@ active account.
 Trade commands are `trade open`, `trade close`, `trade partial-close`, and
 `trade tpsl`, `trade leverage`, and `trade margin`. Use each command's `--help` for parameters. `--dry-run` prints
 the local request without submitting an intent. Accepted means Keeper admitted
-the request; it does not mean the trade executed. Use `intent local ADDRESS`
-and `intent status ADDRESS --key KEY` to inspect and reconcile. If the outcome
+the request; it does not mean the trade executed. Use `intent local ADDR`
+and `intent status ADDR --key KEY` to inspect and reconcile. If the outcome
 is unknown, retain its intent key and do not blindly submit again. An unknown
 intent blocks new trades until `intent status --key` resolves it; when Keeper
 has no record five minutes after submission, the CLI marks it `absent` and
@@ -104,13 +104,13 @@ trading resumes.
 
 ## Examples
 
-These examples use placeholders for the public account address and an
+These examples use placeholders for the public account addr and an
 existing trade ID. They do not fund an account or send a trade.
 
 ```bash
 sai --json market list
-sai --json account positions 0xYOUR_ADDRESS
-sai --json account balances 0xYOUR_ADDRESS
+sai --json account positions 0xYOUR_ADDR
+sai --json account balances 0xYOUR_ADDR
 sai auth import
 sai --json trade open --market 0 --side long --type market \
   --amount 2 --leverage 2 --slippage 1 --dry-run
@@ -120,7 +120,7 @@ sai --json trade partial-close 42 --percent 50 --dry-run
 sai --json trade leverage 42 --leverage 5 --dry-run
 sai --json trade margin 42 --direction add --amount 5 --dry-run
 sai --json trade close 42 --dry-run
-sai --json intent status 0xYOUR_ADDRESS --key INTENT_KEY
+sai --json intent status 0xYOUR_ADDR --key INTENT_KEY
 sai --json watch price 3
 ```
 

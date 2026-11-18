@@ -58,13 +58,13 @@ is unknown or accepted; check those intents with intent_status, and pass \
 allow_concurrent_open=true only if the user wants another open position.
 - The user can connect several accounts; one is active. auth_list shows \
 them. Preview and trade tools act on the active account unless given \
-address, which must be a connected account. Every preview and trade names \
+addr, which must be a connected account. Every preview and trade names \
 its account; tell the user which account before they confirm.
 - Call auth_use only when the user asks to switch accounts. It changes the \
 active account for the user's terminal too.
-- Account reads report the address they read. With addressSource \
-"session", the address came from the active account; say so to the user, \
-and pass address explicitly to read any other account.
+- Account reads report the addr they read. With addrSource \
+"session", the addr came from the active account; say so to the user, \
+and pass addr explicitly to read any other account.
 - Never ask the user for a session token. They sign in \
 themselves by running `sai auth login` or `sai auth import` in a terminal.
 - Never read MCP client config files to learn about this server; call \
@@ -105,32 +105,32 @@ async def call(action: Callable[..., Any], /, *args: Any, **kwargs: Any) -> str:
 # Reads
 
 
-async def auth_status(address: str | None = None) -> str:
+async def auth_status(addr: str | None = None) -> str:
     """Show the active account and its session expiry, never the token.
 
     Sessions come from `sai auth login` or `sai auth import`, run by the
     user in a terminal.
 
     Args:
-        address: A connected account to check instead of the active one.
+        addr: A connected account to check instead of the active one.
     """
-    return await call(tools.auth_status, address)
+    return await call(tools.auth_status, addr)
 
 
 async def auth_list() -> str:
-    """List connected accounts: address, expiry, whether each is usable on
+    """List connected accounts: addr, expiry, whether each is usable on
     this server's endpoint, and which one is active. Never shows tokens."""
     return await call(tools.auth_list)
 
 
-async def auth_use(address: str) -> str:
+async def auth_use(addr: str) -> str:
     """Make a connected account the active one. Call only when the user
     asks to switch; the CLI shares the active account. Returns auth_list.
 
     Args:
-        address: EVM address (0x...) of a connected account from auth_list.
+        addr: EVM addr (0x...) of a connected account from auth_list.
     """
-    return await call(tools.auth_use, address)
+    return await call(tools.auth_use, addr)
 
 
 async def market_list() -> str:
@@ -144,56 +144,56 @@ async def market_prices() -> str:
     return await call(tools.market_prices)
 
 
-async def account_positions(address: str | None = None) -> str:
+async def account_positions(addr: str | None = None) -> str:
     """List open positions and pending orders.
 
-    The result names the `address` read and its `addressSource`.
+    The result names the `addr` read and its `addrSource`.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account,
+        addr: EVM addr (0x...). Defaults to the signed-in account,
             unless its session is for another Keeper endpoint.
     """
-    return await call(tools.account_positions, address)
+    return await call(tools.account_positions, addr)
 
 
-async def account_history(address: str | None = None) -> str:
+async def account_history(addr: str | None = None) -> str:
     """Read the latest 50 trade history rows.
 
-    The result names the `address` read and its `addressSource`.
+    The result names the `addr` read and its `addrSource`.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account,
+        addr: EVM addr (0x...). Defaults to the signed-in account,
             unless its session is for another Keeper endpoint.
     """
-    return await call(tools.account_history, address)
+    return await call(tools.account_history, addr)
 
 
-async def account_balances(address: str | None = None) -> str:
+async def account_balances(addr: str | None = None) -> str:
     """Read one balance snapshot, including Sai deposits and credits.
 
-    The result names the `address` read and its `addressSource`.
+    The result names the `addr` read and its `addrSource`.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account,
+        addr: EVM addr (0x...). Defaults to the signed-in account,
             unless its session is for another Keeper endpoint.
     """
-    return await call(tools.account_balances, address)
+    return await call(tools.account_balances, addr)
 
 
-async def intent_local(address: str | None = None) -> str:
+async def intent_local(addr: str | None = None) -> str:
     """List intents this machine recorded, with their local status.
 
     Status `unknown` blocks new trades until intent_status reconciles it.
-    The result names the `address` read and its `addressSource`.
+    The result names the `addr` read and its `addrSource`.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account,
+        addr: EVM addr (0x...). Defaults to the signed-in account,
             unless its session is for another Keeper endpoint.
     """
-    return await call(tools.intent_local, address)
+    return await call(tools.intent_local, addr)
 
 
-async def intent_status(address: str | None = None, key: str | None = None) -> str:
+async def intent_status(addr: str | None = None, key: str | None = None) -> str:
     """Read Keeper's latest intent records; with KEY, reconcile that intent.
 
     With KEY this also writes: it updates this machine's local intent cache,
@@ -203,11 +203,11 @@ async def intent_status(address: str | None = None, key: str | None = None) -> s
     Keeper never recorded past its admission window stops blocking trades.
 
     Args:
-        address: EVM address (0x...). Defaults to the signed-in account,
+        addr: EVM addr (0x...). Defaults to the signed-in account,
             unless its session is for another Keeper endpoint.
         key: Intent key from a trade result or an OUTCOME_UNKNOWN error.
     """
-    return await call(tools.intent_status, address, key)
+    return await call(tools.intent_status, addr, key)
 
 
 # Previews and trades share one implementation per action.
@@ -223,7 +223,7 @@ async def preview_open(
     price: str | None = None,
     take_profit: str | None = None,
     stop_loss: str | None = None,
-    address: str | None = None,
+    addr: str | None = None,
 ) -> str:
     """Preview opening a market, limit, or stop trade without submitting.
 
@@ -243,7 +243,7 @@ async def preview_open(
             submits Keeper's current price instead.
         take_profit: Optional take-profit price.
         stop_loss: Optional stop-loss price.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -258,7 +258,7 @@ async def preview_open(
         price=price,
         take_profit=take_profit,
         stop_loss=stop_loss,
-        address=address,
+        addr=addr,
     )
 
 
@@ -275,7 +275,7 @@ async def trade_open(
     stop_loss: str | None = None,
     reference_price: str | None = None,
     allow_concurrent_open: bool = False,
-    address: str | None = None,
+    addr: str | None = None,
 ) -> str:
     """Submit an open-trade intent. Call preview_open with the same
     arguments, show the user the preview, and get their explicit
@@ -308,7 +308,7 @@ async def trade_open(
             open, only after intent_status shows it and the user confirms
             they want another position. An intent still `unknown` blocks
             every trade until intent_status reconciles it.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -326,12 +326,12 @@ async def trade_open(
         price=price,
         take_profit=take_profit,
         stop_loss=stop_loss,
-        address=address,
+        addr=addr,
     )
 
 
 async def preview_close(
-    trade_id: int, cancel_order: bool = False, address: str | None = None
+    trade_id: int, cancel_order: bool = False, addr: str | None = None
 ) -> str:
     """Preview closing a position or cancelling a pending order. Show the
     user the result; trade_close needs its previewDigest.
@@ -339,7 +339,7 @@ async def preview_close(
     Args:
         trade_id: Trade id from account_positions.
         cancel_order: True to cancel a pending order instead of closing.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -347,7 +347,7 @@ async def preview_close(
         dry_run=True,
         trade_id=trade_id,
         cancel_order=cancel_order,
-        address=address,
+        addr=addr,
     )
 
 
@@ -355,7 +355,7 @@ async def trade_close(
     trade_id: int,
     preview_digest: str,
     cancel_order: bool = False,
-    address: str | None = None,
+    addr: str | None = None,
 ) -> str:
     """Submit a close or cancel intent. Call preview_close, show the user the
     preview, and get confirmation first. Refuses with PREVIEW_MISMATCH and a
@@ -365,7 +365,7 @@ async def trade_close(
         trade_id: Trade id from account_positions.
         preview_digest: previewDigest from the confirmed preview_close.
         cancel_order: True to cancel a pending order instead of closing.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -374,7 +374,7 @@ async def trade_close(
         trade_id=trade_id,
         cancel_order=cancel_order,
         preview_digest=preview_digest,
-        address=address,
+        addr=addr,
     )
 
 
@@ -384,7 +384,7 @@ async def preview_tpsl(
     stop_loss: str | None = None,
     clear_take_profit: bool = False,
     clear_stop_loss: bool = False,
-    address: str | None = None,
+    addr: str | None = None,
 ) -> str:
     """Preview setting or clearing take-profit and stop-loss prices. Show the
     user the result; trade_tpsl needs its previewDigest.
@@ -395,7 +395,7 @@ async def preview_tpsl(
         stop_loss: New stop-loss price as a decimal string.
         clear_take_profit: True to remove the take-profit.
         clear_stop_loss: True to remove the stop-loss.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -406,7 +406,7 @@ async def preview_tpsl(
         stop_loss=stop_loss,
         clear_take_profit=clear_take_profit,
         clear_stop_loss=clear_stop_loss,
-        address=address,
+        addr=addr,
     )
 
 
@@ -417,7 +417,7 @@ async def trade_tpsl(
     stop_loss: str | None = None,
     clear_take_profit: bool = False,
     clear_stop_loss: bool = False,
-    address: str | None = None,
+    addr: str | None = None,
 ) -> str:
     """Submit a take-profit and stop-loss change. Call preview_tpsl, show the
     user the preview, and get confirmation first. Refuses with
@@ -430,7 +430,7 @@ async def trade_tpsl(
         stop_loss: New stop-loss price as a decimal string.
         clear_take_profit: True to remove the take-profit.
         clear_stop_loss: True to remove the stop-loss.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -442,12 +442,12 @@ async def trade_tpsl(
         stop_loss=stop_loss,
         clear_take_profit=clear_take_profit,
         clear_stop_loss=clear_stop_loss,
-        address=address,
+        addr=addr,
     )
 
 
 async def preview_leverage(
-    trade_id: int, leverage: str, address: str | None = None
+    trade_id: int, leverage: str, addr: str | None = None
 ) -> str:
     """Preview setting target leverage without changing TP or SL. Show the
     user the result; trade_leverage needs its previewDigest.
@@ -455,7 +455,7 @@ async def preview_leverage(
     Args:
         trade_id: Trade id from account_positions.
         leverage: Target leverage as a decimal string.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -463,12 +463,12 @@ async def preview_leverage(
         dry_run=True,
         trade_id=trade_id,
         leverage=leverage,
-        address=address,
+        addr=addr,
     )
 
 
 async def trade_leverage(
-    trade_id: int, leverage: str, preview_digest: str, address: str | None = None
+    trade_id: int, leverage: str, preview_digest: str, addr: str | None = None
 ) -> str:
     """Submit a target-leverage change. Call preview_leverage, show the user
     the preview, and get confirmation first. Refuses with PREVIEW_MISMATCH
@@ -478,7 +478,7 @@ async def trade_leverage(
         trade_id: Trade id from account_positions.
         leverage: Target leverage as a decimal string.
         preview_digest: previewDigest from the confirmed preview_leverage.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -487,12 +487,12 @@ async def trade_leverage(
         trade_id=trade_id,
         leverage=leverage,
         preview_digest=preview_digest,
-        address=address,
+        addr=addr,
     )
 
 
 async def preview_margin(
-    trade_id: int, direction: Direction, amount: str, address: str | None = None
+    trade_id: int, direction: Direction, amount: str, addr: str | None = None
 ) -> str:
     """Quote adding or removing margin from exact contract state.
 
@@ -505,7 +505,7 @@ async def preview_margin(
         trade_id: Trade id from account_positions.
         direction: add or remove.
         amount: USDC amount to quote, as a decimal string.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -514,7 +514,7 @@ async def preview_margin(
         trade_id=trade_id,
         direction=direction,
         amount=amount,
-        address=address,
+        addr=addr,
     )
 
 
@@ -523,7 +523,7 @@ async def trade_margin(
     direction: Direction,
     amount: str,
     preview_digest: str,
-    address: str | None = None,
+    addr: str | None = None,
 ) -> str:
     """Submit a margin change. Call preview_margin, show the user the quote,
     and get confirmation first.
@@ -537,7 +537,7 @@ async def trade_margin(
         direction: add or remove.
         amount: USDC amount to quote, as a decimal string.
         preview_digest: previewDigest from the confirmed preview_margin.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -547,12 +547,12 @@ async def trade_margin(
         direction=direction,
         amount=amount,
         preview_digest=preview_digest,
-        address=address,
+        addr=addr,
     )
 
 
 async def preview_partial_close(
-    trade_id: int, percent: int, address: str | None = None
+    trade_id: int, percent: int, addr: str | None = None
 ) -> str:
     """Preview reducing an open USDC position by a whole percentage.
 
@@ -563,7 +563,7 @@ async def preview_partial_close(
     Args:
         trade_id: Trade id from account_positions.
         percent: Whole percentage to close, 1 to 99.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -571,12 +571,12 @@ async def preview_partial_close(
         dry_run=True,
         trade_id=trade_id,
         percent=percent,
-        address=address,
+        addr=addr,
     )
 
 
 async def trade_partial_close(
-    trade_id: int, percent: int, preview_digest: str, address: str | None = None
+    trade_id: int, percent: int, preview_digest: str, addr: str | None = None
 ) -> str:
     """Submit a partial close. Call preview_partial_close, show the user the
     preview, and get confirmation first.
@@ -588,7 +588,7 @@ async def trade_partial_close(
         trade_id: Trade id from account_positions.
         percent: Whole percentage to close, 1 to 99.
         preview_digest: previewDigest from the confirmed preview_partial_close.
-        address: Connected account to act as (0x...). Defaults to the
+        addr: Connected account to act as (0x...). Defaults to the
             active account.
     """
     return await call(
@@ -597,7 +597,7 @@ async def trade_partial_close(
         trade_id=trade_id,
         percent=percent,
         preview_digest=preview_digest,
-        address=address,
+        addr=addr,
     )
 
 

@@ -195,7 +195,7 @@ def test_installed_watch_replays_observed_btc_websocket_snapshot():
 
 def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
     """The server accepts once, drops its reply, and later exposes finality."""
-    address = "0x" + "a" * 40
+    addr = "0x" + "a" * 40
     monkeypatch.setenv("SAI_HOME", str(tmp_path))
     recorded = []
     history_visible = False
@@ -216,7 +216,7 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
                     "userIntents": [
                         {
                             "intentKey": key,
-                            "evmAddress": address,
+                            "evmAddress": addr,
                             "execActor": "server",
                             "lifecycleStep": "exec_pass",
                         }
@@ -256,7 +256,7 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
     storage.save_session(
         {
             "token": "fake-token",
-            "evmAddress": address,
+            "evmAddress": addr,
             "endpoint": endpoint,
             "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         },
@@ -277,7 +277,7 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
         assert "Outcome unknown" in first.stderr
         assert len(recorded) == 1
         key = recorded[0]["intentKey"]
-        saved = json.loads(invoke("intent", "local", address).stdout)
+        saved = json.loads(invoke("intent", "local", addr).stdout)
         assert saved[0]["intentKey"] == key
         assert saved[0]["status"] == "unknown"
 
@@ -286,20 +286,20 @@ def test_lost_admission_survives_restart_and_reconciles(tmp_path, monkeypatch):
         assert "Reconcile" in duplicate.stderr
         assert len(recorded) == 1
 
-        status = invoke("intent", "status", address, "--key", key)
+        status = invoke("intent", "status", addr, "--key", key)
         assert status.returncode == 0
         assert (
-            json.loads(invoke("intent", "local", address).stdout)[0]["status"]
+            json.loads(invoke("intent", "local", addr).stdout)[0]["status"]
             == "accepted"
         )
         assert invoke("trade", "close", "7").returncode != 0
         assert len(recorded) == 1
 
         history_visible = True
-        status = invoke("intent", "status", address, "--key", key)
+        status = invoke("intent", "status", addr, "--key", key)
         assert status.returncode == 0
         assert (
-            json.loads(invoke("intent", "local", address).stdout)[0]["status"]
+            json.loads(invoke("intent", "local", addr).stdout)[0]["status"]
             == "terminal"
         )
         after_reconciliation = invoke("trade", "close", "7")
@@ -468,7 +468,7 @@ def test_balance_snapshot_fails_on_graphql_errors():
 
 def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
     """Keeper answers 401 and never records the key; the CLI recovers."""
-    address = "0x" + "a" * 40
+    addr = "0x" + "a" * 40
     monkeypatch.setenv("SAI_HOME", str(tmp_path))
     recorded = []
 
@@ -500,7 +500,7 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
     storage.save_session(
         {
             "token": "fake-token",
-            "evmAddress": address,
+            "evmAddress": addr,
             "endpoint": endpoint,
             "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         },
@@ -521,7 +521,7 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
         key = recorded[0]["intentKey"]
 
         # Inside Keeper's admission window the key still blocks trading.
-        fresh = invoke("intent", "status", address, "--key", key)
+        fresh = invoke("intent", "status", addr, "--key", key)
         assert json.loads(fresh.stdout)["localStatus"] == "unknown"
         blocked = invoke("trade", "close", "7")
         assert "Reconcile" in blocked.stderr
@@ -533,7 +533,7 @@ def test_unrecorded_intent_expires_and_unblocks_close(tmp_path, monkeypatch):
                 "UPDATE intents SET created_at=? WHERE id=?",
                 (time.time() - keeper.ABSENT_AFTER_SECONDS - 1, key),
             )
-        expired = invoke("intent", "status", address, "--key", key)
+        expired = invoke("intent", "status", addr, "--key", key)
         assert expired.returncode == 0
         assert json.loads(expired.stdout)["localStatus"] == "absent"
 

@@ -145,9 +145,9 @@ def test_cli_dry_run_names_the_account_it_would_use(session):
     storage.save_session(other)
     args = ["--json", "trade", "close", "4", "--dry-run"]
     active = CliRunner().invoke(main, args)
-    assert json.loads(active.output)["account"] == other["evmAddress"]
+    assert json.loads(active.output)["addr"] == other["evmAddress"]
     chosen = CliRunner().invoke(main, ["--as", session["evmAddress"], *args])
-    assert json.loads(chosen.output)["account"] == session["evmAddress"]
+    assert json.loads(chosen.output)["addr"] == session["evmAddress"]
     assert "token" not in active.output + chosen.output
     missing = CliRunner().invoke(main, ["--as", "0x" + "d" * 40, *args])
     assert missing.exit_code != 0
@@ -161,7 +161,7 @@ def test_trade_session_stays_on_the_account_it_first_loaded(session):
     other = {**session, "evmAddress": "0x" + "c" * 40, "token": "other-token"}
     storage.save_session(other)
     storage.save_session(session)
-    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "as_address": None})
+    ctx = click.Context(main, obj={"endpoint": keeper.MAINNET_HTTP, "as_addr": None})
     load = loader(ctx)
     assert load()["evmAddress"] == session["evmAddress"]
     # Another process switches accounts while the trade is in flight.
@@ -376,8 +376,8 @@ def test_market_dry_run_needs_no_price_and_marks_refresh():
 
 def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
     key = "example"
-    address = session["evmAddress"]
-    storage.pending(key, keeper.MAINNET_HTTP, address, "CLOSE_POSITION", "1")
+    addr = session["evmAddress"]
+    storage.pending(key, keeper.MAINNET_HTTP, addr, "CLOSE_POSITION", "1")
     matched = False
 
     def query(endpoint, query, variables=None, token=None):
@@ -386,7 +386,7 @@ def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
                 "userIntents": [
                     {
                         "intentKey": key,
-                        "evmAddress": address,
+                        "evmAddress": addr,
                         "execActor": "server",
                         "lifecycleStep": "exec_pass",
                     }
@@ -401,13 +401,13 @@ def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
         }
 
     monkeypatch.setattr(keeper, "request", query)
-    result = CliRunner().invoke(main, ["intent", "status", address, "--key", key])
+    result = CliRunner().invoke(main, ["intent", "status", addr, "--key", key])
     assert result.exit_code == 0, result.output
-    assert storage.list_pending(keeper.MAINNET_HTTP, address)[0]["status"] == "accepted"
+    assert storage.list_pending(keeper.MAINNET_HTTP, addr)[0]["status"] == "accepted"
     matched = True
-    result = CliRunner().invoke(main, ["intent", "status", address, "--key", key])
+    result = CliRunner().invoke(main, ["intent", "status", addr, "--key", key])
     assert result.exit_code == 0, result.output
-    assert storage.list_pending(keeper.MAINNET_HTTP, address)[0]["status"] == "terminal"
+    assert storage.list_pending(keeper.MAINNET_HTTP, addr)[0]["status"] == "terminal"
 
 
 def test_margin_quote_uses_exact_contract_integer_math():
