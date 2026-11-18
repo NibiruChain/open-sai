@@ -155,9 +155,9 @@ def test_second_sync_of_the_same_commit_does_nothing(jiyuu, open_sai, capsys):
 
 
 def test_unknown_previous_commit_falls_back_to_recent_history(jiyuu, open_sai):
-    record = open_sai / "skills" / "sai" / ".source.json"
-    record.write_text(json.dumps({"commit": "0" * 40}))
-    planned = sync_skill.plan(jiyuu, "HEAD", URL, open_sai / "skills" / "sai")
+    record = json.dumps({"commit": "0" * 40})
+    commit(open_sai, "record", {"skills/sai/.source.json": record})
+    planned = sync_skill.plan(jiyuu, "HEAD", URL, open_sai)
     assert "previous sync not in this history" in planned.message
     assert "skills: Add sai" in planned.message
 
@@ -185,6 +185,92 @@ def test_refuses_a_source_without_the_skill(jiyuu, open_sai, tmp_path, capsys):
     with pytest.raises(sync_skill.SyncError, match="frontmatter"):
         run(jiyuu, open_sai, run=True)
     assert tree(open_sai) == {"SKILL.md"}
+
+
+def test_commit_after_an_earlier_run_still_commits(jiyuu, open_sai, capsys):
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    commit(jiyuu, "skills: Explain doctor", {"ai-skills/sai/cli.md": "# CLI\ndoc\n"})
+    head = commit(jiyuu, "skills: Add MCP page", {"ai-skills/sai/mcp.md": "# MCP\n"})
+
+    # Write first to look at the changes, then commit in a second call.
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert git(open_sai, "status", "--porcelain") != ""
+    capsys.readouterr()
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert "already matches" in capsys.readouterr().out
+
+    before = git(open_sai, "rev-parse", "HEAD")
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    out = capsys.readouterr().out
+    assert "uncommitted" in out and "Committed." in out
+    assert git(open_sai, "rev-parse", "HEAD") != before
+    assert git(open_sai, "status", "--porcelain") == ""
+    message = git(open_sai, "log", "-1", "--format=%B")
+    assert message.startswith(f"skills: Sync sai from jiyuu {head[:7]}\n")
+    assert "jiyuu commits since the previous sync:" in message
+    assert "skills: Explain doctor" in message
+    assert "skills: Add MCP page" in message
+    assert "skills: Add sai" not in message
+
+
+def test_commit_can_be_retried_after_a_hook_rejects_it(jiyuu, open_sai):
+    hooks = open_sai / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    git(open_sai, "config", "core.hooksPath", str(hooks))
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    with pytest.raises(sync_skill.SyncError, match="commit"):
+        run(jiyuu, open_sai, run=True, commit=True)
+    assert "cli.md" in tree(open_sai)
+    hook.unlink()
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    assert git(open_sai, "status", "--porcelain") == ""
+    assert "skills: Add sai" in git(open_sai, "log", "-1", "--format=%B")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a\\b.md", "c:x.md", "../x.md", "/abs.md", "a//b.md", "a/./b.md", "a/..", ""],
+)
+def test_unsafe_names_are_refused(name):
+    with pytest.raises(sync_skill.SyncError, match="unsafe path"):
+        sync_skill.check_name(name)
+
+
+def test_safe_names_pass():
+    for name in ("SKILL.md", ".source.json", "references/deep/x.json", "a b.md"):
+        sync_skill.check_name(name)
+
+
+def test_source_with_a_windows_path_name_changes_nothing(jiyuu, open_sai):
+    # Ordinary file names on Unix; path syntax on Windows.
+    commit(jiyuu, "odd", {"ai-skills/sai/..\\..\\escape.md": "x\n"})
+    with pytest.raises(sync_skill.SyncError, match="unsafe path"):
+        run(jiyuu, open_sai, run=True)
+    assert tree(open_sai) == {"SKILL.md"}
+    assert not (open_sai / "escape.md").exists()
+
+
+def test_write_checks_every_path_before_deleting(open_sai):
+    dest = open_sai / "skills" / "sai"
+    with pytest.raises(sync_skill.SyncError):
+        sync_skill.write(dest, {"SKILL.md": b"new", "../../outside.md": b"x"})
+    assert (dest / "SKILL.md").read_text() == "---\nname: sai\n---\nold\n"
+    assert not (open_sai / "outside.md").exists()
+
+
+def test_nested_files_of_any_type_are_synced(jiyuu, open_sai):
+    commit(
+        jiyuu,
+        "nested",
+        {
+            "ai-skills/sai/references/data/x.json": "{}\n",
+            "ai-skills/sai/references/deep/er/page.md": "# P\n",
+        },
+    )
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert {"references/data/x.json", "references/deep/er/page.md"} <= tree(open_sai)
 
 
 def test_commit_flag_needs_run(capsys):

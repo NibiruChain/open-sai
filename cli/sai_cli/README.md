@@ -252,12 +252,25 @@ under `references/`.
   install commands. `sai --json skill source` prints the same as JSON.
 - `sai skill install [--dir DIR] [--force]` copies the directory into
   `~/.agents/skills/sai`, or into `DIR` itself. It reports `installed`,
-  `unchanged`, or `replaced`. Without `--force` it refuses a `DIR` that is a
-  symlink, which another tool manages, and a `sai` skill whose files differ,
-  naming them. With `--force` it replaces the link with a copy and leaves
-  the link's target alone, or replaces the whole directory. It refuses a
-  non-empty directory that is not a `sai` skill even with `--force`, so a
-  mistyped `--dir` cannot delete other files.
+  `unchanged`, or `replaced`.
+
+`install` deletes nothing without `--force`. It fills a `DIR` that is missing
+or has no entries at all, and otherwise:
+
+| `DIR` | Without `--force` | With `--force` |
+| --- | --- | --- |
+| Same files as the packaged skill | `unchanged` | `unchanged` |
+| A symlink, which another tool manages | refused | The link is replaced by a copy. Its target is untouched. |
+| A `sai` skill whose files differ | refused, naming the files | The directory is replaced. |
+| A `sai` skill that holds a symlink or special file | refused | refused |
+| Anything else, such as a folder of links to other skills | refused | refused |
+
+A directory counts as a `sai` skill only when its own `SKILL.md` is a regular
+file that starts with `name: sai`, so a mistyped `--dir` cannot delete other
+files or links. `install` writes the new copy beside `DIR`, moves the old
+directory aside, moves the new one into place, and only then deletes the old
+one; if the move fails, the old directory is put back. It refuses to replace
+`DIR` while the current directory is inside it.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.

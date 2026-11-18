@@ -49,13 +49,39 @@ def test_version_matches_package_metadata():
     assert result.output == f"sai, version {metadata.version('sai-cli')}\n"
 
 
-def test_skill_fails_loudly_on_symlink_text(monkeypatch):
-    # A checkout without symlink support stores the link target as text.
+ENTRY_POINTS = (
+    ["--skill"],
+    ["skill", "show"],
+    ["skill", "show", "--page", "cli"],
+    ["skill", "source"],
+    ["skill", "install"],
+)
+
+
+def test_skill_fails_loudly_on_symlink_text(tmp_path, monkeypatch):
+    # A checkout without symlink support has a regular file at
+    # cli/sai_cli/skills whose text is the link target.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    link_text = tmp_path / "skills"
+    link_text.write_text("../../skills/sai")
+    monkeypatch.setattr(skill, "packaged_root", lambda: link_text)
+    for args in ENTRY_POINTS:
+        result = CliRunner().invoke(main, args)
+        assert result.exit_code != 0, args
+        assert "not a directory" in result.output
+        assert "symlinks enabled" in result.output
+        assert "../../skills" not in result.stdout
+    assert not (tmp_path / "home").exists()
+
+
+def test_skill_fails_loudly_without_frontmatter(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
         skill, "read_packaged_files", lambda: {"SKILL.md": b"../../skills/sai"}
     )
-    for args in (["--skill"], ["skill", "show"], ["skill", "install"]):
+    for args in ENTRY_POINTS:
         result = CliRunner().invoke(main, args)
         assert result.exit_code != 0, args
         assert "no frontmatter" in result.output
         assert "../../skills" not in result.stdout
+    assert not (tmp_path / "home").exists()

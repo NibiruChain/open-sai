@@ -179,24 +179,59 @@ class Installed:
         }
 
 
-def existing_files(target: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(target).as_posix(): path.read_bytes()
-        for path in sorted(target.rglob("*"))
-        if path.is_file()
-    }
+def is_empty(target: Path) -> bool:
+    """True when the directory has no entries at all, links included."""
+    return next(os.scandir(target), None) is None
 
 
-def is_sai_skill(existing: dict[str, bytes]) -> bool:
-    """True when a directory's SKILL.md names the `sai` skill."""
-    head = existing.get("SKILL.md", b"")[:200].replace(b"\r\n", b"\n")
+def existing_files(target: Path) -> dict[str, bytes] | None:
+    """Return the regular files under TARGET, or None when it holds anything
+    else: a symlink, to a file or a directory, or a special file. Links are
+    never followed."""
+    files: dict[str, bytes] = {}
+    for parent, dirs, names in os.walk(target, followlinks=False):
+        for name in [*dirs, *names]:
+            path = Path(parent) / name
+            if path.is_symlink():
+                return None
+            if name in names:
+                if not path.is_file():
+                    return None
+                files[path.relative_to(target).as_posix()] = path.read_bytes()
+    return files
+
+
+def is_sai_skill(target: Path) -> bool:
+    """True when TARGET/SKILL.md is a real file that names the `sai` skill."""
+    skill_md = target / "SKILL.md"
+    if skill_md.is_symlink() or not skill_md.is_file():
+        return False
+    with skill_md.open("rb") as handle:
+        head = handle.read(200).replace(b"\r\n", b"\n")
     return head.startswith(b"---\nname: sai\n")
 
 
+def cwd_is_inside(target: Path) -> bool:
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return False
+    resolved = target.resolve()
+    return cwd == resolved or resolved in cwd.parents
+
+
 def write_dir(target: Path, files: dict[str, bytes]) -> None:
-    """Write FILES to a new sibling directory, then move it to TARGET."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
+    """Write FILES beside TARGET, then swap the new directory into place.
+
+    The new copy is staged in TARGET's parent. An existing directory is moved
+    aside first and deleted only after the new one is in place; if the swap
+    fails, it is moved back. A symlink at TARGET is unlinked; its target is
+    never touched.
+    """
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}-new-", dir=parent))
+    backup: Path | None = None
     try:
         for name, data in files.items():
             path = staging / name
@@ -205,21 +240,35 @@ def write_dir(target: Path, files: dict[str, bytes]) -> None:
         staging.chmod(0o755)
         if target.is_symlink():
             target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-        os.replace(staging, target)
+        elif target.exists():
+            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}-old-", dir=parent))
+            backup.rmdir()
+            os.replace(target, backup)
+        try:
+            os.replace(staging, target)
+        except OSError:
+            if backup is not None:
+                os.replace(backup, target)
+                backup = None
+            raise
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    if backup is not None:
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def install(files: dict[str, bytes], target: Path, force: bool = False) -> Installed:
     """Copy the packaged skill to TARGET.
 
-    Without FORCE, refuse to replace a symlink or a directory whose content
-    differs. Even with FORCE, refuse a directory that is not a `sai` skill,
-    so a mistyped --dir cannot delete something else.
+    Nothing is ever deleted without FORCE: only a missing or entirely empty
+    directory is filled. With FORCE, a symlink at TARGET is replaced by a
+    copy, and so is a directory whose own SKILL.md names the `sai` skill and
+    which holds only regular files. Any other directory is refused, so a
+    mistyped --dir cannot delete something else or links to it.
     """
+    # Absolute, but with a final symlink kept as a link.
+    target = Path(os.path.abspath(target))
     commit = source_record(files).get("commit")
 
     def done(action: str) -> Installed:
@@ -239,16 +288,31 @@ def install(files: dict[str, bytes], target: Path, force: bool = False) -> Insta
         return done("installed")
     if not target.is_dir():
         raise click.ClickException(f"{target} exists and is not a directory.")
-    existing = existing_files(target)
-    if not existing:
+
+    def replace(action: str) -> Installed:
+        # Swapping the directory would pull it out from under the shell.
+        if cwd_is_inside(target):
+            raise click.ClickException(
+                f"The current directory is inside {target}. Run this from"
+                " another directory; nothing was changed."
+            )
         write_dir(target, files)
-        return done("installed")
+        return done(action)
+
+    if is_empty(target):
+        return replace("installed")
+    existing = existing_files(target)
     if existing == files:
         return done("unchanged")
-    if not is_sai_skill(existing):
+    if not is_sai_skill(target):
         raise click.ClickException(
             f"{target} holds something other than the sai skill; nothing was"
             " changed. Choose another --dir, or remove it yourself."
+        )
+    if existing is None:
+        raise click.ClickException(
+            f"{target} contains symlinks or special files, which sai never"
+            " removes; nothing was changed. Remove them yourself, then retry."
         )
     if not force:
         changed = sorted(
@@ -261,8 +325,7 @@ def install(files: dict[str, bytes], target: Path, force: bool = False) -> Insta
             f"{target} differs from the packaged skill in {len(changed)}"
             f" file(s): {shown}. Pass --force to replace the whole directory."
         )
-    write_dir(target, files)
-    return done("replaced")
+    return replace("replaced")
 
 
 ACTIONS = {

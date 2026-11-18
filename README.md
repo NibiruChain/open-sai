@@ -49,7 +49,8 @@ npx skills add SaiDotFun/open-sai --skill sai   # without the CLI installed
 ```
 
 `sai skill install` refuses to replace a symlink or a copy that differs
-unless you pass `--force`. `sai skill source` prints where the packaged skill
+unless you pass `--force`, and never replaces a directory that is not a `sai`
+skill. `sai skill source` prints where the packaged skill
 lives and which commit it came from.
 
 To work from a checkout, run `uv sync`, then `uv run sai --help`.
@@ -194,6 +195,7 @@ just sync-skill --from ~/jiyuu --ref my-branch --run   # a local checkout
 ```
 
 The sync records the jiyuu commit in `skills/sai/.source.json`, and its commit
-message lists the jiyuu commits pulled since the last sync. The package ships
+message lists the jiyuu commits pulled since the last committed sync. Running
+`--run` first and `--run --commit` later commits the files already written. The package ships
 the directory through the symlink `cli/sai_cli/skills`, and `just build-check`
 fails if the wheel or sdist misses a file of it or holds a link instead.

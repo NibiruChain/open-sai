@@ -76,6 +76,25 @@ def clone(url: str, ref: str, into: Path) -> Path:
     return into
 
 
+def check_name(name: str) -> None:
+    """Refuse a path that could land outside skills/sai on any platform.
+
+    Git paths use `/`. A backslash or a drive colon is ordinary text on Unix
+    and path syntax on Windows, so both are refused everywhere.
+    """
+    parts = name.split("/")
+    unsafe = (
+        not name
+        or name.startswith("/")
+        or "\\" in name
+        or ":" in name
+        or "\0" in name
+        or any(part in ("", ".", "..") for part in parts)
+    )
+    if unsafe:
+        raise SyncError(f"refusing unsafe path in jiyuu: {name!r}")
+
+
 def read_tree(repo: Path, commit: str) -> dict[str, bytes]:
     """Return the skill's files at COMMIT, keyed by path inside the skill."""
     try:
@@ -89,6 +108,7 @@ def read_tree(repo: Path, commit: str) -> dict[str, bytes]:
                 continue
             if not member.isfile():
                 raise SyncError(f"{member.name} is not a regular file in jiyuu")
+            check_name(member.name)
             data = tar.extractfile(member)
             assert data is not None
             files[member.name] = data.read()
@@ -97,13 +117,50 @@ def read_tree(repo: Path, commit: str) -> dict[str, bytes]:
     return files
 
 
-def previous_commit(dest: Path) -> str | None:
-    """The jiyuu commit of the last sync, or None before the first one."""
-    record = dest / RECORD
-    if not record.is_file():
+def record_commit(text: str) -> str | None:
+    try:
+        commit = json.loads(text).get("commit")
+    except (ValueError, AttributeError):
         return None
-    commit = json.loads(record.read_text(encoding="utf-8")).get("commit")
     return commit if isinstance(commit, str) else None
+
+
+def previous_commit(root: Path) -> str | None:
+    """The jiyuu commit of the last sync, or None before the first one.
+
+    In a Git repository the last committed sync counts, read from HEAD, so a
+    sync already written by `--run` still lists its commits when committed.
+    Outside one, the record in the working tree.
+    """
+    record = (DEST / RECORD).as_posix()
+    in_repo = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", "HEAD"],
+        capture_output=True,
+        check=False,
+    )
+    if in_repo.returncode == 0:
+        head = subprocess.run(
+            ["git", "-C", str(root), "show", f"HEAD:{record}"],
+            capture_output=True,
+            check=False,
+        )
+        if head.returncode != 0:
+            return None
+        return record_commit(head.stdout.decode(errors="replace"))
+    path = root / DEST / RECORD
+    if not path.is_file():
+        return None
+    return record_commit(path.read_text(encoding="utf-8"))
+
+
+def pending(root: Path) -> bool:
+    """True when skills/sai differs from HEAD or holds untracked files."""
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--", DEST.as_posix()],
+        capture_output=True,
+        check=False,
+    )
+    return status.returncode == 0 and bool(status.stdout.strip())
 
 
 def has_commit(repo: Path, commit: str | None) -> bool:
@@ -189,9 +246,10 @@ def commit_message(
     return "\n".join(lines) + "\n"
 
 
-def plan(repo: Path, ref: str, url: str, dest: Path) -> Plan:
+def plan(repo: Path, ref: str, url: str, root: Path) -> Plan:
+    dest = root / DEST
     commit = git_text(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
-    previous = previous_commit(dest)
+    previous = previous_commit(root)
     commits = pulled_commits(repo, previous, commit)
     known = has_commit(repo, previous)
     files = read_tree(repo, commit)
@@ -208,13 +266,20 @@ def plan(repo: Path, ref: str, url: str, dest: Path) -> Plan:
 
 
 def write(dest: Path, files: dict[str, bytes]) -> None:
-    """Replace DEST with FILES."""
+    """Replace DEST with FILES. Every path is checked before DEST changes."""
     if dest.is_symlink():
         raise SyncError(f"{dest} is a symlink; expected a directory")
+    base = dest.resolve()
+    targets: dict[Path, bytes] = {}
+    for name, data in files.items():
+        check_name(name)
+        target = (base / name).resolve()
+        if base not in target.parents:
+            raise SyncError(f"refusing to write outside {dest}: {name!r}")
+        targets[target] = data
     if dest.exists():
         shutil.rmtree(dest)
-    for name, data in files.items():
-        target = dest / name
+    for target, data in targets.items():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
 
@@ -232,20 +297,25 @@ def sync(
     run: bool = False,
     commit: bool = False,
 ) -> int:
-    dest = root / DEST
-    planned = plan(repo, ref, url, dest)
-    if not planned.changes:
+    planned = plan(repo, ref, url, root)
+    # A sync written earlier by --run, or one whose commit failed, leaves
+    # the files in place and uncommitted; --commit still has work to do.
+    uncommitted = commit and pending(root)
+    if not planned.changes and not uncommitted:
         print(f"skills/sai already matches jiyuu {planned.commit[:12]}.")
         return 0
     for line in planned.changes:
         print(line)
+    if not planned.changes:
+        print(f"skills/sai already holds jiyuu {planned.commit[:12]}, uncommitted.")
     print()
     print(planned.message, end="")
     if not run:
         print("\nDry run: nothing was written. Pass --run to sync.")
         return 0
-    write(dest, planned.files)
-    print(f"\nWrote {len(planned.files)} files to {DEST.as_posix()}.")
+    if planned.changes:
+        write(root / DEST, planned.files)
+        print(f"\nWrote {len(planned.files)} files to {DEST.as_posix()}.")
     if commit:
         commit_sync(root, planned.message)
         print("Committed.")

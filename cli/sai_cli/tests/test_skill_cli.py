@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tarfile
 import zipfile
@@ -247,6 +248,135 @@ def test_install_fills_an_empty_directory(home, tmp_path):
     target.mkdir()
     assert invoke("skill", "install", "--dir", str(target)).exit_code == 0
     assert tree(target) == repo_files()
+
+
+def snapshot(root: Path) -> dict[str, str]:
+    """Every entry under ROOT, links recorded as links."""
+    out = {}
+    for path in sorted(root.rglob("*")):
+        name = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            out[name] = f"link:{path.readlink()}"
+        elif path.is_file():
+            out[name] = path.read_text()
+        else:
+            out[name] = "dir"
+    return out
+
+
+def test_install_never_wipes_a_directory_of_links_to_other_skills(home, tmp_path):
+    # ~/.agents/skills itself: no regular files, only links to skills.
+    other = tmp_path / "repo" / "other-skill"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text("---\nname: other\n---\n")
+    skills = home / ".agents" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "other").symlink_to(other)
+    (skills / "dangling").symlink_to(tmp_path / "missing")
+    before = snapshot(skills)
+
+    for extra in ([], ["--force"]):
+        result = invoke("skill", "install", "--dir", str(skills), *extra)
+        assert result.exit_code == 1, result.output
+        assert "something other than the sai skill" in result.output
+        assert snapshot(skills) == before
+    assert snapshot(other) == {"SKILL.md": "---\nname: other\n---\n"}
+
+
+def test_install_does_not_trust_a_linked_skill_md(home, tmp_path):
+    # A SKILL.md that is a link to a sai skill does not make the directory
+    # one: replacing it would delete the other entries.
+    real = tmp_path / "real"
+    assert invoke("skill", "install", "--dir", str(real)).exit_code == 0
+    target = tmp_path / "mixed"
+    target.mkdir()
+    (target / "SKILL.md").symlink_to(real / "SKILL.md")
+    (target / "notes.txt").write_text("keep me\n")
+    before = snapshot(target)
+    result = invoke("skill", "install", "--dir", str(target), "--force")
+    assert result.exit_code == 1
+    assert "something other than the sai skill" in result.output
+    assert snapshot(target) == before
+    assert tree(real) == repo_files()
+
+
+def test_install_refuses_a_skill_directory_that_holds_links(home, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "data.md").write_text("mine\n")
+    target = tmp_path / "sai"
+    assert invoke("skill", "install", "--dir", str(target)).exit_code == 0
+    (target / "extra").symlink_to(elsewhere)
+    before = snapshot(target)
+
+    for extra in ([], ["--force"]):
+        result = invoke("skill", "install", "--dir", str(target), *extra)
+        assert result.exit_code == 1, result.output
+        assert "contains symlinks" in result.output
+        assert snapshot(target) == before
+    assert snapshot(elsewhere) == {"data.md": "mine\n"}
+
+
+def test_install_from_inside_the_destination_changes_nothing(
+    home, tmp_path, monkeypatch
+):
+    target = tmp_path / "sai"
+    assert invoke("skill", "install", "--dir", str(target)).exit_code == 0
+    (target / "cli.md").write_text("my edit\n")
+    before = snapshot(target)
+
+    for cwd in (target, target / "references"):
+        monkeypatch.chdir(cwd)
+        for where in (".", str(target)):
+            if cwd != target and where == ".":
+                continue
+            result = invoke("skill", "install", "--dir", where, "--force")
+            assert result.exit_code == 1, result.output
+            assert "current directory is inside" in result.output
+            assert snapshot(target) == before
+    # No staging directory is left beside the destination.
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+    # An up-to-date copy is still reported from inside it.
+    (target / "cli.md").write_bytes(repo_files()["cli.md"])
+    monkeypatch.chdir(target)
+    result = invoke("skill", "install", "--dir", ".")
+    assert result.exit_code == 0, result.output
+    assert "already up to date" in result.output
+
+
+def test_install_relative_dir_stages_beside_the_destination(
+    home, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    assert invoke("skill", "install", "--dir", "sai").exit_code == 0
+    (tmp_path / "sai" / "cli.md").write_text("my edit\n")
+    result = invoke("skill", "install", "--dir", "sai", "--force")
+    assert result.exit_code == 0, result.output
+    assert tree(tmp_path / "sai") == repo_files()
+    assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
+
+
+def test_failed_replacement_keeps_the_previous_copy(home, tmp_path, monkeypatch):
+    target = tmp_path / "sai"
+    assert invoke("skill", "install", "--dir", str(target)).exit_code == 0
+    (target / "cli.md").write_text("my edit\n")
+    before = snapshot(target)
+
+    real_replace = os.replace
+
+    def fail_publish(src, dst):
+        # Fail moving the new copy into place; let the old one move back.
+        if Path(dst) == target and "-new-" in Path(src).name:
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(skill.os, "replace", fail_publish)
+    with pytest.raises(OSError, match="disk full"):
+        skill.install(skill.packaged_files(), target, force=True)
+    monkeypatch.undo()
+    assert snapshot(target) == before
+    assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
 
 
 # scripts/check_dist.py
