@@ -100,11 +100,16 @@ def _open(
         open_timeout=timeout,
         close_timeout=min(close_timeout, timeout),
     ) as socket:
-        socket.send(json.dumps({"type": "connection_init"}))
-        remaining = max(deadline - time.monotonic(), 0.001)
-        message = decode(socket.recv(timeout=remaining))
-        if message.get("type") != "connection_ack":
-            raise StreamError("Keeper did not acknowledge WebSocket connection")
+        try:
+            socket.send(json.dumps({"type": "connection_init"}))
+            remaining = max(deadline - time.monotonic(), 0.001)
+            message = decode(socket.recv(timeout=remaining))
+            if message.get("type") != "connection_ack":
+                raise StreamError("Keeper did not acknowledge WebSocket connection")
+        except BaseException:
+            # A failed handshake must not wait past TIMEOUT for the close.
+            socket.close_timeout = max(deadline - time.monotonic(), 0.001)
+            raise
         yield socket
 
 

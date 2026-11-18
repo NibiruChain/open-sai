@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 from . import keeper, storage
+
+WriteGate = Callable[[], AbstractContextManager[object]]
 
 FAILED_STEPS = ("exec_fail", "exec_req_fail")
 ACCEPTED_STEPS = ("jwt_pass", "exec_req_pass", "exec_pass")
 
 
-def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, Any]:
+def reconcile(
+    endpoint: str,
+    address: str,
+    key: str | None = None,
+    *,
+    timeout: float = 20,
+    write: WriteGate = nullcontext,
+) -> dict[str, Any]:
     """Read Keeper's latest intent records for ADDRESS.
 
     With KEY, update the local status of that intent from Keeper's record:
@@ -18,8 +29,14 @@ def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, 
     executed intent with a matching trade history row is terminal. When
     Keeper has no record past the admission expiry, the key stops blocking
     new trades and `localStatus` reports the change.
+
+    TIMEOUT applies to each Keeper request. Each ledger write happens inside
+    `with write():`, so a caller can refuse writes after a deadline by
+    raising from it.
     """
-    data = keeper.request(endpoint, keeper.INTENTS, {"user": address, "key": key})
+    data = keeper.request(
+        endpoint, keeper.INTENTS, {"user": address, "key": key}, timeout=timeout
+    )
     if key and data.get("userIntents"):
         row = data["userIntents"][0]
         step = row.get("lifecycleStep")
@@ -29,12 +46,14 @@ def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, 
         ):
             server = row.get("execActor") == "server"
             if server and step in FAILED_STEPS:
-                storage.set_status(key, endpoint, address, "terminal")
+                with write():
+                    storage.set_status(key, endpoint, address, "terminal")
             elif server and step in ACCEPTED_STEPS:
-                storage.set_status(key, endpoint, address, "accepted")
+                with write():
+                    storage.set_status(key, endpoint, address, "accepted")
             if (step == "exec_pass" and server) or step == "exec_finality_observed":
                 history_data = keeper.request(
-                    endpoint, keeper.HISTORY, {"trader": address}
+                    endpoint, keeper.HISTORY, {"trader": address}, timeout=timeout
                 )
                 matches = [
                     item
@@ -43,11 +62,15 @@ def reconcile(endpoint: str, address: str, key: str | None = None) -> dict[str, 
                 ]
                 data["matchedTradeHistory"] = matches
                 if matches:
-                    storage.set_status(key, endpoint, address, "terminal")
+                    with write():
+                        storage.set_status(key, endpoint, address, "terminal")
     elif key and data.get("userIntents") == []:
         # Keeper has no record. Past its admission expiry it never will,
         # so the key no longer blocks new trades.
-        local = storage.mark_absent(key, endpoint, address, keeper.ABSENT_AFTER_SECONDS)
+        with write():
+            local = storage.mark_absent(
+                key, endpoint, address, keeper.ABSENT_AFTER_SECONDS
+            )
         if local is not None:
             data["localStatus"] = local
     return data

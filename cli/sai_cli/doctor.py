@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import stat
+import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
@@ -151,27 +154,58 @@ def check_install(ctx: Context) -> Check:
     return Check("install", "pass", f"sai {version} installed", None, details)
 
 
+# Files sai writes under $SAI_HOME/trader; doctor changes no others.
+MANAGED = (
+    "session.json",
+    "intents.sqlite3",
+    "intents.sqlite3-wal",
+    "intents.sqlite3-shm",
+    "intents.sqlite3-journal",
+    "history",
+)
+SYMLINK_FIX = "Replace the symlink with a real file or directory by hand"
+
+
+def symlinks(names: Sequence[str] = MANAGED) -> list[Path]:
+    """Return `$SAI_HOME/trader`, or any of NAMES in it, that is a symlink.
+
+    Doctor never writes through one: a chmod, migration, or status update
+    would land wherever the link points.
+    """
+    root = storage.home()
+    return [path for path in [root, *(root / n for n in names)] if path.is_symlink()]
+
+
 def loose_modes(paths: Sequence[Path]) -> list[tuple[Path, int, int]]:
     """Return each of PATHS that group or others can access, with its mode
-    and the private mode it should have."""
+    and that mode without group and other bits."""
     if os.name == "nt":
         return []
     loose: list[tuple[Path, int, int]] = []
     for path in paths:
         try:
-            info_ = path.stat()
+            mode = stat.S_IMODE(path.lstat().st_mode)
         except OSError:
             continue
-        mode = stat.S_IMODE(info_.st_mode)
         if mode & 0o077:
-            wanted = DIR_MODE if stat.S_ISDIR(info_.st_mode) else FILE_MODE
-            loose.append((path, mode, wanted))
+            loose.append((path, mode, mode & ~0o077))
     return loose
 
 
 def check_home(ctx: Context) -> Check:
-    """`$SAI_HOME/trader` exists, and only its owner can read it or its files."""
+    """`$SAI_HOME/trader` exists, and only its owner can read it or the
+    files sai keeps there."""
     root = storage.home()
+    links = symlinks()
+    if links:
+        return Check(
+            "home",
+            "fail",
+            f"{', '.join(map(str, links))}: trader path is a symlink; doctor"
+            " changes nothing there",
+            SYMLINK_FIX,
+            {"path": str(root), "symlinks": [str(path) for path in links]},
+        )
     if not root.is_dir():
         if not ctx.fix:
             return Check(
@@ -190,7 +224,7 @@ def check_home(ctx: Context) -> Check:
             {"path": str(root)},
             changes=[f"created {root} with mode {DIR_MODE:o}"],
         )
-    paths = [root, *sorted(path for path in root.iterdir() if not path.is_symlink())]
+    paths = [root, *(root / name for name in MANAGED if (root / name).exists())]
     loose = loose_modes(paths)
     details: dict[str, Any] = {
         "path": str(root),
@@ -200,7 +234,7 @@ def check_home(ctx: Context) -> Check:
     }
     if not loose:
         return Check("home", "pass", f"{root} is private", None, details)
-    commands = "; ".join(f"chmod {wanted:o} {path}" for path, _, wanted in loose)
+    commands = "; ".join(f"chmod go-rwx {path}" for path, _, _ in loose)
     if not ctx.fix:
         return Check(
             "home",
@@ -216,7 +250,7 @@ def check_home(ctx: Context) -> Check:
             path.chmod(wanted)
             changes.append(f"chmod {path} {mode:o} -> {wanted:o}")
         except OSError:
-            failed.append(f"chmod {wanted:o} {path}")
+            failed.append(f"chmod go-rwx {path}")
     if failed:
         return Check(
             "home",
@@ -303,38 +337,107 @@ def ledger_path() -> Path:
     return storage.home() / "intents.sqlite3"
 
 
-def unknown_rows(path: Path) -> list[tuple[str, str, str]]:
-    """Return (key, endpoint, account) for each unknown intent at PATH."""
-    with sqlite3.connect(path, timeout=5) as connection:
+LEDGER_JOURNALS = ("-wal", "-journal")
+
+
+@contextmanager
+def ledger_snapshot(path: Path) -> Generator[sqlite3.Connection]:
+    """Read a private copy of the ledger at PATH with its WAL or rollback
+    journal.
+
+    Opening the ledger in place can write even without a change: SQLite
+    creates `-wal` and `-shm` files for a WAL-mode database and recovers a
+    hot rollback journal. The copy lives in a temporary directory, so any
+    recovery happens there and `$SAI_HOME` stays untouched.
+    """
+    with tempfile.TemporaryDirectory(prefix="sai-doctor-") as temp:
+        copy = Path(temp) / path.name
+        shutil.copyfile(path, copy)
+        for suffix in LEDGER_JOURNALS:
+            journal = path.with_name(path.name + suffix)
+            if journal.is_file():
+                shutil.copyfile(journal, copy.with_name(copy.name + suffix))
+        connection = sqlite3.connect(copy, timeout=5)
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+
+def read_ledger(path: Path) -> tuple[int, str, list[tuple[str, str, str]]]:
+    """Return the ledger's schema version, quick_check result, and
+    (key, endpoint, account) for each unknown intent."""
+    with ledger_snapshot(path) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
         tables = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'"
         ).fetchone()
-        if not tables:
-            return []
-        return connection.execute(
-            "SELECT id, endpoint, account FROM intents"
-            " WHERE status='unknown' ORDER BY rowid DESC"
-        ).fetchall()
+        rows = (
+            connection.execute(
+                "SELECT id, endpoint, account FROM intents"
+                " WHERE status='unknown' ORDER BY rowid DESC"
+            ).fetchall()
+            if tables and integrity == "ok"
+            else []
+        )
+    return version, integrity, rows
+
+
+class WriteGate:
+    """Allows ledger writes until `shut`; a write in progress finishes first."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._open = True
+
+    def shut(self) -> None:
+        with self._lock:
+            self._open = False
+
+    @contextmanager
+    def write(self) -> Generator[None]:
+        with self._lock:
+            if not self._open:
+                raise TimeoutError("doctor's deadline passed; not writing")
+            yield
 
 
 def reconcile_keys(
     endpoint: str, address: str, keys: Sequence[str], deadline: float
 ) -> dict[str, Any]:
     """Run `sai intent status` reconciliation for KEYS within DEADLINE
-    seconds. Returns any error; a daemon thread left running at the deadline
-    cannot keep the process alive."""
+    seconds.
+
+    Each Keeper request gets what is left of DEADLINE, and the worker stops
+    before the next key once it runs out. At the deadline the write gate
+    shuts, so a late Keeper answer can no longer change the ledger, and the
+    daemon thread cannot keep the process alive. Returns any error.
+    """
     outcome: dict[str, Any] = {}
+    gate = WriteGate()
+    end = time.monotonic() + deadline
 
     def work() -> None:
         try:
             for key in keys:
-                reconcile.reconcile(endpoint, address, key)
+                left = end - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError
+                reconcile.reconcile(
+                    endpoint,
+                    address,
+                    key,
+                    timeout=min(NETWORK_TIMEOUT, left),
+                    write=gate.write,
+                )
         except Exception as exc:  # noqa: BLE001 - reported, not raised
             outcome["error"] = type(exc).__name__
 
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
     thread.join(deadline)
+    gate.shut()
     if thread.is_alive():
         outcome["error"] = f"no answer within {deadline:g} s"
     return outcome
@@ -342,6 +445,21 @@ def reconcile_keys(
 
 def check_intents(ctx: Context) -> Check:
     path = ledger_path()
+    links = symlinks(
+        [
+            "intents.sqlite3",
+            *(f"intents.sqlite3{s}" for s in ("-wal", "-shm", "-journal")),
+        ]
+    )
+    if links:
+        return Check(
+            "intents",
+            "fail",
+            f"{', '.join(map(str, links))}: trader path is a symlink; doctor"
+            " does not read or write the ledger through it",
+            SYMLINK_FIX,
+            {"symlinks": [str(link) for link in links]},
+        )
     if not path.is_file():
         return Check("intents", "pass", "No intent ledger yet", None, {})
     fix_corrupt = (
@@ -350,10 +468,7 @@ def check_intents(ctx: Context) -> Check:
     )
     changes: list[str] = []
     try:
-        with sqlite3.connect(path, timeout=5) as connection:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
-        connection.close()
+        version, integrity, rows = read_ledger(path)
         if version > storage.SCHEMA_VERSION:
             return Check(
                 "intents",
@@ -376,8 +491,7 @@ def check_intents(ctx: Context) -> Check:
             changes.append(
                 f"migrated the ledger from schema {version} to {storage.SCHEMA_VERSION}"
             )
-            version = storage.SCHEMA_VERSION
-        rows = unknown_rows(path)
+            version, _integrity, rows = read_ledger(path)
     except (sqlite3.Error, OSError):
         return Check("intents", "fail", "Intent ledger is unreadable", fix_corrupt, {})
     state = ctx.session
@@ -395,7 +509,12 @@ def check_intents(ctx: Context) -> Check:
         )
         if "error" in outcome:
             details["reconcileError"] = outcome["error"]
-        rows = unknown_rows(path)
+        try:
+            _version, _integrity, rows = read_ledger(path)
+        except (sqlite3.Error, OSError):
+            return Check(
+                "intents", "fail", "Intent ledger is unreadable", fix_corrupt, {}
+            )
         remaining = {key for key, _endpoint, _owner in rows}
         for key in blocking:
             if key not in remaining:

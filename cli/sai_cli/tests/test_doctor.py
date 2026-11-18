@@ -194,8 +194,8 @@ def test_no_fix_reports_loose_modes_without_changing_them(isolated_home):
     check = one(doctor.check_home, ctx())
     assert check.status == "warn"
     assert check.fix == (
-        f"chmod 700 {root}; chmod 600 {root / 'intents.sqlite3'};"
-        f" chmod 600 {root / 'session.json'}"
+        f"chmod go-rwx {root}; chmod go-rwx {root / 'session.json'};"
+        f" chmod go-rwx {root / 'intents.sqlite3'}"
     )
     assert snapshot(isolated_home) == before
 
@@ -208,14 +208,62 @@ def test_fix_makes_the_directory_and_files_private(isolated_home):
     assert check.status == "fixed"
     assert check.changes == [
         f"chmod {root} 755 -> 700",
-        f"chmod {root / 'intents.sqlite3'} 640 -> 600",
         f"chmod {root / 'session.json'} 644 -> 600",
+        f"chmod {root / 'intents.sqlite3'} 640 -> 600",
     ]
     assert root.stat().st_mode & 0o777 == 0o700
     for name in ("session.json", "intents.sqlite3"):
         assert (root / name).stat().st_mode & 0o777 == 0o600
     assert (root / "session.json").read_bytes() == session_bytes
     assert one(doctor.check_home, ctx(fix=True)).status == "pass"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_fix_keeps_owner_bits_and_skips_files_sai_does_not_manage(isolated_home):
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    history = root / "history"
+    history.write_text("")
+    history.chmod(0o754)
+    tool = root / "notes.sh"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    check = one(doctor.check_home, ctx(fix=True))
+    assert check.changes == [f"chmod {history} 754 -> 700"]
+    assert history.stat().st_mode & 0o777 == 0o700
+    assert tool.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_symlinked_trader_directory_is_never_written(isolated_home, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    outside.chmod(0o755)
+    child = outside / "session.json"
+    child.write_text("{}")
+    child.chmod(0o755)
+    (isolated_home / "trader").symlink_to(outside)
+    before = snapshot(outside)
+    code, output = run_cli("--json", "doctor", "--offline")
+    assert code == 1
+    by_id = {c["id"]: c for c in json.loads(output)["checks"]}
+    assert by_id["home"]["status"] == "fail"
+    assert "symlink" in by_id["home"]["summary"]
+    assert by_id["intents"]["status"] == "fail"
+    assert outside.stat().st_mode & 0o777 == 0o755
+    assert snapshot(outside) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_symlinked_ledger_is_not_migrated(isolated_home, tmp_path_factory):
+    target = old_ledger(tmp_path_factory.mktemp("elsewhere"))
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "intents.sqlite3").symlink_to(target)
+    check = one(doctor.check_intents, ctx(fix=True))
+    assert check.status == "fail"
+    assert "symlink" in check.summary
+    assert user_version(target) == 0
+    assert one(doctor.check_home, ctx(fix=True)).status == "fail"
 
 
 # Intents
@@ -338,11 +386,19 @@ def test_fix_migrates_an_old_ledger(isolated_home):
     assert user_version(path) == storage.SCHEMA_VERSION
 
 
-def names(directory: Path) -> list[str]:
-    return sorted(path.name for path in directory.iterdir())
+def test_no_fix_reads_a_wal_ledger_without_writing(isolated_home):
+    path = ledger([("k1", ENDPOINT, ADDRESS, "executed")])
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    connection.close()
+    assert names(path.parent) == ["intents.sqlite3"]
+    before = snapshot(isolated_home)
+    code, _output = run_cli("doctor", "--offline", "--no-fix")
+    assert code == 0
+    assert snapshot(isolated_home) == before
 
 
-def test_uncheckpointed_wal_rows_are_read():
+def test_no_fix_reads_rows_from_a_live_wal_without_touching_it():
     save()
     path = ledger([])
     writer = sqlite3.connect(path, isolation_level=None)
@@ -354,12 +410,17 @@ def test_uncheckpointed_wal_rows_are_read():
             " created_at) VALUES ('k-wal', ?, ?, 'OPEN_TRADE', 'unknown', '', 0)",
             (ENDPOINT, ADDRESS.lower()),
         )
-        assert "intents.sqlite3-wal" in names(path.parent)
+        before = snapshot(path.parent)
         check = one(doctor.check_intents, ctx())
+        after = snapshot(path.parent)
     finally:
         writer.close()
-    assert check.status == "fail"
     assert check.details["blocking"] == ["k-wal"]
+    assert after == before
+
+
+def names(directory: Path) -> list[str]:
+    return sorted(path.name for path in directory.iterdir())
 
 
 def test_naive_session_expiry_fails_the_session_check_and_continues(isolated_home):
@@ -419,6 +480,8 @@ class Stub:
         self.enabled = enabled
         self.network = network
         self.intents: list[dict[str, Any]] = []
+        # Seconds to drip the userIntents reply over, one byte at a time.
+        self.intents_drip = 0.0
         self.queries: list[str] = []
 
 
@@ -436,11 +499,30 @@ def http_stub() -> Iterator[tuple[str, Stub]]:
             self.end_headers()
             self.wfile.write(body)
 
+        def drip(self, value: dict[str, Any]) -> None:
+            body = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            end = time.monotonic() + state.intents_drip
+            sent = 0
+            while time.monotonic() < end and sent < len(body) - 1:
+                self.wfile.write(body[sent : sent + 1])
+                self.wfile.flush()
+                sent += 1
+                time.sleep(0.1)
+            time.sleep(max(end - time.monotonic(), 0))
+            self.wfile.write(body[sent:])
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.queries.append(body["query"])
             if "userIntents" in body["query"]:
-                self.reply({"data": {"userIntents": state.intents}})
+                if state.intents_drip:
+                    self.drip({"data": {"userIntents": state.intents}})
+                else:
+                    self.reply({"data": {"userIntents": state.intents}})
                 return
             assert "oneClickTrading" in body["query"]
             route = {
@@ -574,8 +656,9 @@ def test_network_checks_stop_at_the_deadline(drip_server, monkeypatch):
     assert keeper_check.summary == "No answer within 1 s"
 
 
-def deaf_ws_server() -> tuple[str, threading.Event]:
-    """A WebSocket server that acks connection_init and ignores the close."""
+def deaf_ws_server(ack: bool = True) -> tuple[str, threading.Event]:
+    """A WebSocket server that ignores the close; with ACK false it also
+    ignores connection_init."""
     stop = threading.Event()
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -602,8 +685,9 @@ def deaf_ws_server() -> tuple[str, threading.Event]:
                 + b"\r\nSec-WebSocket-Protocol: graphql-transport-ws\r\n\r\n"
             )
             conn.recv(4096)  # connection_init
-            ack = json.dumps({"type": "connection_ack"}).encode()
-            conn.sendall(bytes([0x81, len(ack)]) + ack)
+            if ack:
+                reply = json.dumps({"type": "connection_ack"}).encode()
+                conn.sendall(bytes([0x81, len(reply)]) + reply)
             stop.wait(15)
 
     threading.Thread(target=serve_one, daemon=True).start()
@@ -618,6 +702,17 @@ def test_handshake_close_fits_in_the_timeout():
     finally:
         stop.set()
     assert time.monotonic() - start < 1.5
+
+
+def test_handshake_without_ack_fails_within_the_timeout():
+    ws, stop = deaf_ws_server(ack=False)
+    start = time.monotonic()
+    try:
+        with pytest.raises(stream.DISCONNECTS):
+            stream.handshake(ws, 0.5)
+    finally:
+        stop.set()
+    assert time.monotonic() - start < 1.0
 
 
 def test_trading_disabled_warns(http_stub):
@@ -734,6 +829,29 @@ def test_fix_reconciles_a_blocking_intent_with_keeper(http_stub):
     assert check.summary == f"Reconciled intent {KEY} with Keeper"
     assert ledger_status(KEY) == "terminal"
     assert all("mutation" not in query for query in state.queries)
+
+
+def test_late_keeper_answer_never_writes_the_ledger(http_stub, monkeypatch):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDRESS,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    state.intents_drip = 1.5
+    monkeypatch.setattr(doctor, "NETWORK_DEADLINE", 0.5)
+    start = time.monotonic()
+    check = one(doctor.check_intents, ctx(endpoint, fix=True))
+    assert time.monotonic() - start < 1.2
+    assert check.status == "fail"
+    assert check.details["reconcileError"] == "no answer within 0.5 s"
+    time.sleep(1.5)  # the answer arrives; the worker must not write it
+    assert ledger_status(KEY) == "unknown"
 
 
 def test_intent_keeper_cannot_settle_still_fails(http_stub):

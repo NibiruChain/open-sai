@@ -220,11 +220,14 @@ admission does not establish execution or finality.
 
 `sai doctor` checks the install, `$SAI_HOME/trader`, the session, the intent
 ledger, and the Keeper HTTP, WebSocket, and LCD endpoints, and fixes what it
-safely can. It creates `$SAI_HOME/trader`, sets it to mode 0700 and its files
-to 0600, migrates the intent ledger, and reconciles unknown intents for the
-signed-in account the way `sai intent status` does (a Keeper read; it never
-places or cancels a trade). It never deletes or rewrites the session and
-never prints its token.
+safely can. It creates `$SAI_HOME/trader`, removes group and other access
+from it and the files sai keeps there (the session, the ledger and its
+journals, and the shell history), migrates the intent ledger, and reconciles
+unknown intents for the signed-in account the way `sai intent status` does
+(a Keeper read; it never places or cancels a trade). It never deletes or
+rewrites the session, never writes through a symlink in `$SAI_HOME/trader`,
+and never prints the session token. Without fixes it reads the ledger from a
+temporary copy, so it writes nothing at all.
 
 Each check prints pass, fixed, warn, fail, or skipped, with what changed or
 the command that fixes it. Doctor exits 1 if any check still fails;

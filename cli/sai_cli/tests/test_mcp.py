@@ -112,6 +112,7 @@ class FakeKeeper:
         query: str,
         variables: dict[str, Any] | None = None,
         token: str | None = None,
+        timeout: float = 20,
     ) -> dict[str, Any]:
         self.calls.append((query, variables))
         if query == keeper.SUBMIT:
