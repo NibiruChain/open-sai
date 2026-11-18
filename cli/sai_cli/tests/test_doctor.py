@@ -266,6 +266,26 @@ def test_symlinked_ledger_is_not_migrated(isolated_home, tmp_path_factory):
     assert one(doctor.check_home, ctx(fix=True)).status == "fail"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_tighten_refuses_a_path_swapped_for_a_symlink(isolated_home, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    target = outside / "secret"
+    target.write_text("x")
+    target.chmod(0o644)
+    root = isolated_home / "trader"
+    root.mkdir(mode=0o700)
+    (root / "session.json").symlink_to(target)
+    changes, failed = doctor.tighten(root, doctor.MANAGED)
+    assert changes == []
+    assert failed == [f"chmod go-rwx {root / 'session.json'}"]
+    assert target.stat().st_mode & 0o777 == 0o644
+    linked = isolated_home / "linked"
+    linked.symlink_to(outside)
+    outside.chmod(0o755)
+    assert doctor.tighten(linked, doctor.MANAGED) == ([], [f"chmod go-rwx {linked}"])
+    assert outside.stat().st_mode & 0o777 == 0o755
+
+
 # Intents
 
 
@@ -419,6 +439,53 @@ def test_no_fix_reads_rows_from_a_live_wal_without_touching_it():
     assert after == before
 
 
+def add_unknown(key: str, account: str = ADDRESS, endpoint: str = ENDPOINT) -> None:
+    with storage.db() as connection:
+        connection.execute(
+            "INSERT INTO intents (id, endpoint, account, kind, status, entity,"
+            " created_at) VALUES (?, ?, ?, 'OPEN_TRADE', 'unknown', '', ?)",
+            (key, endpoint, account.lower(), time.time()),
+        )
+    connection.close()
+
+
+def test_snapshot_retries_when_the_ledger_changes_during_the_copy(monkeypatch):
+    save()
+    path = ledger([])
+    copy = doctor.shutil.copyfile
+    writes = iter(["k-late"])
+
+    def copy_then_write(source, target):
+        result = copy(source, target)
+        key = next(writes, None)
+        if key:
+            time.sleep(0.01)
+            add_unknown(key)
+        return result
+
+    monkeypatch.setattr(doctor.shutil, "copyfile", copy_then_write)
+    check = one(doctor.check_intents, ctx())
+    assert check.details["blocking"] == ["k-late"]
+    assert path.is_file()
+
+
+def test_ledger_that_keeps_changing_warns(monkeypatch):
+    ledger([])
+    copy = doctor.shutil.copyfile
+    count = iter(range(100))
+
+    def copy_then_write(source, target):
+        result = copy(source, target)
+        time.sleep(0.01)
+        add_unknown(f"k{next(count)}", account=OTHER)
+        return result
+
+    monkeypatch.setattr(doctor.shutil, "copyfile", copy_then_write)
+    check = one(doctor.check_intents, ctx())
+    assert check.status == "warn"
+    assert "changed while reading" in check.summary
+
+
 def names(directory: Path) -> list[str]:
     return sorted(path.name for path in directory.iterdir())
 
@@ -482,6 +549,8 @@ class Stub:
         self.intents: list[dict[str, Any]] = []
         # Seconds to drip the userIntents reply over, one byte at a time.
         self.intents_drip = 0.0
+        # Called before each userIntents reply.
+        self.on_intents: Any = None
         self.queries: list[str] = []
 
 
@@ -519,6 +588,8 @@ def http_stub() -> Iterator[tuple[str, Stub]]:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.queries.append(body["query"])
             if "userIntents" in body["query"]:
+                if state.on_intents:
+                    state.on_intents()
                 if state.intents_drip:
                     self.drip({"data": {"userIntents": state.intents}})
                 else:
@@ -851,6 +922,52 @@ def test_late_keeper_answer_never_writes_the_ledger(http_stub, monkeypatch):
     assert check.status == "fail"
     assert check.details["reconcileError"] == "no answer within 0.5 s"
     time.sleep(1.5)  # the answer arrives; the worker must not write it
+    assert ledger_status(KEY) == "unknown"
+
+
+def test_new_unknown_intent_during_reconcile_still_blocks(http_stub):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDRESS,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    state.on_intents = lambda: add_unknown("k-new", endpoint=endpoint)
+    check = one(doctor.check_intents, ctx(endpoint, fix=True))
+    assert check.status == "fail"
+    assert check.details["blocking"] == ["k-new"]
+    assert check.changes == [f"reconciled intent {KEY} with Keeper"]
+
+
+def test_locked_ledger_write_gives_up_at_the_deadline(http_stub, monkeypatch):
+    base, state = http_stub
+    endpoint = f"{base}/query"
+    blocked_on(endpoint)
+    state.intents = [
+        {
+            "intentKey": KEY,
+            "evmAddress": ADDRESS,
+            "execActor": "server",
+            "lifecycleStep": "exec_fail",
+        }
+    ]
+    holder = sqlite3.connect(storage.home() / "intents.sqlite3", isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        start = time.monotonic()
+        outcome = doctor.reconcile_keys(endpoint, ADDRESS, [KEY], 1.0)
+        took = time.monotonic() - start
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert took < 2
+    assert "error" in outcome
+    time.sleep(0.5)
     assert ledger_status(KEY) == "unknown"
 
 

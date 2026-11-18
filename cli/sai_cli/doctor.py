@@ -192,6 +192,53 @@ def loose_modes(paths: Sequence[Path]) -> list[tuple[Path, int, int]]:
     return loose
 
 
+def tighten(root: Path, names: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Clear group and other bits on ROOT and each of NAMES in it.
+
+    Every chmod goes through a descriptor opened with O_NOFOLLOW, and the
+    files open relative to the directory's descriptor, so a path swapped for
+    a symlink after the checks fails to open instead of redirecting the
+    chmod. Returns the changes made and the fix commands for paths it could
+    not change.
+    """
+    changes: list[str] = []
+    failed: list[str] = []
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    except OSError:
+        return changes, [f"chmod go-rwx {root}"]
+    try:
+        for name in (None, *names):
+            path = root if name is None else root / name
+            try:
+                fd = (
+                    dir_fd
+                    if name is None
+                    else os.open(
+                        name, os.O_RDONLY | os.O_NONBLOCK | nofollow, dir_fd=dir_fd
+                    )
+                )
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failed.append(f"chmod go-rwx {path}")
+                continue
+            try:
+                mode = stat.S_IMODE(os.fstat(fd).st_mode)
+                if mode & 0o077:
+                    os.fchmod(fd, mode & ~0o077)
+                    changes.append(f"chmod {path} {mode:o} -> {mode & ~0o077:o}")
+            except OSError:
+                failed.append(f"chmod go-rwx {path}")
+            finally:
+                if fd != dir_fd:
+                    os.close(fd)
+    finally:
+        os.close(dir_fd)
+    return changes, failed
+
+
 def check_home(ctx: Context) -> Check:
     """`$SAI_HOME/trader` exists, and only its owner can read it or the
     files sai keeps there."""
@@ -243,14 +290,7 @@ def check_home(ctx: Context) -> Check:
             commands,
             details,
         )
-    changes: list[str] = []
-    failed: list[str] = []
-    for path, mode, wanted in loose:
-        try:
-            path.chmod(wanted)
-            changes.append(f"chmod {path} {mode:o} -> {wanted:o}")
-        except OSError:
-            failed.append(f"chmod go-rwx {path}")
+    changes, failed = tighten(root, MANAGED)
     if failed:
         return Check(
             "home",
@@ -260,6 +300,8 @@ def check_home(ctx: Context) -> Check:
             details,
             changes=changes,
         )
+    if not changes:
+        return Check("home", "pass", f"{root} is private", None, details)
     return Check(
         "home",
         "fixed",
@@ -340,6 +382,26 @@ def ledger_path() -> Path:
 LEDGER_JOURNALS = ("-wal", "-journal")
 
 
+SNAPSHOT_ATTEMPTS = 3
+
+
+class LedgerChanged(Exception):
+    """Another process kept writing the ledger while doctor copied it."""
+
+
+def ledger_fingerprint(path: Path) -> list[tuple[int, int, int] | None]:
+    """Size, mtime, and inode of the ledger and each journal, or None."""
+    marks: list[tuple[int, int, int] | None] = []
+    for suffix in ("", *LEDGER_JOURNALS):
+        try:
+            info_ = path.with_name(path.name + suffix).stat()
+        except FileNotFoundError:
+            marks.append(None)
+            continue
+        marks.append((info_.st_size, info_.st_mtime_ns, info_.st_ino))
+    return marks
+
+
 @contextmanager
 def ledger_snapshot(path: Path) -> Generator[sqlite3.Connection]:
     """Read a private copy of the ledger at PATH with its WAL or rollback
@@ -349,14 +411,26 @@ def ledger_snapshot(path: Path) -> Generator[sqlite3.Connection]:
     creates `-wal` and `-shm` files for a WAL-mode database and recovers a
     hot rollback journal. The copy lives in a temporary directory, so any
     recovery happens there and `$SAI_HOME` stays untouched.
+
+    The database and its journals are copied one at a time, so a checkpoint
+    in between could leave a copy missing committed rows. The copy is kept
+    only if no file changed while it was taken; otherwise doctor retries, and
+    raises LedgerChanged after SNAPSHOT_ATTEMPTS tries.
     """
     with tempfile.TemporaryDirectory(prefix="sai-doctor-") as temp:
         copy = Path(temp) / path.name
-        shutil.copyfile(path, copy)
-        for suffix in LEDGER_JOURNALS:
-            journal = path.with_name(path.name + suffix)
-            if journal.is_file():
-                shutil.copyfile(journal, copy.with_name(copy.name + suffix))
+        for _attempt in range(SNAPSHOT_ATTEMPTS):
+            before = ledger_fingerprint(path)
+            for suffix in ("", *LEDGER_JOURNALS):
+                source = path.with_name(path.name + suffix)
+                target = copy.with_name(copy.name + suffix)
+                target.unlink(missing_ok=True)
+                if source.is_file():
+                    shutil.copyfile(source, target)
+            if ledger_fingerprint(path) == before:
+                break
+        else:
+            raise LedgerChanged
         connection = sqlite3.connect(copy, timeout=5)
         try:
             yield connection
@@ -385,11 +459,13 @@ def read_ledger(path: Path) -> tuple[int, str, list[tuple[str, str, str]]]:
 
 
 class WriteGate:
-    """Allows ledger writes until `shut`; a write in progress finishes first."""
+    """Allows ledger writes until `shut` or END (a monotonic time); a write in
+    progress finishes first, and gives up waiting for a lock at END."""
 
-    def __init__(self) -> None:
+    def __init__(self, end: float) -> None:
         self._lock = threading.Lock()
         self._open = True
+        self._end = end
 
     def shut(self) -> None:
         with self._lock:
@@ -398,9 +474,13 @@ class WriteGate:
     @contextmanager
     def write(self) -> Generator[None]:
         with self._lock:
-            if not self._open:
+            left = self._end - time.monotonic()
+            if not self._open or left <= 0:
                 raise TimeoutError("doctor's deadline passed; not writing")
-            yield
+            # A write that waits on another process's lock gives up at the
+            # deadline instead of holding the gate past it.
+            with storage.busy_timeout(left):
+                yield
 
 
 def reconcile_keys(
@@ -415,8 +495,8 @@ def reconcile_keys(
     daemon thread cannot keep the process alive. Returns any error.
     """
     outcome: dict[str, Any] = {}
-    gate = WriteGate()
     end = time.monotonic() + deadline
+    gate = WriteGate(end)
 
     def work() -> None:
         try:
@@ -492,16 +572,20 @@ def check_intents(ctx: Context) -> Check:
                 f"migrated the ledger from schema {version} to {storage.SCHEMA_VERSION}"
             )
             version, _integrity, rows = read_ledger(path)
+    except LedgerChanged:
+        return changed_check({}, changes)
     except (sqlite3.Error, OSError):
         return Check("intents", "fail", "Intent ledger is unreadable", fix_corrupt, {})
     state = ctx.session
     address = state.get("address") if state.get("endpointMatches") else None
-    blocking = [
-        key
-        for key, endpoint, owner in rows
-        if address is not None
-        and (endpoint, owner) == (ctx.config.endpoint, address.lower())
-    ]
+
+    def blocks(endpoint: str, owner: str) -> bool:
+        return address is not None and (endpoint, owner) == (
+            ctx.config.endpoint,
+            address.lower(),
+        )
+
+    blocking = [key for key, endpoint, owner in rows if blocks(endpoint, owner)]
     details: dict[str, Any] = {"userVersion": version}
     if blocking and ctx.fix and not ctx.offline and address is not None:
         outcome = reconcile_keys(
@@ -511,6 +595,8 @@ def check_intents(ctx: Context) -> Check:
             details["reconcileError"] = outcome["error"]
         try:
             _version, _integrity, rows = read_ledger(path)
+        except LedgerChanged:
+            return changed_check(details, changes)
         except (sqlite3.Error, OSError):
             return Check(
                 "intents", "fail", "Intent ledger is unreadable", fix_corrupt, {}
@@ -519,8 +605,14 @@ def check_intents(ctx: Context) -> Check:
         for key in blocking:
             if key not in remaining:
                 changes.append(f"reconciled intent {key} with Keeper")
-        blocking = [key for key in blocking if key in remaining]
-    others = [(endpoint, owner) for key, endpoint, owner in rows if key not in blocking]
+        # Classify every unknown row again: another process may have
+        # reserved a new intent for this account meanwhile.
+        blocking = [key for key, endpoint, owner in rows if blocks(endpoint, owner)]
+    others = [
+        (endpoint, owner)
+        for _key, endpoint, owner in rows
+        if not blocks(endpoint, owner)
+    ]
     accounts = len(set(others))
     details.update(
         unknown=len(rows),
@@ -534,6 +626,17 @@ def check_intents(ctx: Context) -> Check:
         summary = "; ".join(changes)
         check.summary = summary[0].upper() + summary[1:]
     return check
+
+
+def changed_check(details: dict[str, Any], changes: list[str]) -> Check:
+    return Check(
+        "intents",
+        "warn",
+        "Intent ledger changed while reading; another sai process is writing it",
+        "Run sai doctor again once other sai commands finish",
+        details,
+        changes=changes,
+    )
 
 
 def intents_status(
