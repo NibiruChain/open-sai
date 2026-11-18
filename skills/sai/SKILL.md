@@ -29,6 +29,13 @@ balances ADDRESS`, and `account history ADDRESS` for data. Use `watch price
 TOKEN_ID`, `watch positions ADDRESS`, or `watch balances ADDRESS` for streams.
 Streams reconnect after transport interruptions and emit a new snapshot.
 
+When a command fails in a way you cannot explain, run `sai --json doctor`.
+It fixes file modes, the ledger schema, and unknown intents it can settle
+with Keeper, and lists each change under `changes`; it never trades. Each
+check has a `status` (pass, fixed, warn, fail, or skipped) and a `fix`
+command. Show the person what doctor changed, then the checks that still fail
+and their fixes. Use `--no-fix` to look without changing anything.
+
 ## Connect Sai
 
 When the person asks you to connect Sai:

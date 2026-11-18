@@ -100,6 +100,7 @@ class FakeKeeper:
         query: str,
         variables: dict[str, Any] | None = None,
         token: str | None = None,
+        timeout: float = 20,
     ) -> dict[str, Any]:
         if query == keeper.SUBMIT:
             assert variables is not None

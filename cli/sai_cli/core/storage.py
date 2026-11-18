@@ -13,6 +13,8 @@ import sys
 import tempfile
 import time
 from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -313,12 +315,28 @@ def _migrate(connection: sqlite3.Connection) -> None:
         raise
 
 
+# Seconds a ledger write waits for another process's SQLite lock. A caller
+# with a deadline, such as `sai doctor`, lowers it with `busy_timeout`.
+_BUSY_TIMEOUT: ContextVar[float] = ContextVar("busy_timeout", default=10)
+
+
+@contextmanager
+def busy_timeout(seconds: float) -> Generator[None]:
+    """Make ledger connections opened in this context wait at most SECONDS
+    for a lock."""
+    token = _BUSY_TIMEOUT.set(seconds)
+    try:
+        yield
+    finally:
+        _BUSY_TIMEOUT.reset(token)
+
+
 def db() -> sqlite3.Connection:
     path = directory() / "intents.sqlite3"
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(fd)
     path.chmod(0o600)
-    connection = sqlite3.connect(path, timeout=10)
+    connection = sqlite3.connect(path, timeout=_BUSY_TIMEOUT.get())
     _migrate(connection)
     return connection
 

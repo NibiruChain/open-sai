@@ -59,26 +59,46 @@ ADMISSION_EXPIRY_SECONDS = 120
 ABSENT_AFTER_SECONDS = ADMISSION_EXPIRY_SECONDS + 180
 
 
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def check_url(url: str, label: str, secure: str = "https") -> None:
+    """Refuse URL unless it uses SECURE (`https` or `wss`), or the plain
+    scheme on loopback, and carries no credentials.
+
+    LABEL names the endpoint in the error, such as `Keeper` or `LCD`.
+    """
+    plain = secure.removesuffix("s")
+    parts = urlsplit(url)
+    if parts.scheme != secure and not (
+        parts.scheme == plain and parts.hostname in LOOPBACK
+    ):
+        raise ValueError(
+            f"{label} endpoint must use {secure.upper()}, except on loopback"
+        )
+    if parts.username or parts.password:
+        raise ValueError(f"Credentials are not allowed in the {label} URL")
+
+
 def request(
     endpoint: str,
     query: str,
     variables: dict[str, Any] | None = None,
     token: str | None = None,
+    timeout: float = 20,
 ) -> dict[str, Any]:
-    url = urlsplit(endpoint)
-    if url.scheme != "https" and not (
-        url.scheme == "http" and url.hostname in ("localhost", "127.0.0.1", "::1")
-    ):
-        raise KeeperError("Keeper endpoint must use HTTPS, except on loopback")
-    if url.username or url.password:
-        raise KeeperError("Credentials are not allowed in the Keeper URL")
+    """Send one GraphQL request; TIMEOUT applies to each phase in seconds."""
+    try:
+        check_url(endpoint, "Keeper")
+    except ValueError as exc:
+        raise KeeperError(str(exc)) from exc
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         response = httpx.post(
             endpoint,
             json={"query": query, "variables": variables or {}},
             headers=headers,
-            timeout=20,
+            timeout=timeout,
         )
         response.raise_for_status()
         result = response.json()

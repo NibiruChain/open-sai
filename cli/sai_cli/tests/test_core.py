@@ -306,7 +306,7 @@ def test_wallet_signing_omits_only_empty_undeclared_domain_fields(monkeypatch, s
         "message": {"account": session["evmAddress"], "challenge": "0x" + "ab" * 32},
     }
 
-    def query(endpoint, query, variables=None, token=None):
+    def query(endpoint, query, variables=None, token=None, timeout=20):
         if query == keeper.CHALLENGE:
             return {
                 "createUserIntentAuthChallenge": {
@@ -387,7 +387,7 @@ def test_exec_pass_requires_matching_trade_history(session, monkeypatch):
     storage.pending(key, keeper.MAINNET_HTTP, address, "CLOSE_POSITION", "1")
     matched = False
 
-    def query(endpoint, query, variables=None, token=None):
+    def query(endpoint, query, variables=None, token=None, timeout=20):
         if query == keeper.INTENTS:
             return {
                 "userIntents": [

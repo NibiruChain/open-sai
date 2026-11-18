@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shlex
@@ -819,6 +820,53 @@ def partial_close(
         )
     except (ValueError, KeyError, TypeError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.command("doctor")
+@click.option(
+    "--offline", is_flag=True, help="Skip the Keeper, WebSocket, and LCD checks."
+)
+@click.option("--no-fix", is_flag=True, help="Report problems without fixing any.")
+@click.option(
+    "--ws-endpoint",
+    help="Keeper WebSocket endpoint. Defaults to the keeper.ws_endpoint setting.",
+)
+@click.option(
+    "--lcd-endpoint",
+    help="Nibiru REST endpoint. Defaults to the lcd.endpoint setting.",
+)
+@click.pass_context
+def doctor_command(
+    ctx: click.Context,
+    offline: bool,
+    no_fix: bool,
+    ws_endpoint: str | None,
+    lcd_endpoint: str | None,
+) -> None:
+    """Check the install, session, intent ledger, and endpoints, and fix what
+    is safe to fix.
+
+    Fixes: create $SAI_HOME/trader, make it and its files private, migrate
+    the intent ledger, and reconcile unknown intents for the signed-in
+    account with Keeper (a read; no trade is placed or cancelled). It never
+    deletes or rewrites the session, and never prints its token. Each check
+    prints pass, fixed, warn, fail, or skipped, with a fix for the rest. Exits
+    1 if any check still fails.
+    """
+    from . import doctor
+
+    config = dataclasses.replace(
+        settings(ctx),
+        ws_endpoint=ws_url(ctx, ws_endpoint),
+        lcd_endpoint=lcd_url(ctx, lcd_endpoint),
+    )
+    checks = doctor.run_checks(doctor.context(config, fix=not no_fix, offline=offline))
+    if ctx.obj["json"]:
+        click.echo(doctor.render_json(doctor.report(checks)))
+    else:
+        click.echo(doctor.render_text(checks))
+    if doctor.overall(checks) == "fail":
+        ctx.exit(1)
 
 
 @main.group()
