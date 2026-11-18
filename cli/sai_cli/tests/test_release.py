@@ -16,17 +16,29 @@ import release
 
 
 def test_tag_error():
-    assert check_release.tag_error("v0.1.0", "0.1.0") is None
-    assert check_release.tag_error("v0.2.0-rc.1", "0.2.0-rc.1") is None
-    assert "does not match" in str(check_release.tag_error("v0.2.0", "0.1.0"))
-    for tag in ("0.1.0", "v0.1", "v0.1.0-beta", "v0.1.0rc1"):
+    assert check_release.tag_for("0.1.0") == "sai-cli/v0.1.0"
+    assert check_release.tag_error("sai-cli/v0.1.0", "0.1.0") is None
+    assert check_release.tag_error("sai-cli/v0.2.0-rc.1", "0.2.0-rc.1") is None
+    assert "does not match" in str(check_release.tag_error("sai-cli/v0.2.0", "0.1.0"))
+    bad = (
+        "v0.1.0",
+        "0.1.0",
+        "sai-cli/0.1.0",
+        "sai-cli/v0.1",
+        "sai-cli/v0.1.0-beta",
+        "sai-cli/v0.1.0rc1",
+        "sai-rs/v0.1.0",
+        "x/sai-cli/v0.1.0",
+    )
+    for tag in bad:
         assert "is not" in str(check_release.tag_error(tag, "0.1.0")), tag
 
 
 def test_check_release_matches_this_pyproject():
     version = check_release.pyproject_version()
-    assert check_release.main([f"v{version}"]) == 0
-    assert check_release.main(["v0.0.0-rc.0"]) == 1
+    assert check_release.main([f"sai-cli/v{version}"]) == 0
+    assert check_release.main(["sai-cli/v0.0.0-rc.0"]) == 1
+    assert check_release.main([f"v{version}"]) == 1
     assert check_release.main([]) == 2
 
 
@@ -64,7 +76,8 @@ def run(repo: Path, version: str, go: bool = False) -> int:
 def test_dry_run_checks_and_changes_nothing(repo, capsys):
     assert run(repo, "1.2.3") == 0
     out = capsys.readouterr().out
-    assert "git tag --annotate v1.2.3" in out
+    assert "git tag --annotate sai-cli/v1.2.3" in out
+    assert "git push origin refs/tags/sai-cli/v1.2.3" in out
     assert "Dry run" in out
     assert git(repo, "tag", "--list") == ""
     assert git(repo, "ls-remote", "--tags", "origin") == ""
@@ -72,8 +85,8 @@ def test_dry_run_checks_and_changes_nothing(repo, capsys):
 
 def test_run_tags_and_pushes(repo):
     assert run(repo, "1.2.3", go=True) == 0
-    assert git(repo, "cat-file", "-t", "v1.2.3") == "tag"
-    assert "refs/tags/v1.2.3" in git(repo, "ls-remote", "--tags", "origin")
+    assert git(repo, "cat-file", "-t", "sai-cli/v1.2.3") == "tag"
+    assert "refs/tags/sai-cli/v1.2.3" in git(repo, "ls-remote", "--tags", "origin")
     # A second release of the same version is refused.
     assert run(repo, "1.2.3") == 1
 
