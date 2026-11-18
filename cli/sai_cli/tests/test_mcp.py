@@ -828,6 +828,33 @@ def test_trade_acts_as_the_requested_connected_account(mcp, monkeypatch):
     assert storage.load_session()["evmAddress"] == OTHER
 
 
+def test_trade_checks_sign_in_for_the_requested_account(mcp, monkeypatch):
+    """With the active account signed in, a trade for another connected
+    account that expired, or one that is not connected, is still refused
+    before any Keeper call."""
+    storage.save_session(stored_session(hours=-1))
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+    fake = FakeKeeper({keeper.MARKETS: markets()})
+    monkeypatch.setattr(keeper, "request", fake)
+    assert invoke(mcp, "mcp_info")["trading"]["available"] is True
+    expired = invoke(
+        mcp,
+        "trade_close",
+        {"trade_id": 7, "preview_digest": "0" * 64, "address": ADDRESS},
+    )
+    assert expired["code"] == "SESSION_EXPIRED"
+    missing = invoke(
+        mcp,
+        "trade_close",
+        {"trade_id": 7, "preview_digest": "0" * 64, "address": "0x" + "d" * 40},
+    )
+    assert missing["code"] == "SESSION_UNAVAILABLE"
+    assert "is not connected" in missing["error"]
+    assert fake.calls == []
+
+
 def test_switching_accounts_after_a_preview_refuses_the_trade(mcp, monkeypatch):
     connect_two_accounts()
     fake = FakeKeeper()
