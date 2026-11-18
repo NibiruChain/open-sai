@@ -24,10 +24,18 @@ uv tool install git+https://github.com/SaiDotFun/open-sai
 sai --help
 ```
 
-Upgrade with `uv tool upgrade sai-cli`, or rerun the install command with
-`--reinstall`. Both Git commands install from `main`. `sai --version`
-prints the installed version. The package is `sai-cli` and is not on PyPI
-yet, so `uv tool install sai` installs an unrelated PyPI package.
+Both Git commands install from `main`. `sai --version` prints the installed
+version, and `sai update --check` compares it with the latest GitHub release
+and prints the command that installs it:
+
+```bash
+uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai@vX.Y.Z
+```
+
+`sai update` does not install updates by itself yet.
+
+The package is `sai-cli` and is not on PyPI yet, so `uv tool install sai`
+installs an unrelated PyPI package.
 
 Agents: run `sai --skill` to print the agent skill that matches the installed
 version. Agents that load skills ahead of time can install it with

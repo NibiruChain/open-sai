@@ -16,7 +16,15 @@ from typing import Any
 import click
 
 from . import mcp_install
-from .core import clipboard, keeper, reconcile, storage, stream, trading
+from .core import (
+    clipboard,
+    keeper,
+    reconcile,
+    storage,
+    stream,
+    trading,
+    update,
+)
 from .core import session as sessions
 from .core import settings as sai_settings
 from .utils.repl_skin import ReplSkin
@@ -1314,6 +1322,76 @@ def mcp_uninstall(
         for r in mcp_install.uninstall_client(found[n], scope, dry_run, target)
     ]
     finish(ctx, results)
+
+
+# Exit code for an install `sai update` cannot change in place.
+EXIT_UNSUPPORTED = 3
+
+
+def update_report(
+    installed: str, latest: str, install: update.Install
+) -> dict[str, Any]:
+    newer = update.is_newer(latest, installed)
+    return {
+        "installed": installed,
+        "latest": latest.removeprefix("v"),
+        "latestTag": latest,
+        "updateAvailable": newer,
+        "install": install.to_json(),
+        "reinstall": update.reinstall_command(latest) if newer else None,
+    }
+
+
+def print_update_report(report: dict[str, Any]) -> None:
+    kind = report["install"]["kind"]
+    click.echo(f"installed  {report['installed']} ({kind})")
+    click.echo(f"latest     {report['latest']}")
+    if not report["updateAvailable"]:
+        click.echo("sai is up to date.")
+        return
+    if kind == update.CHECKOUT:
+        click.echo("A newer version is available. This is a source checkout;")
+        click.echo("pull and run `uv sync` to update it.")
+        return
+    click.echo("A newer version is available. To install it, run:")
+    click.echo(f"  {report['reinstall']}")
+
+
+@main.command("update")
+@click.option("--check", is_flag=True, help="Report the latest version only.")
+@click.option("--api-base", default=update.API_BASE, hidden=True)
+@click.option("--web-base", default=update.WEB_BASE, hidden=True)
+@click.pass_context
+def update_command(
+    ctx: click.Context, check: bool, api_base: str, web_base: str
+) -> None:
+    """Compare the installed version with the latest GitHub release.
+
+    `--check` reports the installed and latest versions and how sai was
+    installed. Installing updates comes in a later release; until then,
+    reinstall with the command `--check` prints.
+    """
+    if not check:
+        click.echo(
+            "`sai update` cannot install updates yet; that comes in a later"
+            " release. Run `sai update --check`, then reinstall with:\n"
+            f"  {update.reinstall_command()}",
+            err=True,
+        )
+        ctx.exit(EXIT_UNSUPPORTED)
+    try:
+        latest = update.fetch_latest(api_base=api_base, web_base=web_base)
+    except update.UpdateError as exc:
+        raise click.ClickException(f"update check failed: {exc}") from exc
+    try:
+        update.write_cache(update.Cache(latest, update.now()))
+    except OSError as exc:
+        warn(f"Warning: could not save the update check: {exc}")
+    report = update_report(package_version(), latest, update.install_kind())
+    if ctx.obj["json"]:
+        emit(ctx, report)
+    else:
+        print_update_report(report)
 
 
 if __name__ == "__main__":

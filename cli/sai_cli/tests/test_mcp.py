@@ -19,8 +19,9 @@ from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import TextContent
-from sai_cli.core import keeper, margin, settings, storage, stream
+from sai_cli.core import keeper, margin, settings, storage, stream, update
 from sai_cli.core import session as sessions
+from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 from sai_cli.sai_cli import main
 
@@ -1262,6 +1263,23 @@ def test_mcp_info_strips_credentials_from_endpoints(monkeypatch):
     for secret in ("user:pw", "key=", "apikey", "u:p@", "t=s"):
         assert secret not in text
     assert settings.public_url("http://[::1]:9/q?x=1") == "http://[::1]:9/q"
+
+
+def test_mcp_info_reports_versions_without_network(mcp, monkeypatch):
+    info = invoke(mcp, "mcp_info")
+    assert info["version"] == sai_info.RUNNING_VERSION == sai_info.version()
+    assert info["installedVersion"] == info["version"]
+    assert info["restartNeeded"] is False
+    assert info["latestVersion"] is None
+
+    update.write_cache(update.Cache("v9.8.7", update.now()))
+    # A process started before a reinstall still runs its old version.
+    monkeypatch.setattr(sai_info, "RUNNING_VERSION", "0.0.1")
+    info = invoke(mcp, "mcp_info")
+    assert info["version"] == "0.0.1"
+    assert info["installedVersion"] == sai_info.version()
+    assert info["restartNeeded"] is True
+    assert info["latestVersion"] == "9.8.7"
 
 
 def test_session_reports_never_include_the_token(mcp):

@@ -708,8 +708,11 @@ def create_server(settings: Settings | None = None) -> FastMCP:
     server = SaiMCP("sai", instructions=INSTRUCTIONS)
 
     async def mcp_info() -> str:
-        """Report this server's version, provenance, endpoints, tools,
+        """Report this server's versions, provenance, endpoints, tools,
         session state, and whether trading is available. Call this first.
+
+        `restartNeeded` is true when a newer sai was installed after this
+        server started; restart the MCP client to load it.
 
         Never read MCP client config files to learn about this server; they
         can hold secrets. The report never includes the session token.
@@ -720,7 +723,7 @@ def create_server(settings: Settings | None = None) -> FastMCP:
             return {
                 "name": "sai",
                 "package": info.PACKAGE,
-                "version": info.version(),
+                **info.versions(),
                 "mcpVersion": info.version("mcp"),
                 "provenance": info.provenance(),
                 "endpoints": {
