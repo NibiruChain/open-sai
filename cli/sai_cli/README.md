@@ -16,7 +16,7 @@ yet: signing out of Sai Web clears only the browser copy, not the CLI's.
 `auth import` stores a token copied from Sai Web. The **Connect Sai CLI /
 MCP** button that copies it is in review
 (https://github.com/SaiDotFun/sai-web/pull/1591); until it ships, use
-`auth login --account` below.
+`auth login NAME` below.
 
 - With a terminal, it asks for the token at a hidden prompt. Press Enter
   without typing to read the clipboard.
@@ -36,19 +36,21 @@ signs, the CLI checks that the typed data has primary type
 `UserTradingSession`, domain `Sai` version `1`, your addr, and the issued
 challenge nonce.
 
-- `auth login --account NAME` uses the Foundry keystore `NAME`. It runs `cast
-  wallet address --account NAME` and `cast wallet sign --account NAME --data
-  --from-file PATH` on your terminal, and `cast` prompts for the keystore
-  password.
-- `auth login --wallet NAME` is for people who use the `ud` tool. The CLI
-  reads the addr from `ud evm wallet show NAME` and signs with `ud evm
-  wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
-  prompt. Login fails unless ud reports the wallet's Cast keystore as
-  `matching`.
+`auth login NAME` picks the key named `NAME`:
 
-`--addr ADDR` is optional. With `--account`, it replaces `cast wallet
-address` and saves one password prompt. With `--wallet`, the CLI refuses to
-sign when it differs from the wallet's addr.
+- If the `ud` tool is on `PATH` and `ud evm wallet show NAME` reports a
+  wallet whose Cast keystore is `matching`, the CLI signs with `ud evm
+  wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
+  prompt. ud holds the password for the keystore of the same name.
+- Otherwise it uses the Foundry keystore `~/.foundry/keystores/NAME`. It
+  runs `cast wallet address --account NAME` and `cast wallet sign --account
+  NAME --data --from-file PATH` on your terminal, and `cast` prompts for the
+  keystore password.
+- With neither, it stops and names where it looked.
+
+`--addr ADDR` is optional. The CLI refuses to sign when the key holds a
+different account. With a keystore, it also replaces `cast wallet address`
+and saves one password prompt.
 
 ### Several Accounts
 

@@ -28,7 +28,7 @@ When the person asks you to connect Sai:
 
 1. Ask them to copy their session token with the **Connect Sai CLI / MCP**
    button in Sai Web. If their Sai Web has no such button yet, ask them to
-   run `sai auth login --account NAME` in their own terminal instead
+   run `sai auth login NAME` in their own terminal instead
    (below).
 2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
    stores the token, clears the clipboard, and prints `addr`,
@@ -43,10 +43,10 @@ Never ask the person to paste the token into the chat, and never pass it as an
 argument, environment variable, or piped input. `auth import` does not accept
 those.
 
-People with a Foundry keystore can instead run `sai auth login --account
-NAME` in their own terminal. `cast` prompts them for the keystore password.
-People who use the `ud` tool can run `sai auth login --wallet NAME`, which
-does not prompt.
+People with a Foundry keystore can instead run `sai auth login NAME` in their
+own terminal, where `NAME` is the keystore. `cast` prompts them for the
+keystore password, unless the `ud` tool has a wallet of that name, which
+signs without a prompt.
 
 `--addr` is an optional cross-check; leave it out unless the person gives
 one.
