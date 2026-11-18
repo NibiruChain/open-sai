@@ -9,12 +9,13 @@ from datetime import UTC, datetime
 from . import storage
 
 
-def load_active_session(endpoint: str) -> dict[str, str]:
-    """Load the stored session for ENDPOINT and refuse an expired one.
+def load_active_session(endpoint: str, address: str | None = None) -> dict[str, str]:
+    """Load the session for ADDRESS, or the active account, for ENDPOINT and
+    refuse an expired one.
 
-    Never prompts: the session is encrypted with the CLI's built-in key.
+    Never prompts: sessions are encrypted with the CLI's built-in key.
     """
-    return check_active(storage.load_session(), endpoint)
+    return check_active(storage.load_session(address), endpoint)
 
 
 def check_active(result: dict[str, str], endpoint: str) -> dict[str, str]:

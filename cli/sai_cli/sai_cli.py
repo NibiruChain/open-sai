@@ -7,6 +7,7 @@ import shlex
 import shutil
 import sys
 import time
+from datetime import UTC, datetime
 from importlib import metadata, resources
 from typing import Any
 
@@ -61,7 +62,7 @@ def emit(ctx: click.Context, value: Any) -> None:
 
 
 def session(ctx: click.Context) -> dict[str, str]:
-    return sessions.load_active_session(ctx.obj["endpoint"])
+    return sessions.load_active_session(ctx.obj["endpoint"], ctx.obj["as_address"])
 
 
 @click.group(invoke_without_command=True)
@@ -83,11 +84,20 @@ def session(ctx: click.Context) -> dict[str, str]:
 @click.option(
     "--json", "json_output", is_flag=True, help="Compact machine-readable JSON."
 )
+@click.option(
+    "--as",
+    "as_address",
+    metavar="ADDRESS",
+    help="Run this command as another connected account instead of the"
+    " active one. See `sai auth list`.",
+)
 @click.pass_context
-def main(ctx: click.Context, endpoint: str, json_output: bool) -> None:
+def main(
+    ctx: click.Context, endpoint: str, json_output: bool, as_address: str | None
+) -> None:
     """Inspect Sai markets and account data, and submit trading intents."""
     ctx.ensure_object(dict)
-    ctx.obj.update(endpoint=endpoint, json=json_output)
+    ctx.obj.update(endpoint=endpoint, json=json_output, as_address=as_address)
     if ctx.invoked_subcommand is None:
         repl(ctx)
 
@@ -133,6 +143,7 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
                         "--endpoint",
                         ctx.obj["endpoint"],
                         *(["--json"] if ctx.obj["json"] else []),
+                        *(["--as", a] if (a := ctx.obj.get("as_address")) else []),
                         *args,
                     ],
                     prog_name="sai",
@@ -146,7 +157,7 @@ def repl(ctx: click.Context, pt_input: Any = None, pt_output: Any = None) -> Non
 
 @main.group()
 def auth() -> None:
-    """Sign in, check, and remove the local trading session."""
+    """Connect, list, switch, and remove Sai accounts on this machine."""
 
 
 @auth.command("login")
@@ -298,22 +309,69 @@ def import_token(ctx: click.Context) -> None:
 
 
 @auth.command("logout")
+@click.argument("address", required=False)
 @click.pass_context
-def logout(ctx: click.Context) -> None:
-    """Delete the stored session from this machine.
+def logout(ctx: click.Context, address: str | None) -> None:
+    """Remove ADDRESS, or the active account, from this machine.
 
-    Makes no network call. Keeper cannot revoke session tokens yet, so a
-    token copied elsewhere stays valid until it expires.
+    Other connected accounts stay connected; when the active one is removed,
+    none is active until `sai auth use`. Makes no network call. Keeper cannot
+    revoke session tokens yet, so a token copied elsewhere stays valid until
+    it expires.
     """
-    removed = storage.delete_session()
+    try:
+        removed = storage.delete_session(address or ctx.obj["as_address"])
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     emit(
         ctx,
         {
-            "removed": removed,
+            "removed": removed is not None,
+            "address": removed,
             "note": "Keeper cannot revoke session tokens yet; the token stays"
             " valid until it expires.",
         },
     )
+
+
+def account_rows(endpoint: str) -> list[dict[str, Any]]:
+    """Describe each connected account without its token."""
+    accounts = storage.load_accounts()
+    now = datetime.now(UTC)
+    return [
+        {
+            **sessions.summary(result),
+            "active": key == accounts["active"],
+            "expired": datetime.fromisoformat(result["expiresAt"]) <= now,
+            "endpointMatches": result.get("endpoint") == endpoint,
+        }
+        for key, result in sorted(accounts["sessions"].items())
+    ]
+
+
+@auth.command("list")
+@click.pass_context
+def auth_list(ctx: click.Context) -> None:
+    """List connected accounts, their expiry, and which one is active."""
+    try:
+        emit(ctx, {"accounts": account_rows(ctx.obj["endpoint"])})
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@auth.command("use")
+@click.argument("address")
+@click.pass_context
+def auth_use(ctx: click.Context, address: str) -> None:
+    """Make the connected ADDRESS the active account.
+
+    Commands without `--as` act on the active account. Sign in again to
+    connect a new one: `sai auth login` and `sai auth import` add accounts.
+    """
+    try:
+        emit(ctx, {**sessions.summary(storage.use_session(address)), "active": True})
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @auth.command("status")

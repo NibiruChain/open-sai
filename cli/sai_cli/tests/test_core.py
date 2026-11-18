@@ -28,7 +28,7 @@ def session():
 
 def test_encrypted_session_and_permissions(session):
     storage.save_session(session)
-    path = storage.home() / "session.json"
+    path = storage.home() / "sessions.json"
     assert b"sensitive-token" not in path.read_bytes()
     assert path.stat().st_mode & 0o777 == 0o600
     assert storage.load_session() == session
