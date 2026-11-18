@@ -78,19 +78,27 @@ def decode(raw: str | bytes) -> dict[str, Any]:
     return message
 
 
+# Seconds to wait for the server's close frame when disconnecting.
+CLOSE_TIMEOUT = 2.0
+
+
 @contextmanager
-def _open(ws_endpoint: str, timeout: float) -> Generator[ClientConnection]:
+def _open(
+    ws_endpoint: str, timeout: float, close_timeout: float = CLOSE_TIMEOUT
+) -> Generator[ClientConnection]:
     """Connect and finish the graphql-transport-ws handshake.
 
     The connect and the wait for `connection_ack` share one TIMEOUT in
-    seconds. Raises StreamError on a refused handshake and one of DISCONNECTS
-    on a dropped or slow connection.
+    seconds; the close at exit waits at most CLOSE_TIMEOUT for the server.
+    Raises StreamError on a refused handshake and one of DISCONNECTS on a
+    dropped or slow connection.
     """
     deadline = time.monotonic() + timeout
     with connect(
         ws_endpoint,
         subprotocols=[Subprotocol("graphql-transport-ws")],
         open_timeout=timeout,
+        close_timeout=min(close_timeout, timeout),
     ) as socket:
         socket.send(json.dumps({"type": "connection_init"}))
         remaining = max(deadline - time.monotonic(), 0.001)
@@ -101,11 +109,13 @@ def _open(ws_endpoint: str, timeout: float) -> Generator[ClientConnection]:
 
 
 def handshake(ws_endpoint: str, timeout: float) -> None:
-    """Check that WS_ENDPOINT acknowledges a connection within TIMEOUT
-    seconds, then disconnect without subscribing."""
+    """Check that WS_ENDPOINT acknowledges a connection, then disconnect
+    without subscribing, all within TIMEOUT seconds."""
     check_ws(ws_endpoint)
-    with _open(ws_endpoint, timeout):
-        pass
+    deadline = time.monotonic() + timeout
+    with _open(ws_endpoint, timeout) as socket:
+        # The close must fit in what is left of TIMEOUT.
+        socket.close_timeout = max(deadline - time.monotonic(), 0.001)
 
 
 def payloads(

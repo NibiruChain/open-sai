@@ -218,12 +218,19 @@ marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
 admission does not establish execution or finality.
 
-`sai doctor` checks the install, the session, the intent ledger, and the
-Keeper HTTP, WebSocket, and LCD endpoints. It prints pass, warn, or fail with
-a fix for each check and exits 1 on any fail; `sai --json doctor` prints the
-same report as JSON. It changes no files, opens the ledger read-only, and
-never prints the session token. `--offline` skips the network checks, which
-otherwise run in parallel with a 5-second timeout each.
+`sai doctor` checks the install, `$SAI_HOME/trader`, the session, the intent
+ledger, and the Keeper HTTP, WebSocket, and LCD endpoints, and fixes what it
+safely can. It creates `$SAI_HOME/trader`, sets it to mode 0700 and its files
+to 0600, migrates the intent ledger, and reconciles unknown intents for the
+signed-in account the way `sai intent status` does (a Keeper read; it never
+places or cancels a trade). It never deletes or rewrites the session and
+never prints its token.
+
+Each check prints pass, fixed, warn, fail, or skipped, with what changed or
+the command that fixes it. Doctor exits 1 if any check still fails;
+`sai --json doctor` prints the same report as JSON. `--no-fix` reports
+without changing anything, and `--offline` skips the network checks, which
+otherwise run in parallel and stop after 7 seconds in total.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.

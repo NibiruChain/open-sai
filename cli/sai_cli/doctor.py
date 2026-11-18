@@ -1,10 +1,15 @@
-"""`sai doctor`: check the setup and say what is broken and how to fix it.
+"""`sai doctor`: check the setup, fix what is safe to fix, and say how to
+fix the rest.
 
-Doctor is read-only. It never creates `$SAI_HOME/trader`, never changes a
-file mode, and opens the intent ledger read-only, because `storage.db`
-creates and migrates it. Each check returns pass, warn, fail, or skipped
-with a fix. Every string leaves through `tools.redact` and every URL
-through `info.public_url`, so the session token is never printed.
+Each check returns pass, warn, fail, skipped, or fixed. A fixed check lists
+what it changed in `changes`. Doctor fixes only what it can from inspection:
+it creates `$SAI_HOME/trader`, tightens file modes, migrates the intent
+ledger, and reconciles unknown intents for the signed-in account with Keeper
+(a read; no trade is placed or cancelled). It never deletes or rewrites the
+session. `--no-fix` reports without changing anything.
+
+Every string leaves through `tools.redact` and every URL through
+`info.public_url`, so the session token is never printed.
 
 To add a check, write a function that takes a `Context` and returns a
 `Check` or a list of them (a check that repeats, such as one per MCP client),
@@ -14,11 +19,11 @@ parallel and `--offline` skips them.
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import os
 import sqlite3
 import stat
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -27,15 +32,19 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from .core import keeper, margin, storage, stream
+from .core import keeper, margin, reconcile, storage, stream
 from .mcp_server import info, tools
 
 SCHEMA_VERSION = 1
 NETWORK_TIMEOUT = 5.0
+# Wall-clock limit for all network checks together, and separately for
+# reconciling unknown intents.
+NETWORK_DEADLINE = NETWORK_TIMEOUT + 2
 EXPIRY_WARNING = timedelta(hours=24)
-STATUSES = ("pass", "warn", "fail", "skipped")
+STATUSES = ("pass", "fixed", "warn", "fail", "skipped")
 SIGN_IN = "sai auth login --account NAME, or sai auth import"
 REINSTALL = "uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai"
+DIR_MODE, FILE_MODE = 0o700, 0o600
 
 
 @dataclass
@@ -46,6 +55,7 @@ class Check:
     fix: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     duration_ms: int = 0
+    changes: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -53,6 +63,7 @@ class Check:
             "status": self.status,
             "summary": self.summary,
             "fix": self.fix,
+            "changes": self.changes,
             "details": self.details,
             "durationMs": self.duration_ms,
         }
@@ -60,12 +71,15 @@ class Check:
 
 @dataclass(frozen=True)
 class Context:
-    """What the checks read: endpoints, the session state, and the clock."""
+    """What the checks read: endpoints, the session state, the clock, and
+    whether they may fix things or reach the network."""
 
     config: tools.Config
     session: dict[str, Any]
     now: datetime
     path_env: str = ""
+    fix: bool = True
+    offline: bool = False
 
 
 CheckFn = Callable[[Context], "Check | Sequence[Check]"]
@@ -75,45 +89,15 @@ def short(address: str) -> str:
     return f"{address[:6]}…" if len(address) > 6 else address
 
 
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
 def endpoint_flag(config: tools.Config) -> str:
     """The `--endpoint` flag a fix command needs, or "" for mainnet."""
     if config.endpoint == keeper.MAINNET_HTTP:
         return ""
     return f"--endpoint {info.public_url(config.endpoint)} "
-
-
-def loose_modes(paths: Sequence[Path]) -> list[dict[str, str]]:
-    """Return PATHS that group or others can access, with their modes."""
-    if os.name == "nt":
-        return []
-    loose: list[dict[str, str]] = []
-    for path in paths:
-        try:
-            mode = stat.S_IMODE(path.stat().st_mode)
-        except OSError:
-            continue
-        if mode & 0o077:
-            loose.append({"path": str(path), "mode": f"{mode:o}"})
-    return loose
-
-
-def with_modes(check: Check, paths: Sequence[Path]) -> Check:
-    """Add a warning for any of PATHS that other users can read."""
-    loose = loose_modes(paths)
-    if not loose:
-        return check
-    fix = "; ".join(
-        f"chmod {'700' if Path(item['path']).is_dir() else '600'} {item['path']}"
-        for item in loose
-    )
-    check.details["looseModes"] = loose
-    if check.status == "pass":
-        check.status = "warn"
-        check.summary += "; files are readable by other users"
-        check.fix = fix
-    else:
-        check.fix = f"{check.fix}; then {fix}" if check.fix else fix
-    return check
 
 
 # Local checks
@@ -167,12 +151,92 @@ def check_install(ctx: Context) -> Check:
     return Check("install", "pass", f"sai {version} installed", None, details)
 
 
-def check_session(ctx: Context) -> Check:
+def loose_modes(paths: Sequence[Path]) -> list[tuple[Path, int, int]]:
+    """Return each of PATHS that group or others can access, with its mode
+    and the private mode it should have."""
+    if os.name == "nt":
+        return []
+    loose: list[tuple[Path, int, int]] = []
+    for path in paths:
+        try:
+            info_ = path.stat()
+        except OSError:
+            continue
+        mode = stat.S_IMODE(info_.st_mode)
+        if mode & 0o077:
+            wanted = DIR_MODE if stat.S_ISDIR(info_.st_mode) else FILE_MODE
+            loose.append((path, mode, wanted))
+    return loose
+
+
+def check_home(ctx: Context) -> Check:
+    """`$SAI_HOME/trader` exists, and only its owner can read it or its files."""
     root = storage.home()
-    return with_modes(session_status(ctx), [root, root / "session.json"])
+    if not root.is_dir():
+        if not ctx.fix:
+            return Check(
+                "home",
+                "pass",
+                f"{root} does not exist yet; sai creates it on first use",
+                None,
+                {"path": str(root)},
+            )
+        storage.directory()
+        return Check(
+            "home",
+            "fixed",
+            f"Created {root}",
+            None,
+            {"path": str(root)},
+            changes=[f"created {root} with mode {DIR_MODE:o}"],
+        )
+    paths = [root, *sorted(path for path in root.iterdir() if not path.is_symlink())]
+    loose = loose_modes(paths)
+    details: dict[str, Any] = {
+        "path": str(root),
+        "looseModes": [
+            {"path": str(path), "mode": f"{mode:o}"} for path, mode, _ in loose
+        ],
+    }
+    if not loose:
+        return Check("home", "pass", f"{root} is private", None, details)
+    commands = "; ".join(f"chmod {wanted:o} {path}" for path, _, wanted in loose)
+    if not ctx.fix:
+        return Check(
+            "home",
+            "warn",
+            f"{plural(len(loose), 'path')} under {root} readable by other users",
+            commands,
+            details,
+        )
+    changes: list[str] = []
+    failed: list[str] = []
+    for path, mode, wanted in loose:
+        try:
+            path.chmod(wanted)
+            changes.append(f"chmod {path} {mode:o} -> {wanted:o}")
+        except OSError:
+            failed.append(f"chmod {wanted:o} {path}")
+    if failed:
+        return Check(
+            "home",
+            "fail",
+            f"Could not make {plural(len(failed), 'path')} private",
+            "; ".join(failed),
+            details,
+            changes=changes,
+        )
+    return Check(
+        "home",
+        "fixed",
+        f"Made {plural(len(changes), 'path')} under {root} private",
+        None,
+        details,
+        changes=changes,
+    )
 
 
-def session_status(ctx: Context) -> Check:
+def check_session(ctx: Context) -> Check:
     state = ctx.session
     if state.get("error"):
         return Check(
@@ -235,79 +299,122 @@ def session_status(ctx: Context) -> Check:
     )
 
 
-def open_ledger(path: Path) -> sqlite3.Connection:
-    """Open the ledger read-only; SQLite never creates or migrates it."""
-    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+def ledger_path() -> Path:
+    return storage.home() / "intents.sqlite3"
+
+
+def unknown_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Return (key, endpoint, account) for each unknown intent at PATH."""
+    with sqlite3.connect(path, timeout=5) as connection:
+        tables = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'"
+        ).fetchone()
+        if not tables:
+            return []
+        return connection.execute(
+            "SELECT id, endpoint, account FROM intents"
+            " WHERE status='unknown' ORDER BY rowid DESC"
+        ).fetchall()
+
+
+def reconcile_keys(
+    endpoint: str, address: str, keys: Sequence[str], deadline: float
+) -> dict[str, Any]:
+    """Run `sai intent status` reconciliation for KEYS within DEADLINE
+    seconds. Returns any error; a daemon thread left running at the deadline
+    cannot keep the process alive."""
+    outcome: dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            for key in keys:
+                reconcile.reconcile(endpoint, address, key)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            outcome["error"] = type(exc).__name__
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    thread.join(deadline)
+    if thread.is_alive():
+        outcome["error"] = f"no answer within {deadline:g} s"
+    return outcome
 
 
 def check_intents(ctx: Context) -> Check:
-    path = storage.home() / "intents.sqlite3"
+    path = ledger_path()
     if not path.is_file():
         return Check("intents", "pass", "No intent ledger yet", None, {})
     fix_corrupt = (
         f"Copy {path} aside before any trade and restore it from a backup; it"
         " records intents that may still execute"
     )
+    changes: list[str] = []
     try:
-        with open_ledger(path) as connection:
+        with sqlite3.connect(path, timeout=5) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > storage.SCHEMA_VERSION:
-                return Check(
-                    "intents",
-                    "fail",
-                    f"Intent ledger has schema {version}; this sai reads up to"
-                    f" {storage.SCHEMA_VERSION}",
-                    "Upgrade sai: uv tool upgrade sai-cli",
-                    {"userVersion": version},
-                )
-            result = connection.execute("PRAGMA quick_check").fetchone()[0]
-            if result != "ok":
-                return Check(
-                    "intents",
-                    "fail",
-                    "Intent ledger failed its integrity check",
-                    fix_corrupt,
-                    {"userVersion": version},
-                )
-            tables = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'"
-            ).fetchone()
-            rows = (
-                connection.execute(
-                    "SELECT id, endpoint, account FROM intents"
-                    " WHERE status='unknown' ORDER BY rowid DESC"
-                ).fetchall()
-                if tables
-                else []
+            integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+        connection.close()
+        if version > storage.SCHEMA_VERSION:
+            return Check(
+                "intents",
+                "fail",
+                f"Intent ledger has schema {version}; this sai reads up to"
+                f" {storage.SCHEMA_VERSION}",
+                "Upgrade sai: uv tool upgrade sai-cli",
+                {"userVersion": version},
             )
-    except sqlite3.Error:
+        if integrity != "ok":
+            return Check(
+                "intents",
+                "fail",
+                "Intent ledger failed its integrity check",
+                fix_corrupt,
+                {"userVersion": version},
+            )
+        if version < storage.SCHEMA_VERSION and ctx.fix:
+            storage.db().close()
+            changes.append(
+                f"migrated the ledger from schema {version} to {storage.SCHEMA_VERSION}"
+            )
+            version = storage.SCHEMA_VERSION
+        rows = unknown_rows(path)
+    except (sqlite3.Error, OSError):
         return Check("intents", "fail", "Intent ledger is unreadable", fix_corrupt, {})
     state = ctx.session
-    account = (
-        state["address"].lower()
-        if state.get("signedIn") and state.get("endpointMatches")
-        else None
-    )
-    blocking: list[str] = []
-    others: list[tuple[str, str]] = []
-    for key, endpoint, owner in rows:
-        if account is not None and (endpoint, owner) == (
-            ctx.config.endpoint,
-            account,
-        ):
-            blocking.append(key)
-        else:
-            others.append((endpoint, owner))
+    address = state.get("address") if state.get("endpointMatches") else None
+    blocking = [
+        key
+        for key, endpoint, owner in rows
+        if address is not None
+        and (endpoint, owner) == (ctx.config.endpoint, address.lower())
+    ]
+    details: dict[str, Any] = {"userVersion": version}
+    if blocking and ctx.fix and not ctx.offline and address is not None:
+        outcome = reconcile_keys(
+            ctx.config.endpoint, address, blocking, NETWORK_DEADLINE
+        )
+        if "error" in outcome:
+            details["reconcileError"] = outcome["error"]
+        rows = unknown_rows(path)
+        remaining = {key for key, _endpoint, _owner in rows}
+        for key in blocking:
+            if key not in remaining:
+                changes.append(f"reconciled intent {key} with Keeper")
+        blocking = [key for key in blocking if key in remaining]
+    others = [(endpoint, owner) for key, endpoint, owner in rows if key not in blocking]
     accounts = len(set(others))
-    details: dict[str, Any] = {
-        "userVersion": version,
-        "unknown": len(rows),
-        "blocking": blocking,
-        "otherAccounts": {"unknown": len(others), "accounts": accounts},
-    }
-    return with_modes(
-        intents_status(ctx, blocking, len(others), accounts, details), [path]
+    details.update(
+        unknown=len(rows),
+        blocking=blocking,
+        otherAccounts={"unknown": len(others), "accounts": accounts},
     )
+    check = intents_status(ctx, blocking, len(others), accounts, details)
+    check.changes = changes
+    if changes and check.status == "pass":
+        check.status = "fixed"
+        summary = "; ".join(changes)
+        check.summary = summary[0].upper() + summary[1:]
+    return check
 
 
 def intents_status(
@@ -332,10 +439,19 @@ def intents_status(
         return Check(
             "intents",
             "warn",
-            f"{others} unknown intent{'s' if others != 1 else ''} for"
-            f" {accounts} account{'s' if accounts != 1 else ''} not signed in"
+            f"{plural(others, 'unknown intent')} for"
+            f" {plural(accounts, 'account')} not signed in"
             " here; they do not block this session",
             "Sign in as each account and run `sai intent status ADDRESS`",
+            details,
+        )
+    if details["userVersion"] < storage.SCHEMA_VERSION:
+        return Check(
+            "intents",
+            "warn",
+            f"Intent ledger has schema {details['userVersion']}; the next trade"
+            " migrates it",
+            "sai doctor",
             details,
         )
     return Check("intents", "pass", "Intent ledger is readable", None, details)
@@ -423,6 +539,14 @@ def check_lcd(ctx: Context) -> Check:
         )
     info_block = node.get("default_node_info")
     network = info_block.get("network") if isinstance(info_block, dict) else None
+    if not isinstance(network, str) or not network:
+        return Check(
+            "lcd",
+            "fail",
+            f"{url} answered without a chain network in node_info",
+            "Check --lcd-endpoint points at a Nibiru REST (LCD) service",
+            {"endpoint": url},
+        )
     return Check(
         "lcd",
         "pass",
@@ -451,6 +575,7 @@ def cross_check_network(checks: list[Check]) -> None:
 
 LOCAL_CHECKS: list[tuple[str, CheckFn]] = [
     ("install", check_install),
+    ("home", check_home),
     ("session", check_session),
     ("intents", check_intents),
 ]
@@ -482,36 +607,101 @@ def timed(name: str, fn: CheckFn, ctx: Context) -> list[Check]:
     return checks
 
 
-def run_checks(ctx: Context, offline: bool = False) -> list[Check]:
+def run_network(ctx: Context, deadline: float) -> list[Check]:
+    """Run NETWORK_CHECKS in parallel and stop waiting after DEADLINE seconds.
+
+    httpx timeouts apply per read, so a server that drips bytes could hold a
+    check open indefinitely. Each check runs in a daemon thread; one still
+    running at the deadline becomes a fail, and its thread cannot keep the
+    process alive.
+    """
+    results: dict[str, list[Check]] = {}
+
+    def work(name: str, fn: CheckFn) -> None:
+        results[name] = timed(name, fn, ctx)
+
+    threads = [
+        threading.Thread(target=work, args=(name, fn), daemon=True)
+        for name, fn in NETWORK_CHECKS
+    ]
+    end = time.monotonic() + deadline
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(max(end - time.monotonic(), 0))
+    checks: list[Check] = []
+    for name, _fn in NETWORK_CHECKS:
+        if name in results:
+            checks.extend(results[name])
+        else:
+            checks.append(
+                Check(
+                    name,
+                    "fail",
+                    f"No answer within {deadline:g} s",
+                    "Check the network and the endpoint options",
+                    duration_ms=round(deadline * 1000),
+                )
+            )
+    return checks
+
+
+def run_checks(ctx: Context) -> list[Check]:
     """Run local checks in order, then network checks in parallel."""
     checks: list[Check] = []
     for name, fn in LOCAL_CHECKS:
         checks.extend(timed(name, fn, ctx))
-    if offline:
+    if ctx.offline:
         checks.extend(
             Check(name, "skipped", "Skipped with --offline")
             for name, _fn in NETWORK_CHECKS
         )
         return checks
-    with concurrent.futures.ThreadPoolExecutor(len(NETWORK_CHECKS)) as pool:
-        futures = [pool.submit(timed, name, fn, ctx) for name, fn in NETWORK_CHECKS]
-        network = [check for future in futures for check in future.result()]
+    network = run_network(ctx, NETWORK_DEADLINE)
     cross_check_network(network)
     checks.extend(network)
     return checks
 
 
 def overall(checks: Sequence[Check]) -> str:
+    """fail if any check failed, warn if any warned, else pass; fixed and
+    skipped count as pass."""
     statuses = {check.status for check in checks}
     if "fail" in statuses:
         return "fail"
     return "warn" if "warn" in statuses else "pass"
 
 
-def context(config: tools.Config, path_env: str | None = None) -> Context:
+def session_state(config: tools.Config) -> dict[str, Any]:
+    """Return `tools.session_state`, or an error state if the stored session
+    cannot be interpreted, such as an expiry without a time zone."""
+    try:
+        state = tools.session_state(config)
+        if state.get("signedIn"):
+            expiry = datetime.fromisoformat(state["expiresAt"])
+            if expiry.tzinfo is None:
+                raise TypeError("expiry has no time zone")
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        return {
+            "signedIn": False,
+            "error": f"Stored session is invalid ({type(exc).__name__});"
+            f" {storage.SIGN_IN_AGAIN}",
+        }
+    return state
+
+
+def context(
+    config: tools.Config,
+    path_env: str | None = None,
+    *,
+    fix: bool = True,
+    offline: bool = False,
+) -> Context:
     return Context(
+        fix=fix,
+        offline=offline,
         config=config,
-        session=tools.session_state(config),
+        session=session_state(config),
         now=datetime.now(UTC),
         path_env=os.environ.get("PATH", "") if path_env is None else path_env,
     )
@@ -536,6 +726,7 @@ def render_text(checks: Sequence[Check]) -> str:
     lines: list[str] = []
     for check in checks:
         lines.append(f"{check.status:<8}{check.id:<{width}}{check.summary}")
+        lines.extend(f"{'':<{8 + width}}did: {c}" for c in check.changes)
         if check.fix:
             lines.append(f"{'':<{8 + width}}fix: {check.fix}")
     counts = ", ".join(

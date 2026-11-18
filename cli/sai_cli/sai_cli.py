@@ -825,6 +825,7 @@ def partial_close(
 @click.option(
     "--offline", is_flag=True, help="Skip the Keeper, WebSocket, and LCD checks."
 )
+@click.option("--no-fix", is_flag=True, help="Report problems without fixing any.")
 @click.option(
     "--ws-endpoint", help="Keeper WebSocket endpoint; derived from --endpoint."
 )
@@ -836,12 +837,21 @@ def partial_close(
 )
 @click.pass_context
 def doctor_command(
-    ctx: click.Context, offline: bool, ws_endpoint: str | None, lcd_endpoint: str
+    ctx: click.Context,
+    offline: bool,
+    no_fix: bool,
+    ws_endpoint: str | None,
+    lcd_endpoint: str,
 ) -> None:
-    """Check the install, session, intent ledger, and endpoints.
+    """Check the install, session, intent ledger, and endpoints, and fix what
+    is safe to fix.
 
-    Prints pass, warn, or fail with a fix for each check and exits 1 on any
-    fail. Read-only: it changes no files and never prints the session token.
+    Fixes: create $SAI_HOME/trader, make it and its files private, migrate
+    the intent ledger, and reconcile unknown intents for the signed-in
+    account with Keeper (a read; no trade is placed or cancelled). It never
+    deletes or rewrites the session, and never prints its token. Each check
+    prints pass, fixed, warn, fail, or skipped, with a fix for the rest. Exits
+    1 if any check still fails.
     """
     from . import doctor
     from .mcp_server import tools
@@ -851,7 +861,7 @@ def doctor_command(
         ws_override=ws_endpoint,
         lcd_endpoint=lcd_endpoint,
     )
-    checks = doctor.run_checks(doctor.context(config), offline=offline)
+    checks = doctor.run_checks(doctor.context(config, fix=not no_fix, offline=offline))
     if ctx.obj["json"]:
         click.echo(doctor.render_json(doctor.report(checks)))
     else:
