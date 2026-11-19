@@ -18,6 +18,6 @@ check:
 build-check:
     uv run python scripts/check_dist.py
 
-# Tag main as vVERSION and push it; dry run unless given --run
+# Tag main as sai-cli/vVERSION and push it; dry run unless given --run
 release VERSION *FLAGS:
     uv run python scripts/release.py {{VERSION}} {{FLAGS}}
