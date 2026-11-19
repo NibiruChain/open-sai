@@ -58,14 +58,17 @@ sai update --source       # build the release from Git instead of its wheel
 and installs the wheel with `uv tool install --force`. It then runs the new
 `sai --version` and imports the CLI and the MCP server. If the download, the
 hash, the install, or that check fails, the previous version stays, or
-`sai update` installs it again from the wheel it kept in
-`$SAI_HOME/cache/wheels`. It exits 0 when sai is updated or already current
-and 1 on a failure.
+`sai update` puts it back, also after Ctrl-C. It puts back only a wheel whose
+hash it has checked: the one it kept in `$SAI_HOME/cache/wheels` if those
+bytes still match, or the release downloaded and checked again. It exits 0
+when sai is updated or already current and 1 on a failure.
 
 Only a `uv tool install` of a release, or of this repository's Git source, is
 updated. A checkout, a `uvx` run, a fork, or any other install gets a note and
 exit code 3; `sai doctor` warns about those in its `install` check. sai never
-moves to an older version by itself.
+moves to an older version by itself. `sai update` also stops with exit code 3,
+before changing anything, when uv's current tool or executable directory is
+not where this `sai` is installed.
 
 The update does not move `~/.local/bin/sai` or change anything else under
 `$SAI_HOME`, so MCP registrations keep working. A running `sai mcp serve`
@@ -78,13 +81,19 @@ once a day, and does not wait for it. A later command prints one line on
 stderr when the update finished or failed. With `update.auto` off, the
 background run only checks, and the notice says a release is available.
 Nothing is started or printed under `--json`, when `CI` is set, without a
-terminal, or by `sai mcp`, `sai update`, and `sai doctor`. On Windows the
-background run only notifies.
+terminal, or by `sai mcp`, `sai update`, `sai doctor`, `sai config`,
+`sai logs`, and `sai skill`. So `sai config set update.auto false` never
+starts an update, and a background run reads the setting again right before
+it installs. On Windows the background run only notifies.
 
-`$SAI_HOME/update.json` holds the last check and the last update result,
-`update.lock` keeps two updates from running at once, and `update.stamp`
-marks when the last background run started. `sai doctor` reads them for its
-`version` check, which warns when sai is behind or the last update failed.
+`$SAI_HOME/update.json` holds the last check and the last update result, and
+`update.lock` guards it. `sai doctor` reads it for its `version` check, which
+warns when sai is behind or the last update failed. Two files sit beside the
+tool's environment in uv's tool directory, shared by every `SAI_HOME` that
+uses the same `sai`: `.sai-cli-update.lock`, held for a whole install, and
+`.sai-cli-release.json`, which records the release, the wheel's SHA-256, and
+a hash of the installed files. An install from a local wheel counts as a
+release install only while that record matches what is installed.
 
 ## Connecting
 
