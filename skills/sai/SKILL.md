@@ -51,6 +51,12 @@ an `OUTCOME_UNKNOWN`, or an error the person reports from an earlier run.
 `sai logs path` prints the directory, and `mcp_info` reports it as
 `logs.dir`.
 
+`sai --json update --check` reports the installed and latest versions.
+`sai update` installs the latest release and keeps the same `sai` path; ask
+the person to restart their agent client afterwards so the MCP server loads
+it. Commands run with `--json` or without a terminal never update sai by
+themselves.
+
 ## Connect Sai
 
 When the person asks you to connect Sai:

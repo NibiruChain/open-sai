@@ -48,6 +48,77 @@ and the CLI derives the WebSocket from the Keeper endpoint instead. So
 file. The per-command `--ws-endpoint` and `--lcd-endpoint` options still
 work and override the setting for that command.
 
+## Updates
+
+```bash
+sai update                # install the latest release
+sai update --check        # report the installed and latest versions only
+sai update --to 0.2.0     # install that release; the only way to go back
+sai update --source       # build the release from Git instead of its wheel
+```
+
+`sai update` works in this order, so a release that cannot start never
+replaces a working `sai`:
+
+1. Download the release wheel and `SHA256SUMS` and check the hash.
+2. Install the wheel into a throwaway environment, run its `sai --version`,
+   and import the CLI and the MCP server there.
+3. Copy the tool's environment beside it, to roll back to. As a spare, keep
+   a verified wheel of the current version: the one in
+   `$SAI_HOME/cache/wheels` if its hash still matches, or the current release
+   downloaded and checked again. With neither, stop and leave the install
+   alone.
+4. Install the wheel with `uv tool install --force`.
+5. Run the installed `sai --version` and the imports again. If that fails, or
+   on Ctrl-C, swap the copy back, which needs no network and no package
+   index. Only if that fails is the spare wheel reinstalled.
+
+It exits 0 when sai is updated or already current and 1 on a failure. uv and
+the checks run in a neutral directory with an isolated Python, so nothing is
+read from the directory you are in.
+
+Only a `uv tool install` of a release, or of this repository's Git source, is
+updated. A checkout, a `uvx` run, a fork, or any other install gets a note and
+exit code 3; `sai doctor` warns about those in its `install` check. sai never
+moves to an older version by itself. `sai update` also stops with exit code 3,
+before changing anything, when uv's current tool or executable directory is
+not where this `sai` is installed, or when the `sai` on your `PATH` now
+belongs to another install.
+
+The update does not move `~/.local/bin/sai` or change anything else under
+`$SAI_HOME`, so MCP registrations keep working. A running `sai mcp serve`
+keeps the old code until its client restarts; `mcp_info` reports
+`restartNeeded`.
+
+With `update.auto` on, which is the default, sai also updates by itself. A
+command run in a terminal starts `sai update --background` detached, at most
+once a day, and does not wait for it. A later command prints one line on
+stderr when the update finished or failed. With `update.auto` off, the
+background run only checks, and the notice says a release is available.
+Nothing is started or printed under `--json`, when `CI` is set, without a
+terminal, or by `sai mcp`, `sai update`, `sai doctor`, `sai config`,
+`sai logs`, and `sai skill`. So `sai config set update.auto false` never
+starts an update, and a background run reads the setting again right before
+it installs. On Windows the background run only notifies.
+
+`$SAI_HOME/update.json` holds the last check and the last update result, and
+`update.lock` guards it. `update-cache.lock` is held for a whole install, so
+two tools that share one `SAI_HOME` do not prune each other's wheels; the
+cache is pruned only after a new version is verified. `$SAI_HOME`, `cache`,
+and `cache/wheels` must belong to you and not be writable by others; sai
+tightens its own and refuses anyone else's. `sai doctor` reads it for its `version` check, which
+warns when sai is behind or the last update failed. Two files sit beside the
+tool's environment in uv's tool directory, shared by every `SAI_HOME` that
+uses the same `sai`: `.sai-cli-update.lock`, held for a whole install, and
+`.sai-cli-release.json`, which records the release, the wheel's SHA-256, and
+a hash of the installed files. An install from a local wheel counts as a
+release install only while that record matches what is installed.
+
+These checks guard against a bad release, a failed network, two commands
+racing, and mistakes such as uv pointed at another directory. They are not a
+defense against someone who can already write to uv's tool directory or to
+`$SAI_HOME`; that person can replace `sai` outright.
+
 ## Connecting
 
 The CLI trades with a Keeper session token, the same HS256 JWT Sai Web keeps
@@ -237,12 +308,13 @@ marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
 admission does not establish execution or finality.
 
-`sai doctor` checks the install, `$SAI_HOME/trader`, `$SAI_HOME/logs`, the
-session, the intent ledger, and the Keeper HTTP, WebSocket, and LCD
-endpoints, and fixes what it safely can. It creates `$SAI_HOME/trader`,
-removes group and other access from it and the files sai keeps there (the
-connected accounts, the ledger and its journals, and the shell history) and
-from the logs directory and its log files, migrates the intent ledger, and reconciles
+`sai doctor` checks the install, the version, `$SAI_HOME/trader`,
+`$SAI_HOME/logs`, the session, the intent ledger, and the Keeper HTTP,
+WebSocket, and LCD endpoints, and fixes what it safely can. It creates
+`$SAI_HOME/trader`, removes group and other access from it and the files sai
+keeps there (the connected accounts, the ledger and its journals, and the
+shell history) and from the logs directory and its log files, migrates the
+intent ledger, and reconciles
 unknown intents for the signed-in account the way `sai intent status` does
 (a Keeper read; it never places or cancels a trade). It never deletes or
 rewrites the session, never writes through a symlink in `$SAI_HOME/trader`,
@@ -311,6 +383,8 @@ prices`. Lines written during an MCP tool call carry `tool` and `callId`.
 | `session.expired`  | A command finds the session expired     | `addr`, `expiresAt`                                                                                  |
 | `doctor.result`    | `sai doctor` finishes                   | `overall`, `fix`, `offline`, `checks`                                                                |
 | `update.check`     | `sai update --check` finishes           | `ok`, `installed`, `latest`, `updateAvailable`, `installKind`, `error`                               |
+| `update.scheduled` | A command starts the daily background update | none                                                                                            |
+| `update.result`    | `sai update` or the background update finishes | `status`, `installed`, `target`, `rolledBack`, `background`, `message`                        |
 | `log.dropped`      | Events were lost because the disk was slow | `count`                                                                                           |
 
 A `keeper.request` has `status` `ok`, `error`, `rejected` (Keeper refused

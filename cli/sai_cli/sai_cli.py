@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
 import shlex
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from importlib import metadata, resources
@@ -26,6 +28,7 @@ from .core import (
     stream,
     trading,
     update,
+    updater,
 )
 from .core import session as sessions
 from .core import settings as sai_settings
@@ -273,8 +276,32 @@ def main(
     passed = (endpoint, ws_endpoint, lcd_endpoint)
     flags = {key: value for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)}
     ctx.obj.update(flags=flags, settings=None, json=json_output, as_addr=as_addr)
+    if auto_update_applies(ctx.invoked_subcommand, json_output):
+        updater.tick(warn)
     if ctx.invoked_subcommand is None:
         repl(ctx)
+
+
+# Commands that never start or announce an automatic update. `mcp` serves
+# agents over stdio; `update` and `doctor` report on updates themselves;
+# `config` must be able to turn updates off before one starts; `logs` and
+# `skill` only print.
+NO_AUTO_UPDATE = frozenset({"mcp", "update", "doctor", "config", "logs", "skill"})
+
+
+def auto_update_applies(
+    subcommand: str | None,
+    json_output: bool,
+    environ: Mapping[str, str] | None = None,
+    terminal: bool | None = None,
+) -> bool:
+    """True for a command a person runs at a terminal, outside CI."""
+    env = os.environ if environ is None else environ
+    if json_output or subcommand in NO_AUTO_UPDATE or env.get("CI"):
+        return False
+    if terminal is None:
+        terminal = sys.stdin.isatty() and sys.stderr.isatty()
+    return terminal
 
 
 def forwarded_flags(obj: dict[str, Any]) -> list[str]:
@@ -1681,26 +1708,34 @@ def logs_tail(
 
 
 # Exit code for an install `sai update` cannot change in place.
-EXIT_UNSUPPORTED = 3
+EXIT_UNSUPPORTED = updater.EXIT_UNSUPPORTED
 
 
 def update_report(
-    installed: str, latest: str, install: update.Install
+    installed: str, latest: update.Release | None, install: update.Install
 ) -> dict[str, Any]:
-    newer = update.is_newer(latest, installed)
+    """Describe the installed version next to LATEST, or next to no release
+    when LATEST is None."""
+    newer = latest is not None and update.is_newer(latest.tag, installed)
     return {
         "installed": installed,
-        "latest": latest.removeprefix("v"),
-        "latestTag": latest,
+        "latest": latest.version if latest else None,
+        "latestTag": latest.tag if latest else None,
+        "wheelUrl": latest.wheel_url if latest else None,
+        "sha256sumsUrl": latest.sums_url if latest else None,
         "updateAvailable": newer,
         "install": install.to_json(),
-        "update": asdict(update.guidance(install, latest)) if newer else None,
+        "update": asdict(update.guidance(install)) if newer else None,
     }
 
 
 def print_update_report(report: dict[str, Any]) -> None:
     kind = report["install"]["kind"]
     click.echo(f"installed  {report['installed']} ({kind})")
+    if report["latest"] is None:
+        click.echo("latest     none")
+        click.echo("No sai-cli release is published yet; nothing to update to.")
+        return
     click.echo(f"latest     {report['latest']}")
     if not report["updateAvailable"]:
         click.echo("sai is up to date.")
@@ -1711,38 +1746,35 @@ def print_update_report(report: dict[str, Any]) -> None:
         click.echo(f"  {guide['command']}")
 
 
-@main.command("update")
-@click.option("--check", is_flag=True, help="Report the latest version only.")
-@click.option("--api-base", default=update.API_BASE, hidden=True)
-@click.option("--web-base", default=update.WEB_BASE, hidden=True)
-@click.pass_context
-def update_command(
-    ctx: click.Context, check: bool, api_base: str, web_base: str
-) -> None:
-    """Compare the installed version with the latest GitHub release.
+def log_update(outcome: updater.Outcome, *, background: bool) -> None:
+    """Record what an update run did in the log's `update` surface."""
+    log.event(
+        "update.result",
+        "warn" if outcome.status == updater.FAILED else "info",
+        status=outcome.status,
+        installed=outcome.installed,
+        target=outcome.target,
+        rolledBack=outcome.rolled_back,
+        background=background,
+        message=log.untrusted(outcome.message),
+    )
 
-    `--check` reports the installed and latest versions, how sai was
-    installed, and how to update it. Installing updates comes in a later
-    release.
-    """
-    if not check:
-        click.echo(
-            "`sai update` cannot install updates yet; that comes in a later"
-            " release. Run `sai update --check` to see the latest version and"
-            " how to update this install.",
-            err=True,
-        )
-        ctx.exit(EXIT_UNSUPPORTED)
+
+def check_update(ctx: click.Context, api_base: str, web_base: str) -> None:
+    latest: update.Release | None
     try:
         latest = update.fetch_latest(api_base=api_base, web_base=web_base)
+    except update.NoRelease:
+        latest = None
     except update.UpdateError as exc:
         log.event("update.check", "warn", ok=False, error=log.untrusted(str(exc)))
         raise click.ClickException(f"update check failed: {exc}") from exc
-    try:
-        update.write_cache(update.Cache(latest, update.now()))
-    except OSError as exc:
-        warn(f"Warning: could not save the update check: {exc}")
-    report = update_report(package_version(), latest, update.install_kind())
+    # No release is a result too: it replaces a cached, withdrawn one.
+    changes = {"latest": latest.tag if latest else None, "checkedAt": update.now()}
+    if not updater.save_state(changes):
+        warn("Warning: could not save the update check.")
+    install = update.install_kind(web_base=web_base)
+    report = update_report(package_version(), latest, install)
     log.event(
         "update.check",
         ok=True,
@@ -1755,6 +1787,87 @@ def update_command(
         emit(ctx, report)
     else:
         print_update_report(report)
+
+
+@main.command("update")
+@click.option("--check", is_flag=True, help="Report the latest version only.")
+@click.option(
+    "--to",
+    "to_version",
+    metavar="X.Y.Z",
+    help="Install this release instead of the latest; the only way to go back.",
+)
+@click.option(
+    "--source",
+    is_flag=True,
+    help="Build the release from Git instead of installing its wheel.",
+)
+@click.option("--background", is_flag=True, hidden=True)
+@click.option("--api-base", default=update.API_BASE, hidden=True)
+@click.option("--web-base", default=update.WEB_BASE, hidden=True)
+@click.pass_context
+def update_command(
+    ctx: click.Context,
+    check: bool,
+    to_version: str | None,
+    source: bool,
+    background: bool,
+    api_base: str,
+    web_base: str,
+) -> None:
+    """Install the latest sai-cli release over this install.
+
+    Downloads the release wheel, checks it against the release's SHA256SUMS,
+    installs it with `uv tool install`, and then runs the new version. If any
+    step fails, the previous version stays or is put back. The `sai` path and
+    everything under $SAI_HOME stay as they are, so registered MCP clients
+    keep working; restart them to load the new version.
+
+    Only a `uv tool install` of a release or of the official Git source is
+    updated; a checkout, uvx, or other install gets a note and exit code 3.
+    sai never moves to an older version unless `--to` names one.
+
+    `--check` only reports the installed and latest versions. sai also
+    updates by itself about once a day; `sai config set update.auto false`
+    makes that notify only.
+    """
+    if check:
+        if to_version or source or background:
+            raise click.UsageError("--check takes no other update option.")
+        check_update(ctx, api_base, web_base)
+        return
+    flags = ctx.find_root().obj["flags"]
+
+    def auto() -> bool:
+        """The update.auto setting, read when the install is about to start,
+        so an opt-out made after this run began still holds. Windows locks
+        the running sai.exe, so there the background run only notifies."""
+        try:
+            return sai_settings.load(flags).update_auto and os.name != "nt"
+        except sai_settings.SettingsError:
+            return False
+
+    options = updater.Options(
+        api_base=api_base,
+        web_base=web_base,
+        to=to_version,
+        source=source,
+        allowed=auto if background else None,
+        background=background,
+    )
+    if background:
+        # The detached worker has no terminal: its record is the log's
+        # `update` surface and update.json, never stdout.
+        with contextlib.suppress(KeyboardInterrupt):
+            log_update(updater.update_now(options), background=True)
+        return
+    outcome = updater.update_now(options)
+    log_update(outcome, background=False)
+    if ctx.obj["json"]:
+        emit(ctx, outcome.to_json())
+    else:
+        click.echo(outcome.message, err=outcome.exit_code != 0)
+    ctx.exit(outcome.exit_code)
 
 
 if __name__ == "__main__":

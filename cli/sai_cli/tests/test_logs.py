@@ -781,6 +781,30 @@ def test_update_check_logs_to_the_update_surface(home):
     assert read_logs(home, "cli") == []
 
 
+def test_the_background_update_logs_to_the_update_surface_and_prints_nothing(home):
+    """The detached worker has no terminal. From a checkout it changes
+    nothing, and says so only in the log."""
+    result = CliRunner().invoke(main, ["update", "--background"])
+    assert (result.exit_code, result.stdout, result.stderr) == (0, "", "")
+    lines = read_logs(home, "update")
+    assert [line["event"] for line in lines] == [
+        "command.start",
+        "update.result",
+        "command.end",
+    ]
+    assert lines[1]["background"] is True and lines[1]["status"] == "unsupported"
+    assert lines[1]["command"] == "update" and lines[2]["exitCode"] == 0
+    assert read_logs(home, "cli") == []
+
+
+def test_logs_commands_never_start_an_update():
+    from sai_cli.sai_cli import NO_AUTO_UPDATE, auto_update_applies
+
+    assert "logs" in NO_AUTO_UPDATE
+    assert auto_update_applies("logs", False, {}, True) is False
+    assert auto_update_applies("market", False, {}, True) is True
+
+
 def test_doctor_logs_its_outcome_and_no_fix_logs_nothing(home):
     assert run_cli("doctor", "--offline", "--no-fix")[0] == 0
     assert list(home.iterdir()) == []
@@ -790,6 +814,7 @@ def test_doctor_logs_its_outcome_and_no_fix_logs_nothing(home):
     by_id = {check["id"]: check for check in result["checks"]}
     assert list(by_id) == [
         "install",
+        "version",
         "home",
         "logs",
         "session",

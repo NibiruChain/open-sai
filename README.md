@@ -10,29 +10,43 @@ and trading intents. It uses Sai Keeper's mainnet endpoint by default. Fund the
 Sai account through Sai Web before trading; depositing and bridging funds are
 outside the CLI.
 
-Install [uv](https://docs.astral.sh/uv/), then run the CLI without
-installing it:
+Install [uv](https://docs.astral.sh/uv/), then install the newest release of
+`sai` on your `PATH`:
+
+```bash
+uv run https://raw.githubusercontent.com/SaiDotFun/open-sai/main/scripts/install.py
+sai --help
+```
+
+The [install script](scripts/install.py) finds the newest `sai-cli` release,
+downloads its wheel, checks it against the release's `SHA256SUMS`, and runs
+`uv tool install` on that file. It keeps the wheel in a cache only you can
+write to, and does not defend against other local users who can write to the
+directories above `~/.sai`. Until the first release is published, the script says so and
+installs from `main`.
+
+To build from source instead, install from Git:
+
+```bash
+uv tool install git+https://github.com/SaiDotFun/open-sai
+```
+
+To try the CLI without installing it:
 
 ```bash
 uvx --from git+https://github.com/SaiDotFun/open-sai sai --json market prices
 ```
 
-To install `sai` on your `PATH`, run:
+Both Git commands build `main`. `sai --version` prints the installed version.
 
-```bash
-uv tool install git+https://github.com/SaiDotFun/open-sai
-sai --help
-```
-
-Both Git commands install from `main`. `sai --version` prints the installed
-version, and `sai update --check` compares it with the latest GitHub release
-and prints the command that installs it:
-
-```bash
-uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai@vX.Y.Z
-```
-
-`sai update` does not install updates by itself yet.
+`sai` keeps itself current. About once a day, a command you run in a terminal
+starts an update in the background, and a later command tells you once that
+it happened. `sai update` does the same right away, and `sai update --check`
+only reports. The `sai` path and everything under `~/.sai` stay the same, so
+registered agent clients keep working; restart them to load the new version.
+To be told about updates without installing them, run
+`sai config set update.auto false`. See
+[Updates](cli/sai_cli/README.md#updates).
 
 The package is `sai-cli` and is not on PyPI yet, so `uv tool install sai`
 installs an unrelated PyPI package.
@@ -190,3 +204,17 @@ The repository copy at `skills/sai/SKILL.md` is the source of the agent skill;
 the package ships it through the symlink `cli/sai_cli/skills/SKILL.md`, and
 `sai --skill` prints it. When you bump the version in `pyproject.toml`, update
 `metadata.cli-version` in the skill to match; a test checks this.
+
+### Releases
+
+Each component of this repository releases under its own tag prefix. The CLI
+uses `sai-cli/vX.Y.Z`, where `X.Y.Z` is the version in `pyproject.toml`, and
+`sai-cli/vX.Y.Z-rc.N` for a pre-release.
+
+To release, merge the version bump, then run `just release X.Y.Z` on `main`.
+It is a dry run that checks the tree and prints the Git commands; add `--run`
+to create and push the tag. The tag starts the
+[Release workflow](.github/workflows/release.yml), which runs the tests,
+builds the wheel and sdist, writes `SHA256SUMS`, and publishes all three as a
+GitHub Release. The install script and `sai update` look for the highest
+`sai-cli/v*` release that is not a pre-release.

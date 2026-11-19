@@ -1,0 +1,1165 @@
+"""Install a sai-cli release over this install, verify it, and roll back.
+
+`sai update` downloads the release wheel and its SHA256SUMS, checks the hash,
+installs the wheel with `uv tool install --force`, and then runs the new
+`sai --version` and imports the package. A failure at any step leaves or
+restores the previous version. Only an official uv tool install is changed.
+
+Interactive commands call `tick`, which prints at most one notice per state
+change and starts a detached `sai update --background` at most once a day.
+
+Two locks keep this safe. The tool lock sits beside the uv tool environment
+and covers a whole install, verify, and rollback, so every SAI_HOME that
+shares the tool takes the same one. The state lock is `$SAI_HOME/update.lock`
+and covers each read-modify-write of that profile's `update.json`.
+
+What this protects against is a bad release, a failed network, two commands
+racing, and mistakes such as uv pointed at another directory. It does not
+defend against someone who can already write to uv's tool directory or to
+$SAI_HOME; they can replace `sai` outright.
+
+Everything this module uses from the package and its dependencies is imported
+at the top: uv replaces those files while this process runs, so none of them
+may be imported after the install starts.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+from collections.abc import Callable, Generator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from . import log, update
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+# The install is one `sai update` does not change.
+EXIT_UNSUPPORTED = 3
+
+MAX_WHEEL = 64 << 20
+MAX_SUMS = 1 << 16
+DOWNLOAD_TIMEOUT = 120.0
+UV_TIMEOUT = 600.0
+VERIFY_TIMEOUT = 60.0
+# How long a foreground `sai update` waits for another update to finish.
+LOCK_WAIT = 300.0
+# How long a write to update.json waits for the state lock.
+STATE_WAIT = 5.0
+# The background check runs at most this often.
+CHECK_INTERVAL = 24 * 60 * 60
+# A background run that was started but never began work is retried after
+# this long instead of a day later.
+RETRY_INTERVAL = 15 * 60
+TOOL_LOCK_NAME = ".sai-cli-update.lock"
+# A copy of the tool's environment, kept beside it while an update that has
+# no verified wheel to go back to replaces it.
+SNAPSHOT_PREFIX = ".sai-cli-rollback-"
+BROKEN_PREFIX = ".sai-cli-broken-"
+# Modules the new version must import: the CLI and the MCP server.
+IMPORTS = ("sai_cli.sai_cli", "sai_cli.mcp_server.server")
+
+UPDATED = "updated"
+CURRENT = "current"
+AVAILABLE = "available"
+FAILED = "failed"
+UNSUPPORTED = "unsupported"
+NO_RELEASE = "no-release"
+BUSY = "busy"
+
+# Runs a command and returns its exit code and its combined output.
+Runner = Callable[[Sequence[str], float], tuple[int, str]]
+
+
+class UpdateFailed(Exception):
+    """A step of the update failed; the message says which."""
+
+
+# State and locks
+
+
+def state_lock_path() -> Path:
+    """The lock for this profile's update.json."""
+    return update.sai_home() / "update.lock"
+
+
+def cache_lock_path() -> Path:
+    """The lock for this profile's wheel cache, held for a whole install,
+    verify, and rollback. Two tools that share one SAI_HOME share the cache,
+    so neither may prune it while the other still needs its rollback wheel.
+    It is always taken after the tool lock."""
+    return update.sai_home() / "update-cache.lock"
+
+
+def tool_lock_path(prefix: Path) -> Path:
+    """The lock for installing over the uv tool environment at PREFIX.
+
+    It sits beside the environment, in uv's tool directory, so commands with
+    different SAI_HOME values that share the tool take the same lock, and uv
+    recreating the environment does not remove it.
+    """
+    return prefix.parent / TOOL_LOCK_NAME
+
+
+def read_state(path: Path | None = None) -> dict[str, Any]:
+    """Return update.json as a dict, or {} when it is missing or unreadable.
+
+    `latest` and `checkedAt` are the last check. `result` is the last update
+    attempt and `notified` the notice already shown for it. `scheduledAt` is
+    when a command last started the background run and `startedAt` when that
+    run last began work.
+    """
+    try:
+        data = json.loads((path or update.cache_path()).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("schema") != update.CACHE_SCHEMA:
+        return {}
+    return data
+
+
+def write_state(changes: dict[str, Any], path: Path | None = None) -> None:
+    """Merge CHANGES into update.json atomically. Callers hold the state
+    lock."""
+    target = path or update.cache_path()
+    state = {**read_state(target), **changes, "schema": update.CACHE_SCHEMA}
+    update.write_json(target, state)
+
+
+def save_state(changes: dict[str, Any]) -> bool:
+    """Take the state lock and merge CHANGES into update.json. Return False
+    when the lock or the file could not be had; state is best effort."""
+    try:
+        with locked(wait=STATE_WAIT) as held:
+            if held:
+                write_state(changes)
+            return held
+    except OSError:
+        return False
+
+
+def _try_lock(fd: int) -> bool:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def locked(path: Path | None = None, wait: float = 0.0) -> Generator[bool]:
+    """Hold the lock file at PATH (default: the state lock). Yields False
+    when another process still holds it after WAIT seconds."""
+    path = path or state_lock_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + wait
+        held = _try_lock(fd)
+        while not held and time.monotonic() < deadline:
+            time.sleep(0.1)
+            held = _try_lock(fd)
+        yield held
+    finally:
+        # Closing the descriptor releases the lock.
+        os.close(fd)
+
+
+# Download and verify
+
+
+def _download(
+    client: httpx.Client, url: str, target: Path, limit: int, deadline: float
+) -> None:
+    name = url.rsplit("/", 1)[-1]
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise UpdateFailed(f"timed out downloading {name}")
+    timeout = httpx.Timeout(min(remaining, 30.0))
+    size = 0
+    with client.stream("GET", url, timeout=timeout) as response:
+        if response.status_code == 404:
+            raise UpdateFailed(f"the release has no file {name}")
+        if response.status_code != 200:
+            raise UpdateFailed(
+                f"downloading {name} answered HTTP {response.status_code}"
+            )
+        with target.open("wb") as handle:
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > limit:
+                    raise UpdateFailed(f"{name} is larger than expected")
+                if time.monotonic() > deadline:
+                    raise UpdateFailed(f"timed out downloading {name}")
+                handle.write(chunk)
+
+
+def expected_hash(sums: str, name: str) -> str | None:
+    """Return the SHA-256 that SHA256SUMS text lists for file NAME."""
+    for line in sums.splitlines():
+        digest, _, listed = line.strip().partition(" ")
+        if listed.strip().removeprefix("*") == name and len(digest) == 64:
+            return digest.lower()
+    return None
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def fetch_wheel(
+    release: update.Release, directory: Path, timeout: float = DOWNLOAD_TIMEOUT
+) -> tuple[Path, str]:
+    """Download RELEASE's wheel and SHA256SUMS into DIRECTORY and return the
+    wheel and its SHA-256, or raise UpdateFailed when the hash differs.
+
+    TIMEOUT is wall-clock time for both transfers, with their redirects and
+    response headers. HTTPX timeouts apply per network operation, so the
+    transfers run in a daemon thread that this stops waiting for at the
+    deadline, as the release lookup does.
+    """
+    name = update.wheel_name(release.version)
+    wheel, sums = directory / name, directory / "SHA256SUMS"
+    deadline = time.monotonic() + timeout
+    outcome: dict[str, Exception] = {}
+
+    def work() -> None:
+        try:
+            headers = {"User-Agent": "sai-cli"}
+            with httpx.Client(headers=headers, follow_redirects=True) as client:
+                _download(client, release.sums_url, sums, MAX_SUMS, deadline)
+                _download(client, release.wheel_url, wheel, MAX_WHEEL, deadline)
+        except Exception as exc:  # noqa: BLE001 - re-raised in the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=work, name="sai-update-download", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    if worker.is_alive():
+        raise UpdateFailed(f"timed out downloading {name}")
+    error = outcome.get("error")
+    if isinstance(error, UpdateFailed):
+        raise error
+    if isinstance(error, httpx.HTTPError):
+        raise UpdateFailed(f"download failed: {type(error).__name__}") from error
+    if error is not None:
+        raise error
+    expected = expected_hash(sums.read_text(errors="replace"), name)
+    if expected is None:
+        raise UpdateFailed(f"SHA256SUMS does not list {name}")
+    actual = sha256(wheel)
+    if actual != expected:
+        raise UpdateFailed(f"{name} does not match its SHA256SUMS entry")
+    return wheel, actual
+
+
+# Install, verify, roll back
+
+# Where uv and the checks run. Never the caller's directory: uv reads
+# project settings from its working directory, and Python can import from it.
+NEUTRAL_DIR = os.path.abspath(os.sep)
+
+
+def run(command: Sequence[str], timeout: float) -> tuple[int, str]:
+    """Run COMMAND in NEUTRAL_DIR and return its exit code and combined
+    output."""
+    try:
+        done = subprocess.run(
+            list(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            cwd=NEUTRAL_DIR,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout:g} s"
+    except OSError as exc:
+        return 127, f"could not start: {type(exc).__name__}"
+    return done.returncode, done.stdout
+
+
+def find_uv() -> str | None:
+    found = shutil.which("uv")
+    return os.path.abspath(found) if found else None
+
+
+def _last_line(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1][:300] if lines else "no output"
+
+
+def _executables(environment: Path) -> tuple[Path, Path]:
+    """The `sai` and `python` executables inside ENVIRONMENT."""
+    if os.name == "nt":
+        scripts = environment / "Scripts"
+        return scripts / "sai.exe", scripts / "python.exe"
+    return environment / "bin" / "sai", environment / "bin" / "python"
+
+
+def registered_launcher(prefix: Path) -> Path | None:
+    """The `sai` executable uv installed for the tool at PREFIX, read from
+    its receipt. This is the path MCP clients are registered with."""
+    try:
+        with (prefix / "uv-receipt.toml").open("rb") as handle:
+            receipt = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    entries = receipt.get("tool", {}).get("entrypoints", [])
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and entry.get("name") in ("sai", "sai.exe"):
+            path = entry.get("install-path")
+            if isinstance(path, str) and os.path.isabs(path):
+                return Path(path)
+    return None
+
+
+def _same(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def launcher_owner_error(prefix: Path, launcher: Path) -> str | None:
+    """Return why LAUNCHER does not run the install at PREFIX, or None.
+
+    uv links the executable directory's `sai` to the one inside the tool's
+    environment. Two tool directories can share an executable directory, and
+    then the last install owns `sai` while the other's receipt still names
+    it. Updating that other install would take the launcher over.
+    """
+    inside = _executables(prefix)[0]
+    try:
+        if launcher.is_symlink() or os.name != "nt":
+            if launcher.resolve(strict=True) == inside.resolve(strict=True):
+                return None
+            # Not a link to this environment: a copied script names the
+            # environment's interpreter in its first line.
+            with launcher.open("rb") as handle:
+                head = handle.read(4096)
+            if os.fsencode(str(prefix.resolve())) in head:
+                return None
+            return f"{launcher} runs another install, not the one at {prefix}"
+    except OSError:
+        return f"{launcher} is missing or unreadable"
+    # Windows copies a launcher executable; its owner cannot be read here.
+    return None
+
+
+def destination_error(
+    prefix: Path, launcher: Path, uv: str, runner: Runner
+) -> str | None:
+    """Return why `uv tool install` would not replace the install at PREFIX
+    and its LAUNCHER, or None when it would.
+
+    uv installs into the tool and executable directories of its current
+    settings. If those are not where this install lives, or its launcher
+    now belongs to another install, an update would change something else.
+    """
+    found: list[Path] = []
+    for extra in ((), ("--bin",)):
+        code, output = runner([uv, "tool", "dir", *extra], VERIFY_TIMEOUT)
+        if code != 0:
+            return f"`uv tool dir` failed: {_last_line(output)}"
+        found.append(Path(_last_line(output)))
+    tools, executables = found
+    if not _same(tools, prefix.parent):
+        return f"uv installs tools into {tools}, but this sai is installed at {prefix}"
+    if not _same(executables, launcher.parent):
+        return (
+            f"uv puts executables in {executables}, but this install's `sai`"
+            f" is {launcher}"
+        )
+    return launcher_owner_error(prefix, launcher)
+
+
+def check_runs(
+    sai: Path, python: Path, version: str, imports: Sequence[str], runner: Runner
+) -> str | None:
+    """Return why SAI does not print VERSION or PYTHON cannot import the
+    package, or None. Python runs isolated (`-I`), so it imports from its own
+    environment and never from a working directory or PYTHONPATH."""
+    code, output = runner([str(sai), "--version"], VERIFY_TIMEOUT)
+    if code != 0:
+        return f"`sai --version` failed: {_last_line(output)}"
+    if not output.strip().endswith(f" {version}"):
+        return f"`sai --version` printed {_last_line(output)!r}, not {version}"
+    statement = "import " + ", ".join(imports)
+    code, output = runner([str(python), "-I", "-c", statement], VERIFY_TIMEOUT)
+    if code != 0:
+        return f"the package does not import: {_last_line(output)}"
+    return None
+
+
+def verify(
+    prefix: Path,
+    launcher: Path,
+    version: str,
+    imports: Sequence[str],
+    runner: Runner,
+) -> str | None:
+    """Return why the install at PREFIX is not a working VERSION, or None.
+
+    It runs LAUNCHER, the registered `sai` that clients use, after checking
+    that it still runs this install.
+    """
+    owner = launcher_owner_error(prefix, launcher)
+    if owner is not None:
+        return owner
+    return check_runs(launcher, _executables(prefix)[1], version, imports, runner)
+
+
+def preverify(
+    spec: str, version: str, prefix: Path, uv: str, options: Options
+) -> str | None:
+    """Install SPEC into a throwaway environment and return why it is not a
+    working VERSION, or None.
+
+    This runs before the real install is touched, so a release that cannot
+    start never replaces a working one. The environment uses the tool's own
+    interpreter and lives in a private temporary directory.
+    """
+    runner = options.runner
+    with tempfile.TemporaryDirectory(prefix="sai-update-") as temp:
+        environment = Path(os.path.abspath(temp)) / "venv"
+        sai, python = _executables(environment)
+        base = str(_executables(prefix)[1])
+        steps = (
+            [uv, "venv", "--python", base, str(environment)],
+            [uv, "pip", "install", "--python", str(python), spec],
+        )
+        for step in steps:
+            code, output = runner(step, UV_TIMEOUT)
+            if code != 0:
+                return f"uv {step[1]} failed: {_last_line(output)}"
+        return check_runs(sai, python, version, options.imports, runner)
+
+
+def install_spec(uv: str, spec: str, runner: Runner) -> str | None:
+    """Run `uv tool install --force SPEC`; return the error, or None."""
+    code, output = runner([uv, "tool", "install", "--force", spec], UV_TIMEOUT)
+    return None if code == 0 else f"uv tool install failed: {_last_line(output)}"
+
+
+def write_record(prefix: Path, tag: str, digest: str, wheel: Path) -> None:
+    """Record that the install at PREFIX is WHEEL of release TAG, whose
+    SHA-256 DIGEST matched the release's SHA256SUMS."""
+    installed = update.installed_files_hash(prefix)
+    if installed is None:
+        raise OSError("the install has no RECORD file")
+    record = update.ReleaseRecord(tag, digest, installed, str(wheel))
+    update.write_json(update.release_record_path(prefix), record.to_json())
+
+
+def private_dir(path: Path, exact: bool) -> None:
+    """Make sure directory PATH is the current user's and that no one else
+    can write to it, creating it if needed.
+
+    A directory another user can write to would let them swap a verified
+    wheel before uv opens it. One of ours with loose modes is tightened to
+    0700; EXACT makes it 0700 in any case. One that is a symlink, belongs to
+    someone else, or cannot be tightened is refused.
+    """
+    if path.is_symlink():
+        raise UpdateFailed(f"{path} is a symlink; sai keeps no wheels under it")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    status = path.stat()
+    if hasattr(os, "getuid") and status.st_uid != os.getuid():
+        raise UpdateFailed(f"{path} belongs to another user; sai keeps no wheels there")
+    if os.name == "nt":
+        return
+    mode = status.st_mode & 0o777
+    if mode & 0o022 or (exact and mode != 0o700):
+        try:
+            path.chmod(0o700)
+        except OSError as exc:
+            raise UpdateFailed(
+                f"{path} is writable by other users and could not be made private"
+            ) from exc
+
+
+def private_cache() -> Path:
+    """Return the absolute wheel cache after making $SAI_HOME, `cache`, and
+    `cache/wheels` private to the current user."""
+    cache = update.wheel_cache()
+    try:
+        private_dir(cache.parent.parent, exact=False)
+        private_dir(cache.parent, exact=True)
+        private_dir(cache, exact=True)
+    except OSError as exc:
+        raise UpdateFailed(
+            f"the wheel cache is unusable: {type(exc).__name__}"
+        ) from exc
+    return cache
+
+
+def wheel_error(wheel: tuple[str, str, Path] | None) -> str | None:
+    """Hash a kept wheel again, right before uv opens it. Return why it
+    cannot be used, or None."""
+    if wheel is None:
+        return None
+    _, digest, path = wheel
+    try:
+        private_cache()
+        intact = path.is_file() and not path.is_symlink() and sha256(path) == digest
+    except (OSError, UpdateFailed) as exc:
+        return f"the wheel cache is not private: {exc}"
+    return None if intact else f"{path.name} changed after it was verified"
+
+
+def prune_wheels(keep: Sequence[str]) -> None:
+    """After a successful update, delete this updater's cached wheels other
+    than the versions in KEEP: regular files named exactly like a sai-cli
+    release wheel. The caller holds the cache lock."""
+    names = {update.wheel_name(version) for version in keep}
+    try:
+        cache = private_cache()
+        for path in cache.iterdir():
+            owned = update.is_wheel_name(path.name) and not path.is_symlink()
+            if owned and path.is_file() and path.name not in names:
+                path.unlink(missing_ok=True)
+    except (OSError, UpdateFailed):
+        pass
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What an update did, for the terminal, `--json`, and update.json."""
+
+    status: str
+    message: str
+    installed: str | None = None
+    target: str | None = None
+    rolled_back: bool = False
+
+    @property
+    def exit_code(self) -> int:
+        if self.status == UNSUPPORTED:
+            return EXIT_UNSUPPORTED
+        return EXIT_FAILED if self.status == FAILED else EXIT_OK
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "message": self.message,
+            "installed": self.installed,
+            "target": self.target,
+            "rolledBack": self.rolled_back,
+        }
+
+
+@dataclass(frozen=True)
+class Options:
+    """One update run. The defaults are what `sai update` does."""
+
+    api_base: str = update.API_BASE
+    web_base: str = update.WEB_BASE
+    git_url: str = update.GIT_URL
+    # Install this version instead of the latest; the only way to go back.
+    to: str | None = None
+    # Build the release from Git instead of installing its wheel.
+    source: bool = False
+    # Asked when the release is known and again right before uv replaces the
+    # install; False records that an update is available and installs
+    # nothing. The background run passes the update.auto setting, read
+    # fresh, so an opt-out made at any point before the install holds.
+    allowed: Callable[[], bool] | None = None
+    # The background run: never waits for the lock and never retries a
+    # version that already failed.
+    background: bool = False
+    prefix: Path | None = None
+    # The uv to install with; None finds it on PATH.
+    uv: str | None = None
+    imports: Sequence[str] = IMPORTS
+    runner: Runner = run
+    total_timeout: float = update.TOTAL_TIMEOUT
+    download_timeout: float = DOWNLOAD_TIMEOUT
+
+
+def _record(outcome: Outcome, before: str | None, seen: bool) -> None:
+    """Save OUTCOME as the last update attempt.
+
+    SEEN says the person watched this run, so no notice repeats it later.
+    """
+    result = {
+        "status": outcome.status,
+        "from": before,
+        "to": outcome.target,
+        "at": update.now(),
+        "error": outcome.message if outcome.status == FAILED else None,
+        "rolledBack": outcome.rolled_back,
+    }
+    changes: dict[str, Any] = {"result": result}
+    if seen:
+        changes["notified"] = f"{outcome.status}:{outcome.target}"
+    save_state(changes)
+
+
+def _resolve(options: Options) -> update.Release | None:
+    """The release to install: `--to`, or the latest. None when sai-cli has
+    no release yet."""
+    if options.to is not None:
+        if update.parse_version(options.to) is None:
+            raise UpdateFailed(f"{options.to!r} is not a version like 0.2.0")
+        return update.release_for(update.tag_for(options.to), options.web_base)
+    try:
+        release = update.fetch_latest(
+            api_base=options.api_base,
+            web_base=options.web_base,
+            total_timeout=options.total_timeout,
+        )
+    except update.NoRelease:
+        save_state({"latest": None, "checkedAt": update.now()})
+        return None
+    except update.UpdateError as exc:
+        raise UpdateFailed(f"update check failed: {exc}") from exc
+    save_state({"latest": release.tag, "checkedAt": update.now()})
+    return release
+
+
+@dataclass(frozen=True)
+class Current:
+    """The install an update starts from, read under the tool lock."""
+
+    install: update.Install
+    version: str
+    # The registered `sai`, kept for the whole update.
+    launcher: Path
+    # The release record, when the install came from a verified wheel.
+    record: update.ReleaseRecord | None
+
+    @property
+    def prefix(self) -> Path:
+        return Path(self.install.prefix)
+
+
+@dataclass(frozen=True)
+class Rollback:
+    """What puts the current version back, prepared before the install is
+    replaced: a copy of the environment, a verified wheel, or both."""
+
+    # A copy of the tool's environment directory; restored first, because
+    # swapping it back needs neither uv nor any package source.
+    snapshot: Path | None = None
+    # (tag, sha256, path) of a wheel verified against its release; used only
+    # if the copy cannot be restored.
+    wheel: tuple[str, str, Path] | None = None
+
+
+def _download_to_cache(
+    release: update.Release, options: Options
+) -> tuple[Path, str, bool]:
+    """Download and verify RELEASE's wheel in a private directory, then keep
+    it in the wheel cache. Return its absolute path, its SHA-256, and
+    whether the cache had no such file before."""
+    cache = private_cache()
+    with tempfile.TemporaryDirectory(dir=cache, prefix=".download-") as temp:
+        wheel, digest = fetch_wheel(release, Path(temp), options.download_timeout)
+        kept = cache / wheel.name
+        created = not kept.exists()
+        os.replace(wheel, kept)
+    return kept, digest, created
+
+
+def clear_snapshots(prefix: Path) -> None:
+    """Remove environment copies an interrupted update left beside PREFIX.
+    The caller holds the tool lock."""
+    with contextlib.suppress(OSError):
+        for path in prefix.parent.iterdir():
+            if path.name.startswith((SNAPSHOT_PREFIX, BROKEN_PREFIX)):
+                shutil.rmtree(path, ignore_errors=True)
+
+
+def snapshot_environment(prefix: Path) -> Path | None:
+    """Copy the tool's environment at PREFIX to a private sibling directory
+    and return it, or None when it cannot be copied. The copy sits in uv's
+    tool directory, so swapping it back is a rename on one filesystem."""
+    target = prefix.parent / f"{SNAPSHOT_PREFIX}{os.getpid()}"
+    try:
+        shutil.copytree(prefix, target, symlinks=True)
+        target.chmod(0o700)
+    except OSError:
+        shutil.rmtree(target, ignore_errors=True)
+        return None
+    return target
+
+
+def swap_back(prefix: Path, snapshot: Path, launcher: Path) -> str | None:
+    """Put the copied environment SNAPSHOT back at PREFIX and make LAUNCHER
+    run it again. Return the error, or None."""
+    broken = prefix.parent / f"{BROKEN_PREFIX}{os.getpid()}"
+    try:
+        shutil.rmtree(broken, ignore_errors=True)
+        if prefix.exists():
+            os.rename(prefix, broken)
+        os.rename(snapshot, prefix)
+        shutil.rmtree(broken, ignore_errors=True)
+        if os.name != "nt" and launcher_owner_error(prefix, launcher) is not None:
+            launcher.unlink(missing_ok=True)
+            launcher.symlink_to(_executables(prefix)[0])
+    except OSError as exc:
+        return f"could not put the previous environment back: {type(exc).__name__}"
+    return None
+
+
+def rollback_wheel(current: Current, options: Options) -> tuple[str, str, Path] | None:
+    """A verified wheel of CURRENT's version for a release install, or None:
+    the kept one, while it lies in the private cache and its bytes still
+    hash to what the release record says, or else the current release
+    downloaded and checked against its SHA256SUMS now."""
+    record, install = current.record, current.install
+    if record is not None and record.wheel:
+        kept = Path(record.wheel)
+        try:
+            intact = (
+                kept.is_absolute()
+                and kept.parent == private_cache()
+                and kept.is_file()
+                and not kept.is_symlink()
+                and sha256(kept) == record.sha256
+            )
+        except (OSError, UpdateFailed):
+            intact = False
+        if intact:
+            return record.tag, record.sha256, kept
+    if install.kind != update.UV_TOOL_RELEASE:
+        return None
+    tag = update.tag_for(current.version)
+    try:
+        release = update.release_for(tag, options.web_base)
+        wheel, digest, _ = _download_to_cache(release, options)
+    except (UpdateFailed, OSError):
+        return None
+    return tag, digest, wheel
+
+
+def prepare_rollback(current: Current, options: Options) -> Rollback | None:
+    """Get what can put CURRENT's version back, before anything is replaced,
+    so a rollback needs no network. None when nothing can be had; the update
+    then stops.
+
+    The environment is always copied. A wheel reinstall would make uv
+    resolve the old version's dependencies again, which can fail when one
+    was withdrawn; the copy already holds them. A verified wheel is the
+    spare, for when the copy cannot be made or restored.
+    """
+    snapshot = snapshot_environment(current.prefix)
+    wheel = rollback_wheel(current, options)
+    if snapshot is None and wheel is None:
+        return None
+    return Rollback(snapshot, wheel)
+
+
+def restore(
+    current: Current, rollback: Rollback, options: Options, uv: str
+) -> str | None:
+    """Put CURRENT's version back from ROLLBACK and verify it. Return None
+    when it runs again, or the last error. The environment copy comes
+    first; the wheel is reinstalled only if that fails."""
+
+    def runs() -> str | None:
+        return verify(
+            current.prefix,
+            current.launcher,
+            current.version,
+            options.imports,
+            options.runner,
+        )
+
+    error: str | None = "nothing to roll back to"
+    if rollback.snapshot is not None:
+        swapped = swap_back(current.prefix, rollback.snapshot, current.launcher)
+        error = swapped or runs()
+        if error is None:
+            return None
+    if rollback.wheel is not None:
+        error = (
+            wheel_error(rollback.wheel)
+            or install_spec(uv, str(rollback.wheel[2]), options.runner)
+            or runs()
+        )
+        if error is None:
+            with contextlib.suppress(OSError):
+                write_record(current.prefix, *rollback.wheel)
+    return error
+
+
+@contextlib.contextmanager
+def _uninterrupted() -> Generator[None]:
+    """Ignore Ctrl-C while a rollback runs. Child processes inherit the
+    ignored signal, so the terminal's interrupt does not stop uv either."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _install(
+    options: Options, current: Current, release: update.Release, uv: str
+) -> tuple[Outcome, bool]:
+    """Install RELEASE over CURRENT. Returns the outcome and whether Ctrl-C
+    interrupted the run. The caller holds the tool lock and the cache lock.
+
+    The order is what keeps a working `sai`: stage and hash the new wheel,
+    run it in a throwaway environment, copy the current environment to roll
+    back to, and only then let uv replace the install. Without a rollback it stops. The
+    check afterwards and the rollback are the second line. The cache is
+    pruned only after the new version has passed that check.
+    """
+    prefix, installed, target = current.prefix, current.version, release.version
+    runner, imports = options.runner, options.imports
+    wheel: tuple[str, str, Path] | None = None
+    created = False
+
+    def discard() -> None:
+        """Remove the wheel this run downloaded and did not install."""
+        if wheel is not None and created and target != installed:
+            with contextlib.suppress(OSError):
+                wheel[2].unlink(missing_ok=True)
+
+    def unchanged(reason: str) -> tuple[Outcome, bool]:
+        discard()
+        message = (
+            f"Could not update to {target}: {reason}. sai {installed} is unchanged."
+        )
+        return Outcome(FAILED, message, installed, target), False
+
+    if options.source:
+        # The full ref: a branch named like the tag must not shadow it.
+        spec = f"git+{options.git_url}@refs/tags/{release.tag}"
+    else:
+        try:
+            kept, digest, created = _download_to_cache(release, options)
+        except (UpdateFailed, OSError) as exc:
+            return unchanged(
+                str(exc) if isinstance(exc, UpdateFailed) else type(exc).__name__
+            )
+        spec, wheel = str(kept), (release.tag, digest, kept)
+
+    trial = wheel_error(wheel) or preverify(spec, target, prefix, uv, options)
+    if trial is not None:
+        return unchanged(f"the release failed its trial install: {trial}")
+    rollback = prepare_rollback(current, options)
+    if rollback is None:
+        return unchanged(
+            f"nothing to roll back to could be prepared: no copy of the"
+            f" environment and no verified wheel of {installed}"
+        )
+    try:
+        if options.allowed is not None and not options.allowed():
+            # Turned off while this run downloaded and tested the release.
+            discard()
+            message = f"sai {target} is available. Run `sai update` to install it."
+            return Outcome(AVAILABLE, message, installed, target), False
+
+        def failed(reason: str) -> Outcome:
+            """Report REASON after making sure the previous version runs."""
+            if verify(prefix, current.launcher, installed, imports, runner) is None:
+                message = f"{reason}. sai {installed} is unchanged."
+                return Outcome(FAILED, message, installed, target)
+            error = restore(current, rollback, options, uv)
+            if error is None:
+                message = f"{reason}. Rolled back to sai {installed}."
+                return Outcome(FAILED, message, installed, target, rolled_back=True)
+            message = (
+                f"{reason}. Rolling back to sai {installed} also failed: {error}."
+                f" Reinstall with: {update.INSTALL_COMMAND}"
+            )
+            return Outcome(FAILED, message, installed, target)
+
+        interrupted = False
+        try:
+            # The wheel is hashed once more right before uv opens it.
+            error = wheel_error(wheel) or install_spec(uv, spec, runner)
+            if error is None:
+                error = verify(prefix, current.launcher, target, imports, runner)
+            if error is None and wheel is not None:
+                try:
+                    write_record(prefix, *wheel)
+                except OSError as exc:
+                    error = f"could not record the release: {type(exc).__name__}"
+        except KeyboardInterrupt:
+            interrupted = True
+            error = "interrupted"
+        if error is not None:
+            with _uninterrupted():
+                outcome = failed(f"Could not update to {target}: {error}")
+                discard()
+            return outcome, interrupted
+        if wheel is None:
+            # A Git install has no release record; drop a stale one.
+            with contextlib.suppress(OSError):
+                update.release_record_path(prefix).unlink(missing_ok=True)
+        # Only now, verified: keep the new wheel and the one to go back to.
+        prune_wheels((installed, target))
+        message = (
+            f"Updated sai from {installed} to {target}. Restart agent clients and"
+            " any open `sai` shell so they load it."
+        )
+        return Outcome(UPDATED, message, target, target), False
+    finally:
+        if rollback.snapshot is not None:
+            shutil.rmtree(rollback.snapshot, ignore_errors=True)
+
+
+def _unsupported(install: update.Install) -> Outcome:
+    guide = update.guidance(install)
+    note = guide.note + (f" {guide.command}" if guide.command else "")
+    message = f"`sai update` only updates an official uv tool install. {note}"
+    version = update.installed_version(Path(install.prefix))
+    return Outcome(UNSUPPORTED, message, version)
+
+
+def update_now(options: Options | None = None) -> Outcome:
+    """Check for a release and install it. Never raises for an update error;
+    the outcome carries it. Ctrl-C is raised again after any rollback."""
+    options = options or Options()
+    install = update.install_kind(options.prefix, options.web_base)
+    if not install.official:
+        return _unsupported(install)
+    prefix = Path(os.path.abspath(install.prefix))
+    wait = 0.0 if options.background else LOCK_WAIT
+    with locked(tool_lock_path(prefix), wait) as held:
+        if not held:
+            message = "Another sai update is still running; try again shortly."
+            status = BUSY if options.background else FAILED
+            return Outcome(status, message, update.installed_version(prefix))
+        # Everything about the install is read after taking the lock: an
+        # update that just finished may have changed its version and origin.
+        install = update.install_kind(prefix, options.web_base)
+        if not install.official:
+            return _unsupported(install)
+        installed = update.installed_version(prefix)
+        if installed is None:
+            return Outcome(FAILED, "Could not read the installed sai version.")
+        if options.background:
+            save_state({"startedAt": time.time()})
+        try:
+            release = _resolve(options)
+        except UpdateFailed as exc:
+            # A failed lookup is not an update attempt, so it is not recorded.
+            return Outcome(FAILED, f"{exc}.", installed, options.to)
+        if release is None:
+            message = "No sai-cli release is published yet; nothing to update to."
+            return Outcome(NO_RELEASE, message, installed)
+        target = release.version
+        if target == installed:
+            return Outcome(
+                CURRENT, f"sai {installed} is up to date.", installed, target
+            )
+        if options.to is None and not update.is_newer(release.tag, installed):
+            message = (
+                f"sai {installed} is newer than the latest release {target};"
+                f" nothing to do. `sai update --to {target}` installs it anyway."
+            )
+            return Outcome(CURRENT, message, installed, target)
+        seen = not options.background
+        if options.allowed is not None and not options.allowed():
+            message = f"sai {target} is available. Run `sai update` to install it."
+            outcome = Outcome(AVAILABLE, message, installed, target)
+            _record(outcome, installed, seen)
+            return outcome
+        last = read_state().get("result")
+        if (
+            options.background
+            and isinstance(last, dict)
+            and (last.get("status"), last.get("to")) == (FAILED, target)
+        ):
+            message = f"The update to {target} already failed; run `sai update`."
+            return Outcome(FAILED, message, installed, target)
+        found = options.uv or find_uv()
+        if found is None:
+            outcome = Outcome(
+                FAILED, "uv is not on PATH, so sai cannot update.", installed, target
+            )
+            _record(outcome, installed, seen)
+            return outcome
+        uv = os.path.abspath(found)
+        launcher = registered_launcher(prefix)
+        mismatch = (
+            "this install's uv receipt names no `sai` executable"
+            if launcher is None
+            else destination_error(prefix, launcher, uv, options.runner)
+        )
+        if mismatch is not None or launcher is None:
+            message = (
+                f"`sai update` stopped before changing anything: {mismatch}."
+                " Run it with the uv settings this sai was installed with."
+            )
+            return Outcome(UNSUPPORTED, message, installed, target)
+        record = update.read_release_record(prefix)
+        current = Current(install, installed, launcher, record)
+        clear_snapshots(prefix)
+        # The cache lock comes second, always after the tool lock, and is
+        # held until the install is verified or rolled back.
+        with locked(cache_lock_path(), wait) as cache_held:
+            if not cache_held:
+                message = (
+                    "Another sai update is using this SAI_HOME's wheel cache;"
+                    " try again shortly."
+                )
+                status = BUSY if options.background else FAILED
+                return Outcome(status, message, installed, target)
+            outcome, interrupted = _install(options, current, release, uv)
+        _record(outcome, installed, seen)
+        if interrupted:
+            raise KeyboardInterrupt
+        return outcome
+
+
+# Automatic updates
+
+
+def notice(state: dict[str, Any], installed: str | None) -> tuple[str, str] | None:
+    """Return (key, text) of the notice STATE calls for, or None.
+
+    The key names the state, so each state is announced once.
+    """
+    result = state.get("result")
+    if not isinstance(result, dict):
+        return None
+    status, target = result.get("status"), result.get("to")
+    if not isinstance(target, str) or update.parse_version(target) is None:
+        return None
+    key = f"{status}:{target}"
+    if state.get("notified") == key:
+        return None
+    if status == UPDATED:
+        return key, (
+            f"sai updated itself to {target}. Restart agent clients so they load it."
+        )
+    if installed is not None and not update.is_newer(update.tag_for(target), installed):
+        return None
+    if status == AVAILABLE:
+        return key, f"sai {target} is available. Run `sai update` to install it."
+    if status == FAILED:
+        return key, (
+            f"sai could not update itself to {target}. Run `sai update` to retry,"
+            " or `sai doctor` for the reason."
+        )
+    return None
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) else None
+
+
+def due(state: dict[str, Any], now: float | None = None) -> bool:
+    """True when a background run should start.
+
+    That is a day after the last one was started, or never. A run that was
+    started but never began work, because the process did not start or an
+    update held the tool lock, is retried after RETRY_INTERVAL.
+    """
+    scheduled, started = (
+        _number(state.get("scheduledAt")),
+        _number(state.get("startedAt")),
+    )
+    if scheduled is None:
+        return True
+    age = (time.time() if now is None else now) - scheduled
+    if age >= CHECK_INTERVAL:
+        return True
+    began = started is not None and started >= scheduled
+    return not began and age >= RETRY_INTERVAL
+
+
+def background_command() -> list[str]:
+    """The detached worker. `-I` keeps Python from importing from the
+    directory the person happens to be in, or from PYTHONPATH."""
+    return [sys.executable, "-I", "-m", "sai_cli", "update", "--background"]
+
+
+def spawn(command: Sequence[str]) -> None:
+    """Start COMMAND detached, so it outlives this process and shares no
+    terminal with it."""
+    # A neutral directory, and SAI_HOME made absolute first so a relative
+    # one still means the same place there.
+    options: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+        "cwd": NEUTRAL_DIR,
+        "env": {**os.environ, "SAI_HOME": str(update.sai_home())},
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        options["start_new_session"] = True
+    subprocess.Popen(list(command), **options)
+
+
+def tick(
+    echo: Callable[[str], None],
+    start: Callable[[Sequence[str]], None] = spawn,
+    prefix: Path | None = None,
+) -> None:
+    """Run on an interactive command: print a pending notice once, and start
+    the daily background update when it is due.
+
+    An install `sai update` does not change gets neither. The notice is
+    read, printed, and marked under the state lock, and the daily run is
+    reserved under it, so two terminals neither repeat a notice nor start two
+    runs. It never raises and never waits on the network; the command the
+    person ran comes first.
+    """
+    try:
+        if not update.install_kind(prefix).official:
+            return
+        launch = False
+        with locked() as held:
+            if not held:
+                # Another command is doing this right now.
+                return
+            state = read_state()
+            changes: dict[str, Any] = {}
+            pending = notice(state, update.installed_version(prefix))
+            if pending is not None:
+                echo(pending[1])
+                changes["notified"] = pending[0]
+            if due(state):
+                changes["scheduledAt"] = time.time()
+                launch = True
+            if changes:
+                write_state(changes)
+        if launch:
+            start(background_command())
+            log.event("update.scheduled")
+    except Exception:  # noqa: BLE001 - an update problem must not break a command
+        return

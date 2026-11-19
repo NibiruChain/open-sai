@@ -16,18 +16,40 @@ import release
 
 
 def test_tag_error():
-    assert check_release.tag_error("v0.1.0", "0.1.0") is None
-    assert check_release.tag_error("v0.2.0-rc.1", "0.2.0-rc.1") is None
-    assert "does not match" in str(check_release.tag_error("v0.2.0", "0.1.0"))
-    for tag in ("0.1.0", "v0.1", "v0.1.0-beta", "v0.1.0rc1"):
+    assert check_release.tag_for("0.1.0") == "sai-cli/v0.1.0"
+    assert check_release.tag_error("sai-cli/v0.1.0", "0.1.0") is None
+    assert check_release.tag_error("sai-cli/v0.2.0-rc.1", "0.2.0-rc.1") is None
+    assert "does not match" in str(check_release.tag_error("sai-cli/v0.2.0", "0.1.0"))
+    bad = (
+        "v0.1.0",
+        "0.1.0",
+        "sai-cli/0.1.0",
+        "sai-cli/v0.1",
+        "sai-cli/v0.1.0-beta",
+        "sai-cli/v0.1.0rc1",
+        "sai-rs/v0.1.0",
+        "x/sai-cli/v0.1.0",
+        "sai-cli/v0.01.0",
+        "sai-cli/v00.1.0",
+        "sai-cli/v0.1.00",
+        "sai-cli/v0.1.0-rc.01",
+    )
+    for tag in bad:
         assert "is not" in str(check_release.tag_error(tag, "0.1.0")), tag
 
 
 def test_check_release_matches_this_pyproject():
     version = check_release.pyproject_version()
-    assert check_release.main([f"v{version}"]) == 0
-    assert check_release.main(["v0.0.0-rc.0"]) == 1
+    assert check_release.main([f"sai-cli/v{version}"]) == 0
+    assert check_release.main(["sai-cli/v0.0.0-rc.0"]) == 1
+    assert check_release.main([f"v{version}"]) == 1
     assert check_release.main([]) == 2
+
+
+def test_a_leading_zero_cannot_release_even_when_pyproject_matches():
+    assert "is not" in str(check_release.tag_error("sai-cli/v0.01.0", "0.01.0"))
+    assert check_release.tag_error("sai-cli/v10.20.30", "10.20.30") is None
+    assert check_release.tag_error("sai-cli/v0.2.0-rc.10", "0.2.0-rc.10") is None
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -64,7 +86,8 @@ def run(repo: Path, version: str, go: bool = False) -> int:
 def test_dry_run_checks_and_changes_nothing(repo, capsys):
     assert run(repo, "1.2.3") == 0
     out = capsys.readouterr().out
-    assert "git tag --annotate v1.2.3" in out
+    assert "git tag --annotate sai-cli/v1.2.3" in out
+    assert "git push origin refs/tags/sai-cli/v1.2.3" in out
     assert "Dry run" in out
     assert git(repo, "tag", "--list") == ""
     assert git(repo, "ls-remote", "--tags", "origin") == ""
@@ -72,8 +95,8 @@ def test_dry_run_checks_and_changes_nothing(repo, capsys):
 
 def test_run_tags_and_pushes(repo):
     assert run(repo, "1.2.3", go=True) == 0
-    assert git(repo, "cat-file", "-t", "v1.2.3") == "tag"
-    assert "refs/tags/v1.2.3" in git(repo, "ls-remote", "--tags", "origin")
+    assert git(repo, "cat-file", "-t", "sai-cli/v1.2.3") == "tag"
+    assert "refs/tags/sai-cli/v1.2.3" in git(repo, "ls-remote", "--tags", "origin")
     # A second release of the same version is refused.
     assert run(repo, "1.2.3") == 1
 
@@ -91,3 +114,40 @@ def test_refuses_version_mismatch_dirty_tree_and_unpushed_head(repo, capsys):
     assert run(repo, "1.2.3", go=True) == 1
     assert "is not origin/main" in capsys.readouterr().err
     assert git(repo, "tag", "--list") == ""
+
+
+def test_remote_tag_commit_reads_annotated_and_lightweight_tags():
+    annotated = "aaa\trefs/tags/sai-cli/v1.2.3\nbbb\trefs/tags/sai-cli/v1.2.3^{}\n"
+    assert check_release.remote_tag_commit(annotated, "sai-cli/v1.2.3") == "bbb"
+    light = "ccc\trefs/tags/sai-cli/v1.2.3\n"
+    assert check_release.remote_tag_commit(light, "sai-cli/v1.2.3") == "ccc"
+    assert check_release.remote_tag_commit(light, "sai-cli/v9.9.9") is None
+    assert check_release.remote_tag_commit("", "sai-cli/v1.2.3") is None
+
+
+def test_built_commit_must_still_be_the_remote_tag(repo, monkeypatch, capsys):
+    """The workflow's last check before publishing, against a real remote."""
+    monkeypatch.setattr(check_release, "ROOT", repo)
+    monkeypatch.setattr(check_release, "pyproject_version", lambda root=repo: "1.2.3")
+    tag = "sai-cli/v1.2.3"
+    origin = git(repo, "remote", "get-url", "origin")
+    built = git(repo, "rev-parse", "HEAD")
+    arguments = [tag, "--built", built, "--remote", origin]
+
+    assert check_release.main(arguments) == 1
+    assert "is not on the remote" in capsys.readouterr().err
+
+    assert run(repo, "1.2.3", go=True) == 0
+    assert check_release.main(arguments) == 0
+    assert "the remote tag is" in capsys.readouterr().out
+
+    # Someone moves the tag to a later commit while the build runs.
+    (repo / "later.txt").write_text("x")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "later")
+    git(repo, "tag", "--force", "--annotate", tag, "--message", tag)
+    git(repo, "push", "-q", "--force", "origin", f"refs/tags/{tag}")
+    assert check_release.main(arguments) == 1
+    assert "not the built commit" in capsys.readouterr().err
+
+    assert check_release.main([tag, "--built", built]) == 2

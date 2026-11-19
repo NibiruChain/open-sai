@@ -1,4 +1,5 @@
-"""Tag main as a release and push the tag, which starts the release workflow.
+"""Tag main as sai-cli/vX.Y.Z and push the tag, which starts the release
+workflow.
 
 Dry run by default: it checks everything and prints the commands. Pass
 `--run` to create the annotated tag and push it.
@@ -19,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from check_release import ROOT, pyproject_version, tag_error
+from check_release import ROOT, pyproject_version, tag_error, tag_for
 
 REMOTE = "origin"
 BRANCH = "main"
@@ -85,13 +86,13 @@ def problems(tag: str, state: State) -> list[str]:
 
 def commands(tag: str) -> list[list[str]]:
     return [
-        ["tag", "--annotate", tag, "--message", f"sai-cli {tag}"],
+        ["tag", "--annotate", tag, "--message", tag],
         ["push", REMOTE, f"refs/tags/{tag}"],
     ]
 
 
 def release(version: str, run: bool, git: Runner, root: Path = ROOT) -> int:
-    tag = f"v{version}"
+    tag = tag_for(version)
     found = problems(tag, read_state(git, tag, root))
     for problem in found:
         print(f"error: {problem}", file=sys.stderr)
