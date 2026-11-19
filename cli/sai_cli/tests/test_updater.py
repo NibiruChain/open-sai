@@ -126,9 +126,7 @@ BROKEN_WHEN_INSTALLED = (
 
 @pytest.mark.slow
 @needs_uv
-def test_upgrade_keeps_the_sai_path_and_the_users_files(
-    uv_dirs, sai_home, monkeypatch
-):
+def test_upgrade_keeps_the_sai_path_and_the_users_files(uv_dirs, sai_home, monkeypatch):
     wheels = {"0.1.0": build_wheel("0.1.0"), "0.2.0": build_wheel("0.2.0")}
     (sai_home / "trader").mkdir(parents=True)
     (sai_home / "trader" / "sessions.json").write_bytes(b'{"keep": "me"}\n')
@@ -226,7 +224,7 @@ def test_broken_wheel_keeps_the_old_version(uv_dirs):
         tool.install_release("0.1.0")
         outcome = tool.update()
     assert outcome.status == updater.FAILED
-    assert "uv tool install failed" in outcome.message
+    assert "failed its trial install: uv pip failed" in outcome.message
     assert tool.version() == "0.1.0"
     assert list(update.wheel_cache().glob("*.whl")) == []
 
@@ -318,7 +316,13 @@ def test_another_install_owning_the_shared_launcher_stops_the_update(
         name = update.wheel_name("0.1.0")
         assert REAL_UV is not None
         subprocess.run(
-            [REAL_UV, "tool", "install", "--force", f"{stub.url}{downloads('0.1.0')}/{name}"],
+            [
+                REAL_UV,
+                "tool",
+                "install",
+                "--force",
+                f"{stub.url}{downloads('0.1.0')}/{name}",
+            ],
             check=True,
             capture_output=True,
             timeout=120,
@@ -360,7 +364,11 @@ def test_the_wheel_cache_stays_inside_sai_home(uv_dirs, sai_home):
         (sai_home / "cache").unlink()
         cache = update.wheel_cache()
         cache.mkdir(parents=True)
-        for name in ("sai_cli-0.0.1-py3-none-any.whl", "sai_cli-extra-1.0.whl", "other.whl"):
+        for name in (
+            "sai_cli-0.0.1-py3-none-any.whl",
+            "sai_cli-extra-1.0.whl",
+            "other.whl",
+        ):
             (cache / name).write_bytes(b"x")
         (cache / "sai_cli-0.0.2-py3-none-any.whl").symlink_to(
             shared / "sai_cli-9.9.9-py3-none-any.whl"
@@ -373,7 +381,9 @@ def test_the_wheel_cache_stays_inside_sai_home(uv_dirs, sai_home):
             "sai_cli-0.2.0-py3-none-any.whl",
             "sai_cli-extra-1.0.whl",
         ]
-        assert (shared / "sai_cli-9.9.9-py3-none-any.whl").read_bytes() == b"someone else's"
+        assert (
+            shared / "sai_cli-9.9.9-py3-none-any.whl"
+        ).read_bytes() == b"someone else's"
 
 
 @pytest.mark.slow
@@ -600,7 +610,9 @@ class Script:
             if installed and self.interrupt:
                 self.interrupt = False
                 raise KeyboardInterrupt
-            if version in self.broken or (installed and version in self.broken_installed):
+            if version in self.broken or (
+                installed and version in self.broken_installed
+            ):
                 return 1, "Traceback: broken"
             return 0, f"sai, version {version}\n"
         return 0, ""
@@ -614,9 +626,7 @@ class Script:
         return [c[-1] for c in self.commands if c[1:3] == ["pip", "install"]]
 
 
-def scripted(
-    tmp_path: Path, stub: Stub, script: Script, **changes
-) -> updater.Options:
+def scripted(tmp_path: Path, stub: Stub, script: Script, **changes) -> updater.Options:
     prefix = tmp_path / "tools" / "sai-cli"
     if not prefix.exists():
         official_prefix(tmp_path)
@@ -641,7 +651,13 @@ def test_source_builds_the_exact_release_tag_from_git(tmp_path, sai_home):
     kinds = [" ".join(c[1:3]) for c in script.commands if c[0] == "/fake/uv"]
     # uv's destination is checked first, the release runs in a trial
     # environment next, and only then is the install replaced.
-    assert kinds == ["tool dir", "tool dir", "venv --python", "pip install", "tool install"]
+    assert kinds == [
+        "tool dir",
+        "tool dir",
+        "venv --python",
+        "pip install",
+        "tool install",
+    ]
     assert script.trials == [spec]
     # The check after the install runs the registered launcher, the one on
     # PATH, and imports with an isolated interpreter.
@@ -678,9 +694,7 @@ def test_a_failed_install_keeps_the_old_version(tmp_path, sai_home):
     assert len(script.installs) == 1
 
 
-def test_a_relative_sai_home_gives_uv_an_absolute_wheel(
-    tmp_path, monkeypatch
-):
+def test_a_relative_sai_home_gives_uv_an_absolute_wheel(tmp_path, monkeypatch):
     """uv runs in another directory, so every path it gets is absolute."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SAI_HOME", "relative-home")
@@ -1121,9 +1135,7 @@ def test_a_run_that_cannot_start_is_retried_soon(tmp_path, sai_home):
     assert len(attempts) == 2
 
 
-def test_spawn_starts_a_detached_process_in_a_neutral_directory(
-    tmp_path, monkeypatch
-):
+def test_spawn_starts_a_detached_process_in_a_neutral_directory(tmp_path, monkeypatch):
     """The worker does not inherit the person's directory, and a relative
     SAI_HOME still names the same place for it."""
     monkeypatch.chdir(tmp_path)

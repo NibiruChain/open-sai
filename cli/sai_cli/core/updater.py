@@ -37,7 +37,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -363,7 +363,9 @@ def launcher_owner_error(prefix: Path, launcher: Path) -> str | None:
     return None
 
 
-def destination_error(prefix: Path, launcher: Path, uv: str, runner: Runner) -> str | None:
+def destination_error(
+    prefix: Path, launcher: Path, uv: str, runner: Runner
+) -> str | None:
     """Return why `uv tool install` would not replace the install at PREFIX
     and its LAUNCHER, or None when it would.
 
@@ -446,7 +448,7 @@ def preverify(
         for step in steps:
             code, output = runner(step, UV_TIMEOUT)
             if code != 0:
-                return f"uv {step[1]} failed in the trial install: {_last_line(output)}"
+                return f"uv {step[1]} failed: {_last_line(output)}"
         return check_runs(sai, python, version, options.imports, runner)
 
 
@@ -708,7 +710,9 @@ def _install(
 
     def unchanged(reason: str, status: str = FAILED) -> tuple[Outcome, bool]:
         prune_wheels((installed,))
-        message = f"Could not update to {target}: {reason}. sai {installed} is unchanged."
+        message = (
+            f"Could not update to {target}: {reason}. sai {installed} is unchanged."
+        )
         return Outcome(status, message, installed, target), False
 
     wheel: tuple[str, str, Path] | None = None

@@ -124,7 +124,9 @@ def wheel_name(version: str) -> str:
     return f"sai_cli-{version}-py3-none-any.whl"
 
 
-_WHEEL_NAME = re.compile(rf"^sai_cli-{_NUMBER}\.{_NUMBER}\.{_NUMBER}-py3-none-any\.whl$")
+_WHEEL_NAME = re.compile(
+    rf"^sai_cli-{_NUMBER}\.{_NUMBER}\.{_NUMBER}-py3-none-any\.whl$"
+)
 
 
 def is_wheel_name(name: str) -> bool:
@@ -623,11 +625,6 @@ def wheel_cache() -> Path:
 
 def cache_path() -> Path:
     return sai_home() / "update.json"
-
-
-def wheel_cache() -> Path:
-    """Where `sai update` keeps the wheels it verified and installed."""
-    return sai_home() / "cache" / "wheels"
 
 
 @dataclass(frozen=True)

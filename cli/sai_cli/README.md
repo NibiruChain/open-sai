@@ -54,21 +54,30 @@ sai update --to 0.2.0     # install that release; the only way to go back
 sai update --source       # build the release from Git instead of its wheel
 ```
 
-`sai update` downloads the release wheel and `SHA256SUMS`, checks the hash,
-and installs the wheel with `uv tool install --force`. It then runs the new
-`sai --version` and imports the CLI and the MCP server. If the download, the
-hash, the install, or that check fails, the previous version stays, or
-`sai update` puts it back, also after Ctrl-C. It puts back only a wheel whose
-hash it has checked: the one it kept in `$SAI_HOME/cache/wheels` if those
-bytes still match, or the release downloaded and checked again. It exits 0
-when sai is updated or already current and 1 on a failure.
+`sai update` works in this order, so a release that cannot start never
+replaces a working `sai`:
+
+1. Download the release wheel and `SHA256SUMS` and check the hash.
+2. Install the wheel into a throwaway environment, run its `sai --version`,
+   and import the CLI and the MCP server there.
+3. Get a rollback copy of the current version: the wheel kept in
+   `$SAI_HOME/cache/wheels` if its hash still matches, or the current release
+   downloaded and checked again.
+4. Install the wheel with `uv tool install --force`.
+5. Run the installed `sai --version` and the imports again. If that fails, or
+   on Ctrl-C, put the previous version back from the rollback copy.
+
+It exits 0 when sai is updated or already current and 1 on a failure. uv and
+the checks run in a neutral directory with an isolated Python, so nothing is
+read from the directory you are in.
 
 Only a `uv tool install` of a release, or of this repository's Git source, is
 updated. A checkout, a `uvx` run, a fork, or any other install gets a note and
 exit code 3; `sai doctor` warns about those in its `install` check. sai never
 moves to an older version by itself. `sai update` also stops with exit code 3,
 before changing anything, when uv's current tool or executable directory is
-not where this `sai` is installed.
+not where this `sai` is installed, or when the `sai` on your `PATH` now
+belongs to another install.
 
 The update does not move `~/.local/bin/sai` or change anything else under
 `$SAI_HOME`, so MCP registrations keep working. A running `sai mcp serve`
@@ -94,6 +103,11 @@ uses the same `sai`: `.sai-cli-update.lock`, held for a whole install, and
 `.sai-cli-release.json`, which records the release, the wheel's SHA-256, and
 a hash of the installed files. An install from a local wheel counts as a
 release install only while that record matches what is installed.
+
+These checks guard against a bad release, a failed network, two commands
+racing, and mistakes such as uv pointed at another directory. They are not a
+defense against someone who can already write to uv's tool directory or to
+`$SAI_HOME`; that person can replace `sai` outright.
 
 ## Connecting
 
