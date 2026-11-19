@@ -1440,11 +1440,12 @@ def update_command(
         latest = None
     except update.UpdateError as exc:
         raise click.ClickException(f"update check failed: {exc}") from exc
-    if latest is not None:
-        try:
-            update.write_cache(update.Cache(latest.tag, update.now()))
-        except OSError as exc:
-            warn(f"Warning: could not save the update check: {exc}")
+    try:
+        # No release is a result too: it replaces a cached, withdrawn one.
+        cache = update.Cache(latest.tag, update.now()) if latest else None
+        update.write_cache(cache)
+    except OSError as exc:
+        warn(f"Warning: could not save the update check: {exc}")
     install = update.install_kind(web_base=web_base)
     report = update_report(package_version(), latest, install)
     if ctx.obj["json"]:
