@@ -9,13 +9,13 @@ from datetime import UTC, datetime
 from . import log, storage
 
 
-def load_active_session(endpoint: str, address: str | None = None) -> dict[str, str]:
-    """Load the session for ADDRESS, or the active account, for ENDPOINT and
+def load_active_session(endpoint: str, addr: str | None = None) -> dict[str, str]:
+    """Load the session for ADDR, or the active account, for ENDPOINT and
     refuse an expired one.
 
     Never prompts: sessions are encrypted with the CLI's built-in key.
     """
-    return check_active(storage.load_session(address), endpoint)
+    return check_active(storage.load_session(addr), endpoint)
 
 
 def check_active(result: dict[str, str], endpoint: str) -> dict[str, str]:
@@ -39,12 +39,12 @@ def import_session(token: str, endpoint: str) -> dict[str, str]:
     try:
         payload = token.split(".")[1]
         data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        address = data["sub"]
+        addr = data["sub"]
         expires = datetime.fromtimestamp(data["exp"], UTC)
         if (
-            not isinstance(address, str)
-            or not address.startswith("0x")
-            or len(address) != 42
+            not isinstance(addr, str)
+            or not addr.startswith("0x")
+            or len(addr) != 42
             or data.get("purpose") != "user_intent"
             or expires <= datetime.now(UTC)
         ):
@@ -53,16 +53,16 @@ def import_session(token: str, endpoint: str) -> dict[str, str]:
         raise ValueError("Invalid or expired Sai session token") from exc
     return {
         "token": token,
-        "evmAddress": address,
+        "evmAddress": addr,
         "expiresAt": expires.isoformat(),
         "endpoint": endpoint,
     }
 
 
 def summary(result: dict[str, str]) -> dict[str, str]:
-    """Return the fields safe to show: address, expiry, endpoint; no token."""
+    """Return the fields safe to show: addr, expiry, endpoint; no token."""
     return {
-        "address": result["evmAddress"],
+        "addr": result["evmAddress"],
         "expiresAt": result["expiresAt"],
         "endpoint": result["endpoint"],
     }

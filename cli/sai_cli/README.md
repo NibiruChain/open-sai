@@ -68,13 +68,13 @@ MCP** button that copies it is in review
   terminal.
 - It never reads the token from arguments, environment variables, or piped
   stdin, and never prints it. Like `auth login` and `auth status`, it prints
-  only `address`, `expiresAt`, and `endpoint`.
+  only `addr`, `expiresAt`, and `endpoint`.
 - After storing the token, it reads the clipboard again and clears it only if
   it still holds the token. Anything copied in the meantime stays.
 
 `auth login` signs Keeper's challenge with a local key. Before anything
 signs, the CLI checks that the typed data has primary type
-`UserTradingSession`, domain `Sai` version `1`, your address, and the issued
+`UserTradingSession`, domain `Sai` version `1`, your addr, and the issued
 challenge nonce.
 
 - `auth login --account NAME` uses the Foundry keystore `NAME`. It runs `cast
@@ -82,26 +82,26 @@ challenge nonce.
   --from-file PATH` on your terminal, and `cast` prompts for the keystore
   password.
 - `auth login --wallet NAME` is for people who use the `ud` tool. The CLI
-  reads the address from `ud evm wallet show NAME` and signs with `ud evm
+  reads the addr from `ud evm wallet show NAME` and signs with `ud evm
   wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
   prompt. Login fails unless ud reports the wallet's Cast keystore as
   `matching`.
 
-`--address ADDRESS` is optional. With `--account`, it replaces `cast wallet
+`--addr ADDR` is optional. With `--account`, it replaces `cast wallet
 address` and saves one password prompt. With `--wallet`, the CLI refuses to
-sign when it differs from the wallet's address.
+sign when it differs from the wallet's addr.
 
 ### Several Accounts
 
 Each `auth login` or `auth import` connects an account and makes it active.
 Signing in with another account keeps the ones already connected; signing in
-again with the same address refreshes its session.
+again with the same addr refreshes its session.
 
 - `auth list` shows each connected account, its expiry, and which is active.
-- `auth use ADDRESS` makes another connected account active.
-- `--as ADDRESS`, before the command, runs one command as another connected
+- `auth use ADDR` makes another connected account active.
+- `--as ADDR`, before the command, runs one command as another connected
   account: `sai --as 0x... trade close 3`.
-- `auth logout [ADDRESS]` removes one account, by default the active one.
+- `auth logout [ADDR]` removes one account, by default the active one.
   The others stay connected. After removing the active account, none is
   active until `auth use`.
 
@@ -177,7 +177,7 @@ client lists clients and changes nothing, and `uninstall` with no client is a
 usage error.
 
 The server lists every tool regardless of sign-in. Each `trade_*` call checks
-the session of the account it acts as (the active one, or its `address`)
+the session of the account it acts as (the active one, or its `addr`)
 before it rebuilds the preview: no session returns
 `SIGNED_OUT`, an expired one `SESSION_EXPIRED`, and one for another endpoint
 or an unreadable file `SESSION_UNAVAILABLE`. Each message tells the agent to
@@ -186,9 +186,9 @@ still needs the `previewDigest` of the preview the user confirmed.
 
 ## Commands
 
-Commands include `market list`, `market prices`, `account positions ADDRESS`,
-`account balances ADDRESS`, `account history ADDRESS`, `trade open`, `trade
-close`, `trade partial-close`, `trade tpsl`, `intent status ADDRESS --key KEY`,
+Commands include `market list`, `market prices`, `account positions ADDR`,
+`account balances ADDR`, `account history ADDR`, `trade open`, `trade
+close`, `trade partial-close`, `trade tpsl`, `intent status ADDR --key KEY`,
 and live `watch` streams. Run any command with `--help` for details. Trading
 requires a funded account; funding is performed separately. Trade commands
 support `--dry-run` to inspect the local semantic request.
@@ -214,7 +214,7 @@ for the index to synchronize and retry; no margin intent has been submitted.
 The CLI persists non-secret request identities under `$SAI_HOME/trader` or
 `~/.sai/trader`. A network error after submission leaves the outcome unknown,
 and an unknown intent blocks new trades on the account. Reconcile it with
-`intent status ADDRESS --key KEY`. If Keeper has no record of the key five
+`intent status ADDR --key KEY`. If Keeper has no record of the key five
 minutes after submission, past Keeper's two-minute admission expiry, the CLI
 marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper

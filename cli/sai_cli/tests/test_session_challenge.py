@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from sai_cli.core import keeper
 
-ADDRESS = "0x" + "a" * 40
+ADDR = "0x" + "a" * 40
 
 
 @pytest.fixture(autouse=True)
@@ -48,8 +48,8 @@ def challenge() -> dict:
 
 
 def test_session_typed_data_accepts_keeper_challenge():
-    keeper.check_session_typed_data(challenge(), ADDRESS, NONCE)
-    keeper.check_session_typed_data(challenge(), ADDRESS, NONCE.upper())
+    keeper.check_session_typed_data(challenge(), ADDR, NONCE)
+    keeper.check_session_typed_data(challenge(), ADDR, NONCE.upper())
 
 
 @pytest.mark.parametrize(
@@ -71,20 +71,20 @@ def test_session_typed_data_refuses_substitution(path, value):
         target = target[part]
     target[path[-1]] = value
     with pytest.raises(keeper.KeeperError, match="not a Sai trading session"):
-        keeper.check_session_typed_data(data, ADDRESS, NONCE)
+        keeper.check_session_typed_data(data, ADDR, NONCE)
 
 
 @pytest.mark.parametrize("nonce", ["", NONCE[:-2], "zz" * 32, NONCE + "00"])
 def test_session_typed_data_refuses_malformed_nonce(nonce):
     with pytest.raises(keeper.KeeperError, match="not a Sai trading session"):
-        keeper.check_session_typed_data(challenge(), ADDRESS, nonce)
+        keeper.check_session_typed_data(challenge(), ADDR, nonce)
 
 
 def test_session_typed_data_refuses_missing_message():
     data = challenge()
     del data["message"]
     with pytest.raises(keeper.KeeperError):
-        keeper.check_session_typed_data(data, ADDRESS, NONCE)
+        keeper.check_session_typed_data(data, ADDR, NONCE)
 
 
 def wallet_login(monkeypatch, data: dict) -> list:
@@ -94,14 +94,14 @@ def wallet_login(monkeypatch, data: dict) -> list:
         if query == keeper.CHALLENGE:
             return {
                 "createUserIntentAuthChallenge": {
-                    "evmAddress": ADDRESS,
+                    "evmAddress": ADDR,
                     "nonce": NONCE,
                     "typedData": data,
                 }
             }
         assert query == keeper.SESSION
         assert variables == {"signature": "0x" + "1" * 130, "challenge": NONCE}
-        return {"createUserIntentSession": {"evmAddress": ADDRESS}}
+        return {"createUserIntentSession": {"evmAddress": ADDR}}
 
     def sign(args, **kwargs):
         signed.append(args)
@@ -109,7 +109,7 @@ def wallet_login(monkeypatch, data: dict) -> list:
 
     monkeypatch.setattr(keeper, "request", query)
     monkeypatch.setattr(keeper.subprocess, "run", sign)
-    keeper.wallet_session(keeper.MAINNET_HTTP, ADDRESS, "wallet")
+    keeper.wallet_session(keeper.MAINNET_HTTP, ADDR, "wallet")
     return signed
 
 

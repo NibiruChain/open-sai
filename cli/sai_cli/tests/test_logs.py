@@ -338,21 +338,22 @@ def test_no_token_or_url_credential_reaches_a_log_line(home, keeper_stub):
 
     mcp = server.create_server(settings.load({"keeper.endpoint": endpoint}))
     assert call(mcp, "mcp_info")["trading"]["available"] is True
-    assert call(mcp, "auth_status")["address"] == ADDR
+    assert call(mcp, "auth_status")["addr"] == ADDR
     assert "accounts" in call(mcp, "auth_list")
     assert "oracle" in call(mcp, "market_prices")
     assert "userIntents" in call(mcp, "intent_status", {"key": token})
-    assert "code" in call(mcp, "auth_use", {"address": OPAQUE_TOKEN})
+    assert "code" in call(mcp, "auth_use", {"addr": OPAQUE_TOKEN})
     # A known parameter holding a credential URL, then unknown parameters.
-    assert "perp" in call(mcp, "account_positions", {"address": with_password})
+    assert "perp" in call(mcp, "account_positions", {"addr": with_password})
     stray = {"endpoint": with_password, "token": OPAQUE_TOKEN, "sig": SIGNATURE}
-    assert "oracle" in call(mcp, "market_prices", stray)
+    with pytest.raises(ToolError, match="market_prices"):
+        asyncio.run(mcp.call_tool("market_prices", stray))
     assert "code" in call(mcp, "trade_close", {"trade_id": 1, "preview_digest": token})
     with pytest.raises(ToolError, match="preview_digest"):
         asyncio.run(mcp.call_tool("trade_close", {"trade_id": with_password}))
     with pytest.raises(ToolError):
         asyncio.run(mcp.call_tool(f"no_such_tool_{URL_KEY}", {"a": with_password}))
-    assert call(mcp, "auth_use", {"address": OTHER})["accounts"]
+    assert call(mcp, "auth_use", {"addr": OTHER})["accounts"]
     storage.set_status("KEY1", endpoint, ADDR, "accepted")
     storage.delete_session(OTHER)
 
@@ -596,8 +597,8 @@ def test_mcp_tool_calls_log_arguments_result_code_and_account(home, keeper_stub)
     save_session(base)
     mcp = server.create_server(settings.load({"keeper.endpoint": base}))
     assert "oracle" in call(mcp, "market_prices")
-    assert call(mcp, "account_positions", {"address": OTHER})["address"] == OTHER
-    refused = call(mcp, "trade_close", {"trade_id": 3, "address": OTHER})
+    assert call(mcp, "account_positions", {"addr": OTHER})["addr"] == OTHER
+    refused = call(mcp, "trade_close", {"trade_id": 3, "addr": OTHER})
     assert refused["code"] == "SESSION_UNAVAILABLE"
     lines = read_logs(home, "mcp")
     names = [line["event"] for line in lines]
@@ -616,7 +617,7 @@ def test_mcp_tool_calls_log_arguments_result_code_and_account(home, keeper_stub)
     assert len({line["callId"] for line in lines[:3]}) == 1
     assert prices_request["tool"] == "market_prices"
     assert prices_result["ok"] is True and prices_result["durationMs"] >= 0
-    assert lines[3]["arguments"] == {"address": OTHER}
+    assert lines[3]["arguments"] == {"addr": OTHER}
     assert lines[5]["account"] == OTHER and lines[4]["addr"] == OTHER
     assert lines[3]["callId"] != prices_call["callId"]
     result = lines[7]
@@ -642,13 +643,17 @@ def test_arguments_fastmcp_rejects_are_logged_without_the_input(home):
 def test_only_a_tools_own_parameters_are_logged(home, keeper_stub):
     base, _state = keeper_stub
     mcp = server.create_server(settings.load({"keeper.endpoint": base}))
-    arguments = {"address": ADDR, "note": "private", "token": OPAQUE_TOKEN}
-    assert call(mcp, "account_positions", arguments)["address"] == ADDR
-    started = events(home, "mcp.tool_call")[0]
-    assert started["arguments"] == {"address": ADDR}
+    arguments = {"addr": ADDR, "note": "private", "token": OPAQUE_TOKEN}
+    # The server rejects unknown arguments; the log must not keep them.
+    with pytest.raises(ToolError, match="account_positions"):
+        asyncio.run(mcp.call_tool("account_positions", arguments))
+    started, result = read_logs(home, "mcp")
+    assert started["arguments"] == {"addr": ADDR}
     assert started["unknownArguments"] == 2
+    assert result["code"] == "TOOL_ERROR" and "unknownArguments" not in result
     assert "private" not in raw_logs(home) and OPAQUE_TOKEN not in raw_logs(home)
-    assert "unknownArguments" not in read_logs(home, "mcp")[-1]
+    assert call(mcp, "account_positions", {"addr": ADDR})["addr"] == ADDR
+    assert "unknownArguments" not in events(home, "mcp.tool_call")[1]
 
 
 def test_mcp_info_reports_the_log_directory(home, monkeypatch):
@@ -1036,13 +1041,13 @@ def test_a_stuck_writer_blocks_nothing_and_dropped_events_are_counted(
 
 
 def test_event_snapshots_its_fields(home):
-    arguments = {"address": ADDR, "nested": {"list": [1, 2]}}
+    arguments = {"addr": ADDR, "nested": {"list": [1, 2]}}
     with log._io_lock:
         log.event("probe", arguments=arguments)
-        arguments["address"] = "changed"
+        arguments["addr"] = "changed"
         arguments["nested"]["list"].append(3)
     assert read_logs(home)[0]["arguments"] == {
-        "address": ADDR,
+        "addr": ADDR,
         "nested": {"list": [1, 2]},
     }
 
@@ -1163,7 +1168,7 @@ def test_logs_tail_filters_by_count_surface_and_event(home):
     )
     log.event("command.start", command="market prices", argv=["market", "prices"])
     with log.bind(surface="mcp", tool="market_prices"):
-        log.event("mcp.tool_call", arguments={"address": ADDR})
+        log.event("mcp.tool_call", arguments={"addr": ADDR})
         log.event("keeper.request", "warn", operation="prices", status="not_sent")
     log.event("intent.reserved", intentKey="KEY1")
     log.event("intent.status", intentKey="KEY1", status="accepted")
@@ -1255,7 +1260,7 @@ def test_logs_tail_reads_only_the_end_of_a_file(home, monkeypatch):
 
 def test_logs_tail_plain_output_is_one_line_per_event(home):
     with log.bind(surface="mcp", tool="market_prices"):
-        log.event("mcp.tool_call", arguments={"address": ADDR})
+        log.event("mcp.tool_call", arguments={"addr": ADDR})
     log.event("keeper.request", "warn", operation="prices", ok=False, durationMs=7)
     code, output = run_cli("logs", "tail")
     assert code == 0
@@ -1263,7 +1268,7 @@ def test_logs_tail_plain_output_is_one_line_per_event(home):
     stamp, surface, level, name, *fields = first.split(" ")
     assert datetime.fromisoformat(stamp) and (surface, level) == ("mcp", "info")
     assert name == "mcp.tool_call"
-    assert fields == ["tool=market_prices", f'arguments={{"address":"{ADDR}"}}']
+    assert fields == ["tool=market_prices", f'arguments={{"addr":"{ADDR}"}}']
     assert second.split(" ")[1:] == [
         "cli",
         "warn",

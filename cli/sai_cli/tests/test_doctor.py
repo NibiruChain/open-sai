@@ -24,7 +24,7 @@ from sai_cli.sai_cli import main
 from websockets.sync.server import ServerConnection, serve
 from websockets.typing import Subprotocol
 
-ADDRESS = "0x" + "4803" * 10
+ADDR = "0x" + "4803" * 10
 OTHER = "0x" + "c" * 40
 ENDPOINT = keeper.MAINNET_HTTP
 
@@ -35,7 +35,7 @@ def b64(value: dict[str, Any]) -> str:
 
 
 HEADER = b64({"alg": "ES256K", "typ": "JWT", "kid": "doctor-test"})
-PAYLOAD = b64({"sub": ADDRESS, "purpose": "user_intent", "nonce": "q7Zr2"})
+PAYLOAD = b64({"sub": ADDR, "purpose": "user_intent", "nonce": "q7Zr2"})
 SIGNATURE = "c2lnbmF0dXJlLW5ldmVyLXByaW50ZWQtYnktZG9jdG9y"
 TOKEN = f"{HEADER}.{PAYLOAD}.{SIGNATURE}"
 
@@ -48,11 +48,11 @@ def isolated_home(tmp_path, monkeypatch) -> Path:
     return tmp_path
 
 
-def save(hours: float = 48, endpoint: str = ENDPOINT, address: str = ADDRESS) -> None:
+def save(hours: float = 48, endpoint: str = ENDPOINT, addr: str = ADDR) -> None:
     storage.save_session(
         {
             "token": TOKEN,
-            "evmAddress": address,
+            "evmAddress": addr,
             "endpoint": endpoint,
             "expiresAt": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(),
         }
@@ -141,7 +141,7 @@ def test_valid_session_passes():
     save()
     check = one(doctor.check_session, ctx())
     assert check.status == "pass"
-    assert check.details["address"] == ADDRESS
+    assert check.details["addr"] == ADDR
 
 
 def test_expired_session_fails():
@@ -360,7 +360,7 @@ def ledger(rows: list[tuple[str, str, str, str]], version: int | None = None) ->
 
 
 def test_clean_ledger_passes():
-    ledger([("k1", ENDPOINT, ADDRESS, "executed")])
+    ledger([("k1", ENDPOINT, ADDR, "executed")])
     check = one(doctor.check_intents, ctx())
     assert check.status == "pass"
     assert check.details["unknown"] == 0
@@ -379,14 +379,14 @@ def test_unknown_intent_for_signed_in_account_fails():
     save()
     ledger(
         [
-            ("20261118T000000000000-a", ENDPOINT, ADDRESS, "unknown"),
+            ("20261118T000000000000-a", ENDPOINT, ADDR, "unknown"),
             ("20261118T000000000000-b", ENDPOINT, OTHER, "unknown"),
         ]
     )
     check = one(doctor.check_intents, ctx())
     assert check.status == "fail"
     assert check.summary == "1 unknown intent blocks trading for 0x4803…"
-    assert check.fix == (f"sai intent status {ADDRESS} --key 20261118T000000000000-a")
+    assert check.fix == (f"sai intent status {ADDR} --key 20261118T000000000000-a")
     assert check.details["otherAccounts"] == {"unknown": 1, "accounts": 1}
 
 
@@ -396,7 +396,7 @@ def test_unknown_intents_for_other_accounts_warn_with_counts_only():
         [
             ("k1", ENDPOINT, OTHER, "unknown"),
             ("k2", ENDPOINT, OTHER, "unknown"),
-            ("k3", "https://other.example/query", ADDRESS, "unknown"),
+            ("k3", "https://other.example/query", ADDR, "unknown"),
         ]
     )
     check = one(doctor.check_intents, ctx())
@@ -410,7 +410,7 @@ def test_unknown_intents_for_other_accounts_warn_with_counts_only():
 
 
 def test_signed_out_unknowns_never_block():
-    ledger([("k1", ENDPOINT, ADDRESS, "unknown")])
+    ledger([("k1", ENDPOINT, ADDR, "unknown")])
     assert one(doctor.check_intents, ctx()).status == "warn"
 
 
@@ -464,7 +464,7 @@ def test_fix_migrates_an_old_ledger(isolated_home):
 
 
 def test_no_fix_reads_a_wal_ledger_without_writing(isolated_home):
-    path = ledger([("k1", ENDPOINT, ADDRESS, "executed")])
+    path = ledger([("k1", ENDPOINT, ADDR, "executed")])
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
     connection.close()
@@ -485,7 +485,7 @@ def test_no_fix_reads_rows_from_a_live_wal_without_touching_it():
         writer.execute(
             "INSERT INTO intents (id, endpoint, account, kind, status, entity,"
             " created_at) VALUES ('k-wal', ?, ?, 'OPEN_TRADE', 'unknown', '', 0)",
-            (ENDPOINT, ADDRESS.lower()),
+            (ENDPOINT, ADDR.lower()),
         )
         before = snapshot(path.parent)
         check = one(doctor.check_intents, ctx())
@@ -496,7 +496,7 @@ def test_no_fix_reads_rows_from_a_live_wal_without_touching_it():
     assert after == before
 
 
-def add_unknown(key: str, account: str = ADDRESS, endpoint: str = ENDPOINT) -> None:
+def add_unknown(key: str, account: str = ADDR, endpoint: str = ENDPOINT) -> None:
     with storage.db() as connection:
         connection.execute(
             "INSERT INTO intents (id, endpoint, account, kind, status, entity,"
@@ -551,7 +551,7 @@ def test_naive_session_expiry_fails_the_session_check_and_continues(isolated_hom
     storage.save_session(
         {
             "token": TOKEN,
-            "evmAddress": ADDRESS,
+            "evmAddress": ADDR,
             "endpoint": ENDPOINT,
             "expiresAt": "2099-01-01T00:00:00",
         }
@@ -930,7 +930,7 @@ KEY = "20261118T000000000000-r"
 
 def blocked_on(endpoint: str) -> None:
     save(endpoint=endpoint)
-    ledger([(KEY, endpoint, ADDRESS, "unknown")])
+    ledger([(KEY, endpoint, ADDR, "unknown")])
 
 
 def ledger_status(key: str) -> str:
@@ -949,7 +949,7 @@ def test_fix_reconciles_a_blocking_intent_with_keeper(http_stub):
     state.intents = [
         {
             "intentKey": KEY,
-            "evmAddress": ADDRESS,
+            "evmAddress": ADDR,
             "execActor": "server",
             "lifecycleStep": "exec_fail",
         }
@@ -969,7 +969,7 @@ def test_late_keeper_answer_never_writes_the_ledger(http_stub, monkeypatch):
     state.intents = [
         {
             "intentKey": KEY,
-            "evmAddress": ADDRESS,
+            "evmAddress": ADDR,
             "execActor": "server",
             "lifecycleStep": "exec_fail",
         }
@@ -992,7 +992,7 @@ def test_new_unknown_intent_during_reconcile_still_blocks(http_stub):
     state.intents = [
         {
             "intentKey": KEY,
-            "evmAddress": ADDRESS,
+            "evmAddress": ADDR,
             "execActor": "server",
             "lifecycleStep": "exec_fail",
         }
@@ -1011,7 +1011,7 @@ def test_locked_ledger_write_gives_up_at_the_deadline(http_stub, monkeypatch):
     state.intents = [
         {
             "intentKey": KEY,
-            "evmAddress": ADDRESS,
+            "evmAddress": ADDR,
             "execActor": "server",
             "lifecycleStep": "exec_fail",
         }
@@ -1020,7 +1020,7 @@ def test_locked_ledger_write_gives_up_at_the_deadline(http_stub, monkeypatch):
     holder.execute("BEGIN EXCLUSIVE")
     try:
         start = time.monotonic()
-        outcome = doctor.reconcile_keys(endpoint, ADDRESS, [KEY], 1.0)
+        outcome = doctor.reconcile_keys(endpoint, ADDR, [KEY], 1.0)
         took = time.monotonic() - start
     finally:
         holder.execute("ROLLBACK")
@@ -1087,7 +1087,7 @@ def test_overall_ignores_skipped():
 def test_session_token_never_printed(http_stub):
     base, _state = http_stub
     save(hours=-1, endpoint=f"{base}/query?token={TOKEN}")
-    ledger([("k1", f"{base}/query", ADDRESS, "unknown")])
+    ledger([("k1", f"{base}/query", ADDR, "unknown")])
     ws, stop = ws_stub(ack=True)
     try:
         outputs = [
