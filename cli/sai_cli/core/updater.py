@@ -665,12 +665,14 @@ class Current:
 @dataclass(frozen=True)
 class Rollback:
     """What puts the current version back, prepared before the install is
-    replaced. Either a verified wheel for uv, or a copy of the environment."""
+    replaced: a copy of the environment, a verified wheel, or both."""
 
-    # (tag, sha256, path) of a wheel verified against its release.
-    wheel: tuple[str, str, Path] | None = None
-    # A copy of the tool's environment directory.
+    # A copy of the tool's environment directory; restored first, because
+    # swapping it back needs neither uv nor any package source.
     snapshot: Path | None = None
+    # (tag, sha256, path) of a wheel verified against its release; used only
+    # if the copy cannot be restored.
+    wheel: tuple[str, str, Path] | None = None
 
 
 def _download_to_cache(
@@ -729,19 +731,12 @@ def swap_back(prefix: Path, snapshot: Path, launcher: Path) -> str | None:
     return None
 
 
-def prepare_rollback(current: Current, options: Options) -> Rollback | None:
-    """Get what can put CURRENT's version back, before anything is replaced,
-    so a rollback needs no network. None when nothing can be had; the update
-    then stops.
-
-    For a release install that is its wheel: the kept one, while it lies in
-    the private cache and its bytes still hash to what the release record
-    says, or else the current release downloaded and checked against its
-    SHA256SUMS now. Without such a wheel, and for a Git install, it is a
-    copy of the environment itself.
-    """
+def rollback_wheel(current: Current, options: Options) -> tuple[str, str, Path] | None:
+    """A verified wheel of CURRENT's version for a release install, or None:
+    the kept one, while it lies in the private cache and its bytes still
+    hash to what the release record says, or else the current release
+    downloaded and checked against its SHA256SUMS now."""
     record, install = current.record, current.install
-    tag = update.tag_for(current.version)
     if record is not None and record.wheel:
         kept = Path(record.wheel)
         try:
@@ -755,41 +750,66 @@ def prepare_rollback(current: Current, options: Options) -> Rollback | None:
         except (OSError, UpdateFailed):
             intact = False
         if intact:
-            return Rollback(wheel=(record.tag, record.sha256, kept))
-    if install.kind == update.UV_TOOL_RELEASE:
-        try:
-            release = update.release_for(tag, options.web_base)
-            wheel, digest, _ = _download_to_cache(release, options)
-        except (UpdateFailed, OSError):
-            pass
-        else:
-            return Rollback(wheel=(tag, digest, wheel))
+            return record.tag, record.sha256, kept
+    if install.kind != update.UV_TOOL_RELEASE:
+        return None
+    tag = update.tag_for(current.version)
+    try:
+        release = update.release_for(tag, options.web_base)
+        wheel, digest, _ = _download_to_cache(release, options)
+    except (UpdateFailed, OSError):
+        return None
+    return tag, digest, wheel
+
+
+def prepare_rollback(current: Current, options: Options) -> Rollback | None:
+    """Get what can put CURRENT's version back, before anything is replaced,
+    so a rollback needs no network. None when nothing can be had; the update
+    then stops.
+
+    The environment is always copied. A wheel reinstall would make uv
+    resolve the old version's dependencies again, which can fail when one
+    was withdrawn; the copy already holds them. A verified wheel is the
+    spare, for when the copy cannot be made or restored.
+    """
     snapshot = snapshot_environment(current.prefix)
-    return Rollback(snapshot=snapshot) if snapshot is not None else None
+    wheel = rollback_wheel(current, options)
+    if snapshot is None and wheel is None:
+        return None
+    return Rollback(snapshot, wheel)
 
 
 def restore(
     current: Current, rollback: Rollback, options: Options, uv: str
 ) -> str | None:
     """Put CURRENT's version back from ROLLBACK and verify it. Return None
-    when it runs again, or the error."""
-    if rollback.snapshot is not None:
-        error = swap_back(current.prefix, rollback.snapshot, current.launcher)
-    else:
-        assert rollback.wheel is not None
-        error = wheel_error(rollback.wheel) or install_spec(
-            uv, str(rollback.wheel[2]), options.runner
+    when it runs again, or the last error. The environment copy comes
+    first; the wheel is reinstalled only if that fails."""
+
+    def runs() -> str | None:
+        return verify(
+            current.prefix,
+            current.launcher,
+            current.version,
+            options.imports,
+            options.runner,
         )
-    error = error or verify(
-        current.prefix,
-        current.launcher,
-        current.version,
-        options.imports,
-        options.runner,
-    )
-    if error is None and rollback.wheel is not None:
-        with contextlib.suppress(OSError):
-            write_record(current.prefix, *rollback.wheel)
+
+    error: str | None = "nothing to roll back to"
+    if rollback.snapshot is not None:
+        swapped = swap_back(current.prefix, rollback.snapshot, current.launcher)
+        error = swapped or runs()
+        if error is None:
+            return None
+    if rollback.wheel is not None:
+        error = (
+            wheel_error(rollback.wheel)
+            or install_spec(uv, str(rollback.wheel[2]), options.runner)
+            or runs()
+        )
+        if error is None:
+            with contextlib.suppress(OSError):
+                write_record(current.prefix, *rollback.wheel)
     return error
 
 
@@ -814,8 +834,8 @@ def _install(
     interrupted the run. The caller holds the tool lock and the cache lock.
 
     The order is what keeps a working `sai`: stage and hash the new wheel,
-    run it in a throwaway environment, get something to roll back to, and
-    only then let uv replace the install. Without a rollback it stops. The
+    run it in a throwaway environment, copy the current environment to roll
+    back to, and only then let uv replace the install. Without a rollback it stops. The
     check afterwards and the rollback are the second line. The cache is
     pruned only after the new version has passed that check.
     """
@@ -855,8 +875,8 @@ def _install(
     rollback = prepare_rollback(current, options)
     if rollback is None:
         return unchanged(
-            f"nothing to roll back to could be prepared: no verified wheel of"
-            f" {installed} and no copy of its environment"
+            f"nothing to roll back to could be prepared: no copy of the"
+            f" environment and no verified wheel of {installed}"
         )
     try:
         if options.allowed is not None and not options.allowed():

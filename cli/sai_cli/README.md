@@ -60,14 +60,15 @@ replaces a working `sai`:
 1. Download the release wheel and `SHA256SUMS` and check the hash.
 2. Install the wheel into a throwaway environment, run its `sai --version`,
    and import the CLI and the MCP server there.
-3. Get something to roll back to: the wheel of the current version kept in
+3. Copy the tool's environment beside it, to roll back to. As a spare, keep
+   a verified wheel of the current version: the one in
    `$SAI_HOME/cache/wheels` if its hash still matches, or the current release
-   downloaded and checked again. Without such a wheel, and for a Git install,
-   copy the tool's environment beside it instead. With neither, stop and leave
-   the install alone.
+   downloaded and checked again. With neither, stop and leave the install
+   alone.
 4. Install the wheel with `uv tool install --force`.
 5. Run the installed `sai --version` and the imports again. If that fails, or
-   on Ctrl-C, put the previous version back from the wheel or the copy.
+   on Ctrl-C, swap the copy back, which needs no network and no package
+   index. Only if that fails is the spare wheel reinstalled.
 
 It exits 0 when sai is updated or already current and 1 on a failure. uv and
 the checks run in a neutral directory with an isolated Python, so nothing is

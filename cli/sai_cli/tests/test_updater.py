@@ -8,6 +8,7 @@ real installed sai and ~/.sai are never touched.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -268,8 +270,8 @@ def test_a_release_that_breaks_only_once_installed_rolls_back(uv_dirs):
         tool = Tool(uv_dirs, stub.url)
         tool.install_release("0.1.0")
 
-        # From a release URL install: the current release is downloaded and
-        # checked against its SHA256SUMS before anything is replaced.
+        # From a release URL install: the copy of the environment is swapped
+        # back, so the install is exactly what it was.
         first = tool.update()
         assert first.status == updater.FAILED
         assert first.rolled_back, first.message
@@ -277,12 +279,9 @@ def test_a_release_that_breaks_only_once_installed_rolls_back(uv_dirs):
         assert "Rolled back to sai 0.1.0" in first.message
         assert tool.version() == "0.1.0"
         assert tool.kind() == update.UV_TOOL_RELEASE
-        record = update.read_release_record(tool.prefix)
-        assert record is not None
-        assert record.sha256 == hashlib.sha256(wheels["0.1.0"]).hexdigest()
 
-        # From an install sai update made: rolls back from the kept wheel,
-        # with the release gone from the server.
+        # From an install sai update made, with the release gone from the
+        # server.
         assert tool.update(to="0.2.0").status == updater.UPDATED
         stub.routes.pop(f"{downloads('0.2.0')}/{update.wheel_name('0.2.0')}")
         second = tool.update()
@@ -299,6 +298,102 @@ def test_a_release_that_breaks_only_once_installed_rolls_back(uv_dirs):
         "0.3.0",
         True,
     )
+
+
+def build_dependency(name: str, version: str = "1.0.0") -> bytes:
+    """A wheel of an empty package NAME, for sai-cli to depend on."""
+    info = f"{name}-{version}.dist-info"
+    files = {
+        f"{name}/__init__.py": "",
+        f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{info}/WHEEL": (
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\n"
+            "Tag: py3-none-any\n"
+        ),
+        f"{info}/RECORD": "",
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for path, text in files.items():
+            archive.writestr(path, text)
+    return buffer.getvalue()
+
+
+@pytest.mark.slow
+@needs_uv
+def test_rollback_needs_no_package_source_for_the_old_dependencies(
+    uv_dirs, monkeypatch
+):
+    """The installed version depends on a package that is gone by the time
+    the update fails. Reinstalling the old wheel would have to resolve it
+    again; swapping the environment copy back does not."""
+    links = uv_dirs / "links"
+    links.mkdir()
+    dependency = links / "saidep-1.0.0-py3-none-any.whl"
+    dependency.write_bytes(build_dependency("saidep"))
+    monkeypatch.setenv("UV_FIND_LINKS", str(links))
+    monkeypatch.setenv("UV_NO_INDEX", "1")
+    wheels = {
+        "0.1.0": build_wheel("0.1.0", "import saidep\n", requires=["saidep"]),
+        "0.2.0": build_wheel("0.2.0", BROKEN_WHEN_INSTALLED),
+    }
+    log = uv_dirs / "uv.log"
+    shims = uv_dirs / "shims"
+    shims.mkdir()
+    shim = shims / "uv"
+    shim.write_text(UV_SHIM.format(python=sys.executable, log=str(log), uv=REAL_UV))
+    shim.chmod(0o755)
+    with Stub(release_routes(wheels, latest=["0.2.0"])) as stub:
+        tool = Tool(uv_dirs, stub.url)
+        tool.install_release("0.1.0")
+        assert "import saidep" in tool.server_source()
+        # The dependency is withdrawn, and uv's cache of it is gone too.
+        dependency.unlink()
+        shutil.rmtree(uv_dirs / "uv-cache")
+        monkeypatch.setenv("PATH", f"{shims}{os.pathsep}{os.environ['PATH']}")
+        outcome = tool.update()
+    assert outcome.status == updater.FAILED
+    assert outcome.rolled_back, outcome.message
+    assert "Rolled back to sai 0.1.0" in outcome.message
+    assert tool.version() == "0.1.0"
+    python = tool.prefix / "bin" / "python"
+    done = subprocess.run(
+        [str(python), "-I", "-c", "import sai_cli.mcp_server.server, saidep"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    # uv replaced the install once and was not asked to put it back.
+    installs = [line for line in log.read_text().splitlines() if "tool install" in line]
+    assert len(installs) == 1
+
+
+@pytest.mark.slow
+@needs_uv
+def test_the_spare_wheel_restores_when_the_copy_cannot_be_swapped_back(
+    uv_dirs, monkeypatch
+):
+    wheels = {
+        "0.1.0": build_wheel("0.1.0"),
+        "0.2.0": build_wheel("0.2.0", BROKEN_WHEN_INSTALLED),
+    }
+    monkeypatch.setattr(
+        updater, "swap_back", lambda prefix, snapshot, launcher: "disk error"
+    )
+    with Stub(release_routes(wheels, latest=["0.2.0"])) as stub:
+        tool = Tool(uv_dirs, stub.url)
+        tool.install_release("0.1.0")
+        outcome = tool.update()
+    assert outcome.status == updater.FAILED
+    assert outcome.rolled_back, outcome.message
+    assert tool.version() == "0.1.0"
+    # Reinstalled from the wheel that was verified before the update began.
+    record = update.read_release_record(tool.prefix)
+    assert record is not None
+    assert record.sha256 == hashlib.sha256(wheels["0.1.0"]).hexdigest()
+    assert tool.kind() == update.UV_TOOL_RELEASE
 
 
 @pytest.mark.slow
