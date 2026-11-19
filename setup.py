@@ -7,6 +7,7 @@ else about the package is in pyproject.toml.
 
 from __future__ import annotations
 
+import glob
 import os
 from pathlib import Path
 
@@ -17,11 +18,16 @@ PACKAGE = Path(__file__).resolve().parent / "cli" / "sai_cli"
 
 def skill_files(package: Path = PACKAGE) -> list[str]:
     """Return each file under PACKAGE/skills as a path relative to PACKAGE,
-    hidden files and directories included."""
+    hidden files and directories included.
+
+    setuptools reads package_data entries as glob patterns, so each path is
+    escaped: `notes [draft].md` must match itself, not `notes d.md`.
+    """
     found: list[str] = []
     for parent, _dirs, names in os.walk(package / "skills", followlinks=True):
         for name in names:
-            found.append((Path(parent) / name).relative_to(package).as_posix())
+            path = (Path(parent) / name).relative_to(package).as_posix()
+            found.append(glob.escape(path))
     return sorted(found)
 
 

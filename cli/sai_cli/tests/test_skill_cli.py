@@ -525,10 +525,15 @@ def test_build_ships_hidden_files_and_directories(tmp_path):
     (skills / "references" / ".fixtures" / "nested" / "example.txt").write_text("e\n")
     (skills / "references" / "data" / "deep").mkdir(parents=True)
     (skills / "references" / "data" / "deep" / "x.json").write_text("{}\n")
+    # Names with glob characters must be packaged as themselves.
+    (skills / "references" / "notes [draft].md").write_text("n\n")
+    (skills / "references" / "what?.md").write_text("w\n")
+    (skills / "references" / "star*.md").write_text("s\n")
 
     expected = check_dist.source_files(skills)
     assert ".templates/template.txt" in expected
     assert "references/.fixtures/nested/example.txt" in expected
+    assert "references/notes [draft].md" in expected
     out = tmp_path / "dist"
     check_dist.build(project, out)
     assert check_dist.check(out, expected) == []
