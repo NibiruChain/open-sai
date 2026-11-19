@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -48,6 +49,14 @@ OPERATIONS = {
 
 class KeeperError(Exception):
     """Keeper rejected a query or transport failed."""
+
+
+class UdUnavailable(KeeperError):
+    """ud is installed but could not say whether it has a wallet."""
+
+
+class SigningFailed(KeeperError):
+    """The signing command did not run, exited with an error, or timed out."""
 
 
 class AdmissionRejected(KeeperError):
@@ -322,7 +331,7 @@ def signed_session(
                 timeout=300 if interactive else 120,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise KeeperError("Wallet signing failed") from exc
+            raise SigningFailed("Wallet signing failed") from exc
     signature = proc.stdout.strip()
     if not signature.startswith("0x") or len(signature) != 132:
         raise KeeperError("Wallet signer returned an invalid signature")
@@ -398,12 +407,30 @@ def parse_wallet(output: str) -> UdWallet | None:
     return None
 
 
-def ud_wallet(wallet: str) -> UdWallet | None:
-    """Read a ud wallet's public details, or None if ud cannot show it.
+def ud_says_unknown(wallet: str, stderr: str) -> bool:
+    """Whether `ud evm wallet show` reported exactly "no wallet by that name".
 
-    `ud evm wallet show` prints public data only. Its stdin and stderr are
-    closed so it can never prompt, and only the addr and Cast state leave
-    this function.
+    The whole final line must be ud's missing-wallet message for this name.
+    Any other text, even one that mentions an unknown wallet, is a failed
+    lookup, so a broken ud never looks like a confirmed absence.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return False
+    pattern = rf"(Error: )?wallet {re.escape(wallet)} is not in pass entry \S+"
+    return re.fullmatch(pattern, lines[-1]) is not None
+
+
+def ud_wallet(wallet: str) -> UdWallet | None:
+    """Read a ud wallet's public details, or None when there is none.
+
+    None means ud is not installed or says it has no wallet by that name.
+    Any other failure raises `UdUnavailable`, because the caller then cannot
+    tell whether ud holds another account under the name.
+
+    `ud evm wallet show` prints public data only. Its stdin is closed so it
+    can never prompt. Its stderr is read only to recognize an unknown name,
+    and only the addr and Cast state leave this function.
     """
     if shutil.which("ud") is None:
         return None
@@ -411,15 +438,21 @@ def ud_wallet(wallet: str) -> UdWallet | None:
         proc = subprocess.run(
             ["ud", "evm", "wallet", "show", wallet],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             text=True,
-            check=True,
+            check=False,
             timeout=60,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return parse_wallet(proc.stdout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UdUnavailable(f"`ud evm wallet show {wallet}` did not run") from exc
+    if proc.returncode != 0:
+        if ud_says_unknown(wallet, proc.stderr):
+            return None
+        raise UdUnavailable(f"`ud evm wallet show {wallet}` failed")
+    found = parse_wallet(proc.stdout)
+    if found is None:
+        raise UdUnavailable(f"`ud evm wallet show {wallet}` printed no addr")
+    return found
 
 
 def cast_address(account: str) -> str:
