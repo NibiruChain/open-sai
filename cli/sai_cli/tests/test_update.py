@@ -283,7 +283,16 @@ def test_fetch_skips_releases_flagged_as_prerelease_or_draft():
 
 @pytest.mark.parametrize("status", [403, 429, 500, 503])
 @pytest.mark.parametrize(
-    "tag", ["sai-cli/v0.3.1", "sai-cli%2Fv0.3.1", "sai-rs/v1.0.0", "v0.4.0"]
+    "tag",
+    [
+        "sai-cli/v0.3.1",
+        "sai-cli%2Fv0.3.1",
+        "sai-rs/v1.0.0",
+        "v0.4.0",
+        # Tags that end in /releases are releases, not the empty list.
+        "docs%2Freleases",
+        "docs/releases",
+    ],
 )
 def test_the_web_redirect_never_names_the_latest_release(status, tag):
     """GitHub's repository-wide latest can be an older maintenance release
@@ -306,6 +315,24 @@ def test_fetch_rejects_malformed_json():
             pytest.raises(update.UpdateError, match="malformed JSON"),
         ):
             fetch(stub)
+
+
+def test_a_rate_limited_check_keeps_the_cache_when_a_tag_ends_in_releases():
+    update.write_cache(update.Cache("sai-cli/v0.2.0", update.now()))
+    location = f"https://github.com/{update.REPO}/releases/tag/docs%2Freleases"
+    routes: Routes = {API_PATH: (429, {}, b""), WEB_PATH: redirect(location)}
+    with Stub(routes) as stub:
+        result = check(stub)
+    assert result.exit_code == 1
+    assert "rate limited or failing" in result.stderr
+    assert update.latest_version() == "0.2.0"
+
+
+def test_sai_home_is_absolute_even_when_the_variable_is_relative(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SAI_HOME", "relative-home")
+    assert update.sai_home() == tmp_path / "relative-home"
+    assert update.wheel_cache() == tmp_path / "relative-home" / "cache" / "wheels"
 
 
 def test_fallback_needs_a_redirect():

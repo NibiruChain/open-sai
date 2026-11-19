@@ -35,7 +35,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, urlsplit
 
 # Keep these in step with cli/sai_cli/core/update.py; a test compares them.
 REPO = "SaiDotFun/open-sai"
@@ -206,7 +206,10 @@ def any_release(web_base: str, deadline: float) -> bool:
     location = headers.get("location")
     if status not in (301, 302, 303, 307, 308) or not location:
         raise LookupFailed(f"release page answered HTTP {status} without a redirect")
-    return not unquote(urlsplit(location).path).rstrip("/").endswith("/releases")
+    # Exactly the release list means no release. A tag whose name ends in
+    # `/releases`, such as `docs/releases`, is a release.
+    listed = urlsplit(location).path.rstrip("/").lower()
+    return listed != f"/{REPO}/releases".lower()
 
 
 def find_latest(
@@ -304,12 +307,51 @@ def fetch_wheel(
     return wheel, actual
 
 
+def wheel_cache() -> Path:
+    """$SAI_HOME/cache/wheels, where `sai update` also keeps its wheels.
+
+    uv's receipt names the wheel file it installed from, and
+    `uv tool upgrade --all` reads it again, so the verified wheel is kept
+    here instead of in a temporary directory.
+    """
+    home = os.environ.get("SAI_HOME") or os.path.join(os.path.expanduser("~"), ".sai")
+    return Path(os.path.abspath(home)) / "cache" / "wheels"
+
+
+def private_cache() -> Path:
+    """Create the wheel cache, private to the user, and return it. A
+    symlinked cache directory is refused: the wheel would land elsewhere."""
+    cache = wheel_cache()
+    cache.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for directory in (cache.parent, cache):
+        if directory.is_symlink():
+            raise LookupFailed(f"{directory} is a symlink; not keeping a wheel there")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    return cache
+
+
+def keep_wheel(tag: str, web_base: str, timeout: float) -> tuple[Path, str]:
+    """Download and verify TAG's wheel in a private directory, then move it
+    into the wheel cache. Return the kept wheel and its SHA-256."""
+    try:
+        cache = private_cache()
+        with tempfile.TemporaryDirectory(dir=cache, prefix=".download-") as temp:
+            wheel, digest = fetch_wheel(tag, Path(temp), web_base, timeout)
+            kept = cache / wheel.name
+            os.replace(wheel, kept)
+    except OSError as error:
+        raise LookupFailed(
+            f"could not keep the wheel: {type(error).__name__}"
+        ) from error
+    return kept, digest
+
+
 def find_uv() -> str | None:
     """The uv that runs this script, or the one on PATH."""
     return os.environ.get("UV") or shutil.which("uv")
 
 
-def write_record(uv: str, tag: str, digest: str) -> str | None:
+def write_record(uv: str, tag: str, digest: str, wheel: Path) -> str | None:
     """Record which release the installed wheel came from, beside the tool's
     environment, so `sai update` knows this is a release install. Return why
     it could not be written, or None."""
@@ -330,7 +372,7 @@ def write_record(uv: str, tag: str, digest: str) -> str | None:
             "tag": tag,
             "sha256": digest,
             "installed": installed,
-            "wheel": None,
+            "wheel": str(wheel),
         }
         fd, temp = tempfile.mkstemp(dir=tools, prefix=".sai-cli-release-")
         with os.fdopen(fd, "w") as handle:
@@ -403,23 +445,20 @@ def main(argv: list[str]) -> int:
             )
             print("Dry run: nothing was installed.")
             return 0
-        with tempfile.TemporaryDirectory(prefix="sai-install-") as temp:
-            try:
-                wheel, digest = fetch_wheel(
-                    tag, Path(temp), args.web_base, args.timeout * 4
+        try:
+            wheel, digest = keep_wheel(tag, args.web_base, args.timeout * 4)
+        except LookupFailed as error:
+            return give_up(error)
+        print(f"Verified {wheel.name} against the release's SHA256SUMS.")
+        code = uv_tool_install(uv, str(wheel), str(wheel), False)
+        if code == 0 and uv is not None:
+            problem = write_record(uv, tag, digest, wheel)
+            if problem is not None:
+                print(
+                    "warning: could not record the release this install came"
+                    f" from ({problem}); `sai update` will not update it.",
+                    file=sys.stderr,
                 )
-            except LookupFailed as error:
-                return give_up(error)
-            print(f"Verified {wheel.name} against the release's SHA256SUMS.")
-            code = uv_tool_install(uv, str(wheel), str(wheel), False)
-            if code == 0 and uv is not None:
-                problem = write_record(uv, tag, digest)
-                if problem is not None:
-                    print(
-                        "warning: could not record the release this install came"
-                        f" from ({problem}); `sai update` will not update it.",
-                        file=sys.stderr,
-                    )
     if code == 0 and not args.dry_run:
         print("Installed. Run `sai --help` to start.")
     return code
