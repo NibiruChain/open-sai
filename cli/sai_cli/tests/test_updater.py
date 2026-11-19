@@ -103,7 +103,7 @@ def uv_dirs(tmp_path, monkeypatch, sai_home) -> Path:
 
 def user_files(home: Path) -> dict[str, bytes]:
     """SAI_HOME files that belong to the user, not to the updater."""
-    own = {"update.json", "update.lock", "cache"}
+    own = {"update.json", "update.lock", "update-cache.lock", "cache"}
     return {
         str(path.relative_to(home)): path.read_bytes()
         for path in sorted(home.rglob("*"))
@@ -291,7 +291,8 @@ def test_a_release_that_breaks_only_once_installed_rolls_back(uv_dirs):
         assert tool.version() == "0.2.0"
         assert tool.kind() == update.UV_TOOL_RELEASE
         kept = sorted(path.name for path in update.wheel_cache().glob("*.whl"))
-        assert kept == [update.wheel_name("0.2.0")]
+        # A failed update prunes nothing: 0.1.0 stays from the update before.
+        assert kept == [update.wheel_name("0.1.0"), update.wheel_name("0.2.0")]
     result = updater.read_state()["result"]
     assert (result["status"], result["to"], result["rolledBack"]) == (
         updater.FAILED,
@@ -909,7 +910,9 @@ def test_a_waiting_update_reads_the_install_after_it_gets_the_lock(
     # The copy was taken after the lock, so it holds what update A left.
     assert script.version == "0.2.0"
     origin = json.loads(
-        next(prefix.glob("lib/*/site-packages/sai_cli-*.dist-info/direct_url.json")).read_text()
+        next(
+            prefix.glob("lib/*/site-packages/sai_cli-*.dist-info/direct_url.json")
+        ).read_text()
     )
     assert origin["vcs_info"]["commit_id"] == COMMIT_B
 

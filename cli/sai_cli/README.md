@@ -60,12 +60,14 @@ replaces a working `sai`:
 1. Download the release wheel and `SHA256SUMS` and check the hash.
 2. Install the wheel into a throwaway environment, run its `sai --version`,
    and import the CLI and the MCP server there.
-3. Get a rollback copy of the current version: the wheel kept in
+3. Get something to roll back to: the wheel of the current version kept in
    `$SAI_HOME/cache/wheels` if its hash still matches, or the current release
-   downloaded and checked again.
+   downloaded and checked again. Without such a wheel, and for a Git install,
+   copy the tool's environment beside it instead. With neither, stop and leave
+   the install alone.
 4. Install the wheel with `uv tool install --force`.
 5. Run the installed `sai --version` and the imports again. If that fails, or
-   on Ctrl-C, put the previous version back from the rollback copy.
+   on Ctrl-C, put the previous version back from the wheel or the copy.
 
 It exits 0 when sai is updated or already current and 1 on a failure. uv and
 the checks run in a neutral directory with an isolated Python, so nothing is
@@ -96,7 +98,11 @@ starts an update, and a background run reads the setting again right before
 it installs. On Windows the background run only notifies.
 
 `$SAI_HOME/update.json` holds the last check and the last update result, and
-`update.lock` guards it. `sai doctor` reads it for its `version` check, which
+`update.lock` guards it. `update-cache.lock` is held for a whole install, so
+two tools that share one `SAI_HOME` do not prune each other's wheels; the
+cache is pruned only after a new version is verified. `$SAI_HOME`, `cache`,
+and `cache/wheels` must belong to you and not be writable by others; sai
+tightens its own and refuses anyone else's. `sai doctor` reads it for its `version` check, which
 warns when sai is behind or the last update failed. Two files sit beside the
 tool's environment in uv's tool directory, shared by every `SAI_HOME` that
 uses the same `sai`: `.sai-cli-update.lock`, held for a whole install, and
