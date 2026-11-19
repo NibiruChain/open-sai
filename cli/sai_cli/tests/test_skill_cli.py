@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tarfile
 import zipfile
@@ -379,6 +380,60 @@ def test_failed_replacement_keeps_the_previous_copy(home, tmp_path, monkeypatch)
     assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
 
 
+def interrupt_publish(monkeypatch, target: Path) -> None:
+    """Make the move of the new copy into TARGET raise KeyboardInterrupt."""
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst) == target and "-new-" in Path(src).name:
+            raise KeyboardInterrupt
+        real_replace(src, dst)
+
+    monkeypatch.setattr(skill.os, "replace", replace)
+
+
+def test_interrupted_replacement_puts_the_directory_back(home, tmp_path, monkeypatch):
+    target = tmp_path / "sai"
+    assert invoke("skill", "install", "--dir", str(target)).exit_code == 0
+    (target / "cli.md").write_text("my edit\n")
+    before = snapshot(target)
+
+    interrupt_publish(monkeypatch, target)
+    with pytest.raises(KeyboardInterrupt):
+        skill.install(skill.packaged_files(), target, force=True)
+    monkeypatch.undo()
+    assert snapshot(target) == before
+    assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
+
+
+def test_interrupted_replacement_puts_the_symlink_back(home, tmp_path, monkeypatch):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / "SKILL.md").write_text("---\nname: sai\n---\nmanaged copy\n")
+    target = tmp_path / "sai"
+    target.symlink_to(managed)
+
+    for error in (KeyboardInterrupt, OSError):
+        real_replace = os.replace
+
+        def replace(src, dst, error=error, real_replace=real_replace):
+            if Path(dst) == target and "-new-" in Path(src).name:
+                raise error
+            real_replace(src, dst)
+
+        monkeypatch.setattr(skill.os, "replace", replace)
+        with pytest.raises(error):
+            skill.install(skill.packaged_files(), target, force=True)
+        monkeypatch.undo()
+        assert target.is_symlink()
+        assert target.readlink() == managed
+        assert snapshot(managed) == {"SKILL.md": "---\nname: sai\n---\nmanaged copy\n"}
+        assert sorted(p.name for p in tmp_path.iterdir() if p.name != "home") == [
+            "managed",
+            "sai",
+        ]
+
+
 # scripts/check_dist.py
 
 
@@ -433,3 +488,47 @@ def test_check_dist_rejects_symlinks_in_either_archive(tmp_path):
     assert len(errors) == 2
     assert any("is a symlink" in e for e in errors)
     assert any("is not a regular file" in e for e in errors)
+
+
+def test_check_dist_source_walk_includes_hidden_directories(tmp_path):
+    (tmp_path / ".templates").mkdir()
+    (tmp_path / ".templates" / "t.txt").write_text("t")
+    (tmp_path / "references" / ".fixtures" / "nested").mkdir(parents=True)
+    (tmp_path / "references" / ".fixtures" / "nested" / "e.txt").write_text("e")
+    (tmp_path / ".dot").write_text("d")
+    (tmp_path / "SKILL.md").write_text("---\n")
+    assert set(check_dist.source_files(tmp_path)) == {
+        ".templates/t.txt",
+        "references/.fixtures/nested/e.txt",
+        ".dot",
+        "SKILL.md",
+    }
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv to build")
+def test_build_ships_hidden_files_and_directories(tmp_path):
+    """Build a copy of the package whose skill has hidden directories."""
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("pyproject.toml", "setup.py"):
+        shutil.copy(REPO / name, project / name)
+    # copytree follows the skills symlink, so the copy holds real files.
+    shutil.copytree(
+        REPO / "cli" / "sai_cli",
+        project / "cli" / "sai_cli",
+        ignore=shutil.ignore_patterns("tests", "__pycache__"),
+    )
+    skills = project / "cli" / "sai_cli" / "skills"
+    (skills / ".templates").mkdir()
+    (skills / ".templates" / "template.txt").write_text("t\n")
+    (skills / "references" / ".fixtures" / "nested").mkdir(parents=True)
+    (skills / "references" / ".fixtures" / "nested" / "example.txt").write_text("e\n")
+    (skills / "references" / "data" / "deep").mkdir(parents=True)
+    (skills / "references" / "data" / "deep" / "x.json").write_text("{}\n")
+
+    expected = check_dist.source_files(skills)
+    assert ".templates/template.txt" in expected
+    assert "references/.fixtures/nested/example.txt" in expected
+    out = tmp_path / "dist"
+    check_dist.build(project, out)
+    assert check_dist.check(out, expected) == []

@@ -268,8 +268,9 @@ or has no entries at all, and otherwise:
 A directory counts as a `sai` skill only when its own `SKILL.md` is a regular
 file that starts with `name: sai`, so a mistyped `--dir` cannot delete other
 files or links. `install` writes the new copy beside `DIR`, moves the old
-directory aside, moves the new one into place, and only then deletes the old
-one; if the move fails, the old directory is put back. It refuses to replace
+directory or link aside, moves the new one into place, and only then deletes
+the old one; if anything stops the move, Ctrl-C included, the old one is put
+back. It refuses to replace
 `DIR` while the current directory is inside it.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`

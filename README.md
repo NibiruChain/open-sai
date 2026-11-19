@@ -197,5 +197,6 @@ just sync-skill --from ~/jiyuu --ref my-branch --run   # a local checkout
 The sync records the jiyuu commit in `skills/sai/.source.json`, and its commit
 message lists the jiyuu commits pulled since the last committed sync. Running
 `--run` first and `--run --commit` later commits the files already written. The package ships
-the directory through the symlink `cli/sai_cli/skills`, and `just build-check`
+the directory through the symlink `cli/sai_cli/skills`. `setup.py` walks it
+and lists every file, hidden directories included, and `just build-check`
 fails if the wheel or sdist misses a file of it or holds a link instead.

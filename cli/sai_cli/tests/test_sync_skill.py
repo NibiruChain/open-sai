@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -258,6 +259,53 @@ def test_write_checks_every_path_before_deleting(open_sai):
         sync_skill.write(dest, {"SKILL.md": b"new", "../../outside.md": b"x"})
     assert (dest / "SKILL.md").read_text() == "---\nname: sai\n---\nold\n"
     assert not (open_sai / "outside.md").exists()
+
+
+def test_old_symlink_in_the_skill_cannot_redirect_writes(jiyuu, open_sai):
+    # skills/sai/references is a link to a sibling directory in the old tree.
+    dest = open_sai / "skills" / "sai"
+    old = dest / "old-references"
+    old.mkdir()
+    (old / "keep.md").write_text("old\n")
+    (dest / "references").symlink_to("old-references")
+    outside = open_sai / "outside"
+    outside.mkdir()
+    (dest / "examples").symlink_to(outside)
+    commit(jiyuu, "examples", {"ai-skills/sai/examples/prompts.md": "# P\n"})
+
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert not (dest / "references").is_symlink()
+    assert (dest / "references" / "rest.md").read_text() == "# REST\n"
+    assert not (dest / "old-references").exists()
+    assert not (dest / "examples").is_symlink()
+    assert list(outside.iterdir()) == []
+    assert tree(open_sai) == {
+        "SKILL.md",
+        "cli.md",
+        "references/rest.md",
+        "examples/prompts.md",
+        ".source.json",
+    }
+    # No staging or backup directory is left behind.
+    assert [p.name for p in (open_sai / "skills").iterdir()] == ["sai"]
+
+
+def test_interrupted_write_keeps_the_old_tree(jiyuu, open_sai, monkeypatch):
+    dest = open_sai / "skills" / "sai"
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst) == dest and "-new-" in Path(src).name:
+            raise KeyboardInterrupt
+        real_replace(src, dst)
+
+    monkeypatch.setattr(sync_skill.os, "replace", replace)
+    with pytest.raises(KeyboardInterrupt):
+        run(jiyuu, open_sai, run=True)
+    monkeypatch.undo()
+    assert tree(open_sai) == {"SKILL.md"}
+    assert (dest / "SKILL.md").read_text() == "---\nname: sai\n---\nold\n"
+    assert [p.name for p in (open_sai / "skills").iterdir()] == ["sai"]
 
 
 def test_nested_files_of_any_type_are_synced(jiyuu, open_sai):

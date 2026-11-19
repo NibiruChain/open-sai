@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -266,22 +267,39 @@ def plan(repo: Path, ref: str, url: str, root: Path) -> Plan:
 
 
 def write(dest: Path, files: dict[str, bytes]) -> None:
-    """Replace DEST with FILES. Every path is checked before DEST changes."""
+    """Replace DEST with FILES.
+
+    FILES is written to a fresh directory beside DEST under the literal paths
+    from jiyuu, so a symlink in the old tree cannot redirect a write. The old
+    tree is moved aside, the new one moved in, and the old one deleted last;
+    if the swap stops, the old tree is moved back.
+    """
     if dest.is_symlink():
         raise SyncError(f"{dest} is a symlink; expected a directory")
-    base = dest.resolve()
-    targets: dict[Path, bytes] = {}
-    for name, data in files.items():
+    for name in files:
         check_name(name)
-        target = (base / name).resolve()
-        if base not in target.parents:
-            raise SyncError(f"refusing to write outside {dest}: {name!r}")
-        targets[target] = data
-    if dest.exists():
-        shutil.rmtree(dest)
-    for target, data in targets.items():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{dest.name}-new-", dir=dest.parent))
+    backup = dest.parent / f".{dest.name}-old-{staging.name[-8:]}"
+    try:
+        base = staging.resolve()
+        for name, data in files.items():
+            target = base.joinpath(*name.split("/"))
+            if base not in target.resolve().parents:
+                raise SyncError(f"refusing to write outside {dest}: {name!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        staging.chmod(0o755)
+        if dest.exists():
+            os.replace(dest, backup)
+        os.replace(staging, dest)
+    except BaseException:
+        if backup.exists() and not dest.exists():
+            os.replace(backup, dest)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    # rmtree removes links inside the old tree without following them.
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def commit_sync(root: Path, message: str) -> None:

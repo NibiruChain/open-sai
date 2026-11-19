@@ -29,10 +29,8 @@ where = ["cli"]
 namespaces = true
 include = ["sai_cli*"]
 
-[tool.setuptools.package-data]
-# cli/sai_cli/skills is a symlink to skills/sai, the whole agent skill.
-# Every file at any depth; the second pattern adds dotfiles, which * skips.
-"sai_cli" = ["skills/**/*", "skills/**/.*"]
+# Package data is set in setup.py, which walks cli/sai_cli/skills. A glob
+# here would skip hidden directories.
 
 [tool.pytest.ini_options]
 testpaths = ["cli/sai_cli/tests"]

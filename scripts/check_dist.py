@@ -9,6 +9,7 @@ Usage: python scripts/check_dist.py
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 import sys
@@ -23,12 +24,17 @@ MEMBER = "sai_cli/skills/"
 
 
 def source_files(skill: Path = SKILL) -> dict[str, bytes]:
-    """Return the skill directory's files, keyed by path inside it."""
-    return {
-        path.relative_to(skill).as_posix(): path.read_bytes()
-        for path in sorted(skill.rglob("*"))
-        if path.is_file()
-    }
+    """Return every file under the skill directory, keyed by path inside it.
+
+    A full walk: hidden files and hidden directories count, so an archive
+    that leaves one out fails the check.
+    """
+    files: dict[str, bytes] = {}
+    for parent, _dirs, names in os.walk(skill):
+        for name in names:
+            path = Path(parent) / name
+            files[path.relative_to(skill).as_posix()] = path.read_bytes()
+    return files
 
 
 def wheel_skill(path: Path) -> dict[str, bytes]:
@@ -94,6 +100,12 @@ def check(out_dir: Path, expected: dict[str, bytes]) -> list[str]:
     return errors
 
 
+def build(root: Path, out_dir: Path) -> None:
+    subprocess.run(
+        ["uv", "build", "--quiet", "--out-dir", str(out_dir)], cwd=root, check=True
+    )
+
+
 def main() -> int:
     expected = source_files()
     if not expected.get("SKILL.md", b"").startswith(b"---"):
@@ -101,11 +113,7 @@ def main() -> int:
         return 1
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = Path(tmp)
-        subprocess.run(
-            ["uv", "build", "--quiet", "--out-dir", str(out_dir)],
-            cwd=ROOT,
-            check=True,
-        )
+        build(ROOT, out_dir)
         errors = check(out_dir, expected)
     for error in errors:
         print(f"error: {error}", file=sys.stderr)

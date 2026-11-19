@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -220,41 +221,40 @@ def cwd_is_inside(target: Path) -> bool:
     return cwd == resolved or resolved in cwd.parents
 
 
+def present(path: Path) -> bool:
+    """True for anything at PATH, a dangling symlink included."""
+    return path.is_symlink() or path.exists()
+
+
 def write_dir(target: Path, files: dict[str, bytes]) -> None:
     """Write FILES beside TARGET, then swap the new directory into place.
 
-    The new copy is staged in TARGET's parent. An existing directory is moved
-    aside first and deleted only after the new one is in place; if the swap
-    fails, it is moved back. A symlink at TARGET is unlinked; its target is
-    never touched.
+    The new copy is staged in TARGET's parent. Whatever is at TARGET, a
+    directory or a symlink, is moved aside first and removed only after the
+    new copy is in place. If anything stops the swap, an interrupt included,
+    it is moved back. A symlink's target is never touched.
     """
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{target.name}-new-", dir=parent))
-    backup: Path | None = None
+    backup = parent / f".{target.name}-old-{secrets.token_hex(4)}"
     try:
         for name, data in files.items():
             path = staging / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         staging.chmod(0o755)
-        if target.is_symlink():
-            target.unlink()
-        elif target.exists():
-            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}-old-", dir=parent))
-            backup.rmdir()
+        if present(target):
             os.replace(target, backup)
-        try:
-            os.replace(staging, target)
-        except OSError:
-            if backup is not None:
-                os.replace(backup, target)
-                backup = None
-            raise
+        os.replace(staging, target)
     except BaseException:
+        if present(backup) and not present(target):
+            os.replace(backup, target)
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    if backup is not None:
+    if backup.is_symlink():
+        backup.unlink()
+    elif backup.exists():
         shutil.rmtree(backup, ignore_errors=True)
 
 
