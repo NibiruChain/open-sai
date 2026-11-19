@@ -46,7 +46,7 @@ NETWORK_TIMEOUT = 5.0
 NETWORK_DEADLINE = NETWORK_TIMEOUT + 2
 EXPIRY_WARNING = timedelta(hours=24)
 STATUSES = ("pass", "fixed", "warn", "fail", "skipped")
-SIGN_IN = "sai auth login --account NAME, or sai auth import"
+SIGN_IN = "sai auth login NAME, or sai auth import"
 REINSTALL = update.INSTALL_COMMAND
 DIR_MODE, FILE_MODE = 0o700, 0o600
 
@@ -91,8 +91,8 @@ class Context:
 CheckFn = Callable[[Context], "Check | Sequence[Check]"]
 
 
-def short(address: str) -> str:
-    return f"{address[:6]}…" if len(address) > 6 else address
+def short(addr: str) -> str:
+    return f"{addr[:6]}…" if len(addr) > 6 else addr
 
 
 def plural(count: int, noun: str) -> str:
@@ -414,9 +414,9 @@ def check_session(ctx: Context) -> Check:
             SIGN_IN,
             {"signedIn": False},
         )
-    address = state["address"]
+    addr = state["addr"]
     details = {
-        "address": address,
+        "addr": addr,
         "expiresAt": state["expiresAt"],
         "endpoint": state["endpoint"],
         "endpointMatches": state["endpointMatches"],
@@ -425,7 +425,7 @@ def check_session(ctx: Context) -> Check:
         return Check(
             "session",
             "fail",
-            f"Session for {short(address)} expired at {state['expiresAt']}",
+            f"Session for {short(addr)} expired at {state['expiresAt']}",
             SIGN_IN,
             details,
         )
@@ -433,9 +433,9 @@ def check_session(ctx: Context) -> Check:
         return Check(
             "session",
             "fail",
-            f"Session for {short(address)} belongs to {state['endpoint']}, not"
+            f"Session for {short(addr)} belongs to {state['endpoint']}, not"
             f" {public_url(ctx.config.endpoint)}",
-            f"sai {endpoint_flag(ctx.config)}auth login --account NAME, or run"
+            f"sai {endpoint_flag(ctx.config)}auth login NAME, or run"
             f" sai with --endpoint {state['endpoint']}",
             details,
         )
@@ -446,14 +446,14 @@ def check_session(ctx: Context) -> Check:
         return Check(
             "session",
             "warn",
-            f"Session for {short(address)} expires in {when}",
+            f"Session for {short(addr)} expires in {when}",
             SIGN_IN,
             details,
         )
     return Check(
         "session",
         "pass",
-        f"Signed in as {short(address)} until {state['expiresAt']}",
+        f"Signed in as {short(addr)} until {state['expiresAt']}",
         None,
         details,
     )
@@ -568,7 +568,7 @@ class WriteGate:
 
 
 def reconcile_keys(
-    endpoint: str, address: str, keys: Sequence[str], deadline: float
+    endpoint: str, addr: str, keys: Sequence[str], deadline: float
 ) -> dict[str, Any]:
     """Run `sai intent status` reconciliation for KEYS within DEADLINE
     seconds.
@@ -590,7 +590,7 @@ def reconcile_keys(
                     raise TimeoutError
                 reconcile.reconcile(
                     endpoint,
-                    address,
+                    addr,
                     key,
                     timeout=min(NETWORK_TIMEOUT, left),
                     write=gate.write,
@@ -721,22 +721,20 @@ def check_intents(ctx: Context) -> Check:
     except (sqlite3.Error, OSError):
         return Check("intents", "fail", "Intent ledger is unreadable", fix_corrupt, {})
     state = ctx.session
-    address = state.get("address") if state.get("endpointMatches") else None
+    addr = state.get("addr") if state.get("endpointMatches") else None
 
     def blocks(endpoint: str, owner: str) -> bool:
-        return address is not None and (endpoint, owner) == (
+        return addr is not None and (endpoint, owner) == (
             ctx.config.endpoint,
-            address.lower(),
+            addr.lower(),
         )
 
     blocking = [key for key, endpoint, owner in rows if blocks(endpoint, owner)]
     details: dict[str, Any] = {"userVersion": version}
-    if blocking and ctx.fix and not ctx.offline and address is not None:
+    if blocking and ctx.fix and not ctx.offline and addr is not None:
         if refused := moved():
             return refused
-        outcome = reconcile_keys(
-            ctx.config.endpoint, address, blocking, NETWORK_DEADLINE
-        )
+        outcome = reconcile_keys(ctx.config.endpoint, addr, blocking, NETWORK_DEADLINE)
         if "error" in outcome:
             details["reconcileError"] = outcome["error"]
         try:
@@ -793,14 +791,13 @@ def intents_status(
     details: dict[str, Any],
 ) -> Check:
     if blocking:
-        address = ctx.session["address"]
+        addr = ctx.session["addr"]
         noun = "intent blocks" if len(blocking) == 1 else "intents block"
         return Check(
             "intents",
             "fail",
-            f"{len(blocking)} unknown {noun} trading for {short(address)}",
-            f"sai {endpoint_flag(ctx.config)}intent status {address}"
-            f" --key {blocking[0]}",
+            f"{len(blocking)} unknown {noun} trading for {short(addr)}",
+            f"sai {endpoint_flag(ctx.config)}intent status {addr} --key {blocking[0]}",
             details,
         )
     if others:
@@ -810,7 +807,7 @@ def intents_status(
             f"{plural(others, 'unknown intent')} for"
             f" {plural(accounts, 'account')} not signed in"
             " here; they do not block this session",
-            "Sign in as each account and run `sai intent status ADDRESS`",
+            "Sign in as each account and run `sai intent status ADDR`",
             details,
         )
     if details["userVersion"] < storage.SCHEMA_VERSION:

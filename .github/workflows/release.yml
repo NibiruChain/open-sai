@@ -55,6 +55,14 @@ jobs:
       - name: Write SHA256SUMS
         run: (cd dist && sha256sum -- *) > SHA256SUMS
 
+      # `gh release create --verify-tag` only checks that the tag exists. A
+      # tag moved after checkout must not get this build's files.
+      - name: Check that the remote tag is still the built commit
+        run: |
+          uv run --no-project python scripts/check_release.py "$TAG" \
+            --built "$(git rev-parse HEAD)" \
+            --remote "https://github.com/$GITHUB_REPOSITORY"
+
       # A version with a hyphen, such as sai-cli/v0.2.0-rc.1, is a pre-release.
       # `sai update` picks the highest sai-cli/v* release that is not one, and
       # does not use GitHub's single "latest" release.

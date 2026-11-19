@@ -46,8 +46,12 @@ class Stub:
 
         class Handler(BaseHTTPRequestHandler):
             def answer(self, body: bool) -> None:
-                stub.requests.append((self.command, self.path.partition("?")[0]))
-                stub.queries.append(self.path.partition("?")[2])
+                # Only requests about the repository count. A thread another
+                # test left running can reach this server when the kernel
+                # hands its old port to this one.
+                if update.REPO in self.path:
+                    stub.requests.append((self.command, self.path.partition("?")[0]))
+                    stub.queries.append(self.path.partition("?")[2])
                 time.sleep(delay)
                 path = self.path.partition("?")[0]
                 route = stub.routes.get(self.path) or stub.routes.get(path)
@@ -99,12 +103,18 @@ class Stub:
         self.server.server_close()
 
 
-def listing(*tags: str, **flags: bool) -> tuple[int, dict[str, str], bytes]:
-    """The API's release list holding TAGS, newest first."""
+def listing(
+    *tags: str, more: bool = False, **flags: bool
+) -> tuple[int, dict[str, str], bytes]:
+    """One page of the API's release list holding TAGS, newest first. MORE
+    adds the Link header GitHub sends when another page follows."""
     items = [{"tag_name": tag, "draft": False, "prerelease": False} for tag in tags]
     for item in items:
         item.update(flags)
-    return 200, {"Content-Type": "application/json"}, json.dumps(items).encode()
+    headers = {"Content-Type": "application/json"}
+    if more:
+        headers["Link"] = '<https://api.github.com/next>; rel="next"'
+    return 200, headers, json.dumps(items).encode()
 
 
 def redirect(location: str) -> tuple[int, dict[str, str], bytes]:
@@ -140,6 +150,9 @@ def test_parse_tag_accepts_sai_cli_release_tags_only():
         "sai-rs/v0.1.0",
         "sai-cli-rs/v0.1.0",
         "x/sai-cli/v0.1.0",
+        "sai-cli/v0.01.0",
+        "sai-cli/v00.1.0",
+        "sai-cli/v0.1.01",
         "release",
         "",
     )
@@ -152,6 +165,7 @@ def test_tag_and_version_round_trip():
     assert update.tag_version("sai-cli/v0.2.0") == "0.2.0"
     assert update.parse_version("0.2.0") == (0, 2, 0)
     assert update.parse_version("sai-cli/v0.2.0") is None
+    assert update.parse_version("0.02.0") is None
 
 
 def test_is_newer_compares_numerically_and_ignores_unparseable():
@@ -209,29 +223,44 @@ def test_release_urls_default_to_github():
 
 
 def paged(*pages: tuple[str, ...]) -> Routes:
-    """Full pages of other components' releases, then PAGES' own tags."""
+    """PAGES of release tags, each but the last announcing a next page."""
     routes: Routes = {}
     for number, tags in enumerate(pages, start=1):
-        filler = [f"sai-rs/v0.0.{n}" for n in range(update.PAGE_SIZE - len(tags))]
         query = f"per_page={update.PAGE_SIZE}&page={number}"
-        routes[f"{API_PATH}?{query}"] = listing(*filler, *tags)
+        routes[f"{API_PATH}?{query}"] = listing(*tags, more=number < len(pages))
     return routes
 
 
-def test_fetch_reads_later_pages_until_it_finds_a_sai_cli_release():
-    routes = paged((), ("sai-cli/v0.4.0", "sai-cli/v0.5.0"), ("sai-cli/v0.6.0",))
+def test_fetch_reads_every_page_and_takes_the_highest_version():
+    """A maintenance release published later sits on an earlier page than
+    the higher version; the higher version still wins."""
+    routes = paged(
+        ("sai-rs/v9.0.0", "sai-cli/v1.9.1"),
+        ("sai-cli/v2.0.0", "sai-cli/v1.9.0"),
+        ("sai-cli/v0.6.0",),
+    )
     with Stub(routes) as stub:
-        assert fetch(stub) == "sai-cli/v0.5.0"
+        assert fetch(stub) == "sai-cli/v2.0.0"
     assert stub.queries == [
-        f"per_page={update.PAGE_SIZE}&page=1",
-        f"per_page={update.PAGE_SIZE}&page=2",
+        f"per_page={update.PAGE_SIZE}&page={number}" for number in (1, 2, 3)
     ]
 
 
-def test_fetch_stops_paging_at_the_page_limit():
-    routes = paged(*[() for _ in range(update.MAX_PAGES + 1)])
-    with Stub(routes) as stub, pytest.raises(update.NoRelease):
+def test_fetch_finds_a_release_behind_pages_of_other_components():
+    routes = paged(("sai-rs/v3.0.0",), ("sai-rs/v2.0.0",), ("sai-cli/v0.4.0",))
+    with Stub(routes) as stub:
+        assert fetch(stub) == "sai-cli/v0.4.0"
+
+
+def test_fetch_past_the_page_limit_is_an_incomplete_lookup():
+    """More pages than the limit is an error, never "no release"."""
+    routes = paged(*[("sai-rs/v1.0.0",) for _ in range(update.MAX_PAGES + 1)])
+    with (
+        Stub(routes) as stub,
+        pytest.raises(update.UpdateError, match="lookup is incomplete") as caught,
+    ):
         fetch(stub)
+    assert not isinstance(caught.value, update.NoRelease)
     assert len(stub.requests) == update.MAX_PAGES
 
 
@@ -253,12 +282,20 @@ def test_fetch_skips_releases_flagged_as_prerelease_or_draft():
 
 
 @pytest.mark.parametrize("status", [403, 429, 500, 503])
-@pytest.mark.parametrize("tag", ["sai-cli/v0.3.1", "sai-cli%2Fv0.3.1"])
-def test_fetch_falls_back_to_the_web_redirect(status, tag):
+@pytest.mark.parametrize(
+    "tag", ["sai-cli/v0.3.1", "sai-cli%2Fv0.3.1", "sai-rs/v1.0.0", "v0.4.0"]
+)
+def test_the_web_redirect_never_names_the_latest_release(status, tag):
+    """GitHub's repository-wide latest can be an older maintenance release
+    or another component, so its tag is not an answer."""
     location = f"https://github.com/{update.REPO}/releases/tag/{tag}"
     routes: Routes = {API_PATH: (status, {}, b"{}"), WEB_PATH: redirect(location)}
-    with Stub(routes) as stub:
-        assert fetch(stub) == "sai-cli/v0.3.1"
+    with (
+        Stub(routes) as stub,
+        pytest.raises(update.UpdateError, match="rate limited or failing") as caught,
+    ):
+        fetch(stub)
+    assert not isinstance(caught.value, update.NoRelease)
     assert stub.requests == [("GET", API_PATH), ("HEAD", WEB_PATH)]
 
 
@@ -271,28 +308,11 @@ def test_fetch_rejects_malformed_json():
             fetch(stub)
 
 
-@pytest.mark.parametrize(
-    "tag", ["sai-cli/v0.4.0-rc.1", "sai-rs/v1.0.0", "v0.4.0", "a/sai-cli/v0.4.0"]
-)
-def test_fetch_rejects_a_redirect_to_another_kind_of_tag(tag):
-    location = f"/{update.REPO}/releases/tag/{tag}"
-    routes: Routes = {API_PATH: (403, {}, b""), WEB_PATH: redirect(location)}
+def test_fallback_needs_a_redirect():
+    routes: Routes = {API_PATH: (429, {}, b""), WEB_PATH: (200, {}, b"")}
     with (
         Stub(routes) as stub,
-        pytest.raises(update.UpdateError, match="is not sai-cli/vX.Y.Z") as caught,
-    ):
-        fetch(stub)
-    assert not isinstance(caught.value, update.NoRelease)
-
-
-def test_fetch_rejects_a_redirect_that_is_not_a_tag():
-    routes: Routes = {
-        API_PATH: (429, {}, b""),
-        WEB_PATH: redirect(f"/{update.REPO}/pulls"),
-    }
-    with (
-        Stub(routes) as stub,
-        pytest.raises(update.UpdateError, match="away from a release tag"),
+        pytest.raises(update.UpdateError, match="without a redirect"),
     ):
         fetch(stub)
 
@@ -331,7 +351,7 @@ def slow_release() -> tuple[int, dict[str, str], bytes]:
 
 @pytest.mark.parametrize("fallback", [False, True])
 def test_fetch_keeps_its_deadline_against_a_slow_drip(fallback):
-    location = f"/{update.REPO}/releases/tag/sai-cli/v0.2.0"
+    location = f"/{update.REPO}/releases"
     if fallback:
         routes: Routes = {API_PATH: (429, {}, b""), WEB_PATH: redirect(location)}
         drip_paths = frozenset({WEB_PATH})
@@ -403,6 +423,75 @@ def test_install_kind_uv_tool_from_a_release_wheel(tmp_path):
     assert update.install_kind(prefix).kind == update.UV_TOOL_RELEASE
 
 
+def recorded_prefix(root: Path, version: str = "0.1.0", **changes) -> Path:
+    """A uv tool install of a local release wheel with its release record."""
+    name = update.wheel_name(version)
+    direct = {"url": f"file:///tmp/sai-install-x/{name}", "archive_info": {}}
+    prefix = make_prefix(root / "tools" / "sai-cli", direct, receipt=True)
+    dist = next(prefix.glob("lib/*/site-packages/sai_cli-*.dist-info"))
+    (dist / "RECORD").write_text("sai_cli/__init__.py,sha256=abc,0\n")
+    record = {
+        "schema": 1,
+        "tag": update.tag_for(version),
+        "sha256": "ab" * 32,
+        "installed": update.installed_files_hash(prefix),
+        "wheel": None,
+        **changes,
+    }
+    update.release_record_path(prefix).write_text(json.dumps(record))
+    return prefix
+
+
+def test_install_kind_local_release_wheel_needs_its_release_record(tmp_path):
+    prefix = recorded_prefix(tmp_path)
+    assert update.release_record_path(prefix) == tmp_path / "tools" / (
+        ".sai-cli-release.json"
+    )
+    install = update.install_kind(prefix)
+    assert install.kind == update.UV_TOOL_RELEASE
+    record = update.read_release_record(prefix)
+    assert record is not None
+    assert (record.tag, record.version) == ("sai-cli/v0.1.0", "0.1.0")
+
+    update.release_record_path(prefix).unlink()
+    assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"tag": "sai-cli/v0.2.0"},
+        {"tag": "v0.1.0"},
+        {"installed": "cd" * 32},
+        {"sha256": "short"},
+        {"schema": 2},
+        {"wheel": 7},
+    ],
+)
+def test_a_record_that_does_not_describe_the_install_does_not_count(tmp_path, changes):
+    prefix = recorded_prefix(tmp_path, **changes)
+    assert update.read_release_record(prefix) is None
+    assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER
+
+
+def test_a_record_does_not_vouch_for_other_files_or_changed_installs(tmp_path):
+    """The name and place of a wheel prove nothing; the record must match
+    the files that are installed."""
+    prefix = recorded_prefix(tmp_path)
+    dist = next(prefix.glob("lib/*/site-packages/sai_cli-*.dist-info"))
+    direct = json.loads((dist / "direct_url.json").read_text())
+
+    other = {**direct, "url": "file:///tmp/x/evil-1.0.0-py3-none-any.whl"}
+    (dist / "direct_url.json").write_text(json.dumps(other))
+    assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER
+
+    # Another wheel with the same name installed over it: RECORD differs.
+    (dist / "direct_url.json").write_text(json.dumps(direct))
+    assert update.install_kind(prefix).kind == update.UV_TOOL_RELEASE
+    (dist / "RECORD").write_text("sai_cli/__init__.py,sha256=other,9\n")
+    assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER
+
+
 def test_install_kind_release_wheel_follows_the_web_base(tmp_path):
     local = "http://127.0.0.1:9"
     url = WHEEL_URL.replace("https://github.com", local)
@@ -463,19 +552,14 @@ def test_installed_version_is_read_from_the_prefix(tmp_path):
     assert update.installed_version(tmp_path / "empty") is None
 
 
-def test_install_kind_release_wheel_kept_by_sai_update(tmp_path, sai_home):
+def test_a_wheel_in_the_cache_is_not_trusted_by_its_path_and_name(tmp_path, sai_home):
+    """Only the release record makes a local wheel install a release
+    install; where the wheel lies and what it is called prove nothing."""
     cache = update.wheel_cache()
     assert cache == sai_home / "cache" / "wheels"
-    kept = {"url": (cache / "sai_cli-0.2.0-py3-none-any.whl").as_uri()}
+    kept = {"url": (cache / "sai_cli-0.1.0-py3-none-any.whl").as_uri()}
     prefix = make_prefix(tmp_path / "kept", {**kept, "archive_info": {}}, receipt=True)
-    assert update.install_kind(prefix).kind == update.UV_TOOL_RELEASE
-    elsewhere = {"url": (tmp_path / "sai_cli-0.2.0-py3-none-any.whl").as_uri()}
-    other = {"url": (cache / "evil-1.0.0-py3-none-any.whl").as_uri()}
-    for name, direct in (("elsewhere", elsewhere), ("other", other)):
-        prefix = make_prefix(
-            tmp_path / name, {**direct, "archive_info": {}}, receipt=True
-        )
-        assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER, name
+    assert update.install_kind(prefix).kind == update.UV_TOOL_OTHER
 
 
 def test_check_keeps_the_last_update_result(sai_home):
@@ -589,7 +673,22 @@ def test_update_check_with_no_release_is_a_plain_note(sai_home):
     assert report["wheelUrl"] is None
     assert report["updateAvailable"] is False
     assert report["update"] is None
-    assert not sai_home.exists()
+    saved = json.loads(update.cache_path().read_text())
+    assert saved["latest"] is None
+    assert saved["checkedAt"]
+
+
+def test_a_withdrawn_release_leaves_the_cache_but_a_failed_check_does_not():
+    update.write_cache(update.Cache("sai-cli/v0.2.0", update.now()))
+    with Stub({API_PATH: (200, {}, b"garbage")}) as stub:
+        assert check(stub).exit_code == 1
+    assert update.latest_version() == "0.2.0"
+    # The list is now authoritatively empty: the cached version goes too,
+    # so mcp_info stops reporting it.
+    with Stub({API_PATH: listing()}) as stub:
+        assert check(stub).exit_code == 0
+    assert update.read_cache() is None
+    assert update.latest_version() is None
 
 
 def test_update_check_failure_exits_1_without_stdout_or_cache():

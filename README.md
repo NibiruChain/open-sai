@@ -18,8 +18,9 @@ uv run https://raw.githubusercontent.com/SaiDotFun/open-sai/main/scripts/install
 sai --help
 ```
 
-The [install script](scripts/install.py) finds the newest `sai-cli` release
-and runs `uv tool install` on its wheel. Until the first release is published, the script says so and
+The [install script](scripts/install.py) finds the newest `sai-cli` release,
+downloads its wheel, checks it against the release's `SHA256SUMS`, and runs
+`uv tool install` on that file. Until the first release is published, the script says so and
 installs from `main`.
 
 To build from source instead, install from Git:
@@ -71,19 +72,18 @@ Trading needs a Sai session. There are two ways to get one:
   token at the hidden prompt or press Enter to read the clipboard. You can
   also tell your agent "connect Sai"; it runs `sai auth import`, which reads
   the clipboard when there is no terminal.
-- **With a Foundry keystore.** This works today. Run
-  `sai auth login --account NAME`, where `NAME` is a keystore in
-  `~/.foundry/keystores`. The CLI fetches Keeper's sign-in challenge, checks
-  that it is a Sai trading-session request for your address, and only then
-  runs `cast wallet sign`, which asks for the keystore password.
-
-If you use the `ud` tool, `sai auth login --wallet NAME` signs with a ud
-wallet instead, without a prompt.
+- **With a Foundry keystore.** This works today. Run `sai auth login NAME`,
+  where `NAME` is a keystore in `~/.foundry/keystores`. The CLI fetches
+  Keeper's sign-in challenge, checks that it is a Sai trading-session
+  request for that account, and only then has the key sign it. Keeper
+  returns a session that lets `sai` trade for the account. `cast wallet
+  sign` asks for the keystore password, unless the `ud` tool is on your
+  `PATH` with a wallet of the same name, which signs without a prompt.
 
 You can connect several accounts. Each sign-in adds an account and makes it
-active. `sai auth list` shows them, `sai auth use ADDRESS` switches the active
-one, `sai --as ADDRESS ...` runs one command as another, and `sai auth logout
-[ADDRESS]` removes one.
+active. `sai auth list` shows them, `sai auth use ADDR` switches the active
+one, `sai --as ADDR ...` runs one command as another, and `sai auth logout
+[ADDR]` removes one.
 
 After connecting, commands run without prompts until the session expires. Know
 what the token is:
@@ -138,14 +138,14 @@ sai mcp install claude -- uv run --directory /path/to/open-sai sai mcp serve
 ```
 
 The server lists every tool, trades included, whether or not you are signed in.
-Trading follows sign-in on each call. Sign in with `sai auth login` or `sai
+Trading follows sign-in on each call. Sign in with `sai auth login NAME` or `sai
 auth import` in a terminal, and the agent can submit trades; sign out with `sai
 auth logout`, and every `trade_*` call returns `SIGNED_OUT` without touching
 Keeper. An expired session returns `SESSION_EXPIRED`. The server reads the
 stored session without a prompt, never asks for the token, and never returns
 it.
 
-Each preview names the signed-in `account`, and each trade must carry the
+Each preview names the signed-in account in `addr`, and each trade must carry the
 `previewDigest` from a preview the user confirmed. Before submitting, the
 server rebuilds the trade and refuses it with a fresh preview when it no
 longer matches:
@@ -165,7 +165,7 @@ account, and `trading`, which reports whether trades can submit and why not
 
 With several accounts connected, `auth_list` shows them, `auth_use` switches
 the active one (for the CLI too), and preview and trade tools take an
-optional `address` to act as another connected account. A preview names its
+optional `addr` to act as another connected account. A preview names its
 account, and a trade refuses if the account changed after the preview. A
 trade for an account that is not signed in for this server's endpoint is
 refused the same way.

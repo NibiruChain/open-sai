@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from sai_cli.core import keeper, margin, storage
 from sai_cli.sai_cli import main
 
-ADDRESS = "0x" + "a" * 40
+ADDR = "0x" + "a" * 40
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +21,7 @@ def isolated_home(tmp_path, monkeypatch):
 def session_for(endpoint: str) -> dict[str, str]:
     return {
         "token": "fake-token",
-        "evmAddress": ADDRESS,
+        "evmAddress": ADDR,
         "endpoint": endpoint,
         "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
     }

@@ -1,12 +1,13 @@
 # /// script
-# requires-python = ">=3.9"
+# requires-python = ">=3.10"
 # dependencies = []
 # ///
 """Install the newest sai-cli release with uv.
 
-Finds the highest `sai-cli/vX.Y.Z` release of SaiDotFun/open-sai and runs
-`uv tool install` on its wheel. `--source` builds that release from Git
-instead. Before the first release exists, it installs from `main` and says so.
+Finds the highest `sai-cli/vX.Y.Z` release of SaiDotFun/open-sai, downloads
+its wheel and SHA256SUMS, checks the hash, and runs `uv tool install` on the
+downloaded file. `--source` builds that release's tag from Git instead.
+Before the first release exists, it installs from `main` and says so.
 
 It needs only uv and the standard library, so it runs straight from GitHub:
 
@@ -18,6 +19,7 @@ Usage: install.py [--source] [--dry-run]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -25,10 +27,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, TypeVar
 from urllib.parse import quote, unquote, urlsplit
 
 # Keep these in step with cli/sai_cli/core/update.py; a test compares them.
@@ -36,19 +42,28 @@ REPO = "SaiDotFun/open-sai"
 API_BASE = "https://api.github.com"
 WEB_BASE = "https://github.com"
 TAG_PREFIX = "sai-cli/v"
-PAGE_SIZE = 30
-MAX_PAGES = 4
-MAX_BODY = 4 << 20
+PAGE_SIZE = 100
+MAX_PAGES = 10
+MAX_BODY = 16 << 20
+MAX_WHEEL = 64 << 20
+MAX_SUMS = 1 << 16
 REQUEST_TIMEOUT = 10.0
+# Wall-clock limits for the release lookup and for the two downloads.
 TOTAL_TIMEOUT = 30.0
-# GitHub's API limits unauthenticated clients; the web redirect is not metered.
+DOWNLOAD_TIMEOUT = 120.0
+# GitHub's API limits unauthenticated clients.
 FALLBACK_STATUSES = frozenset({403, 429})
+RECORD_NAME = ".sai-cli-release.json"
+RECORD_SCHEMA = 1
 
-TAG = re.compile(rf"^{re.escape(TAG_PREFIX)}(\d+)\.(\d+)\.(\d+)$")
+NUMBER = r"(0|[1-9]\d*)"
+TAG = re.compile(rf"^{re.escape(TAG_PREFIX)}{NUMBER}\.{NUMBER}\.{NUMBER}$")
+
+T = TypeVar("T")
 
 
 class LookupFailed(Exception):
-    """The latest release could not be determined."""
+    """The latest release could not be determined or downloaded."""
 
 
 def parse_tag(tag: str) -> tuple[int, int, int] | None:
@@ -74,41 +89,91 @@ def latest_tag(releases: list[Any]) -> str | None:
     return best[1] if best else None
 
 
+def within(seconds: float, what: str, work: Callable[[float], T]) -> T:
+    """Run WORK(deadline) and give up after SECONDS of wall-clock time.
+
+    Socket timeouts only bound each read, so a server that keeps sending a
+    little could hold a request open forever. WORK runs in a daemon thread
+    that this stops waiting for at the deadline.
+    """
+    deadline = time.monotonic() + seconds
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = work(deadline)
+        except BaseException as error:  # noqa: BLE001 - re-raised in the caller
+            outcome["error"] = error
+
+    worker = threading.Thread(target=run, name="sai-install", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise LookupFailed(f"timed out {what}")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 
 
+def left(deadline: float, what: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LookupFailed(f"timed out {what}")
+    return min(REQUEST_TIMEOUT, remaining)
+
+
 def request(
     url: str, method: str, deadline: float
 ) -> tuple[int, dict[str, str], bytes]:
-    """Return the status, headers, and body of URL without following
-    redirects."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise LookupFailed("timed out looking up the latest release")
+    """Return the status, lower-cased headers, and body of URL without
+    following redirects."""
+    what = "looking up the latest release"
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "sai-cli"}
     opener = urllib.request.build_opener(NoRedirect)
     call = urllib.request.Request(url, method=method, headers=headers)
     try:
-        with opener.open(call, timeout=min(REQUEST_TIMEOUT, remaining)) as response:
-            body = response.read(MAX_BODY + 1)
-            return response.status, dict(response.headers.items()), body
+        with opener.open(call, timeout=left(deadline, what)) as response:
+            body = bytearray()
+            while len(body) <= MAX_BODY:
+                left(deadline, what)
+                chunk = response.read(1 << 16)
+                if not chunk:
+                    break
+                body += chunk
+            found = {name.lower(): value for name, value in response.headers.items()}
+            return response.status, found, bytes(body)
     except urllib.error.HTTPError as error:
-        return error.code, dict(error.headers.items()), b""
+        found = {name.lower(): value for name, value in error.headers.items()}
+        return error.code, found, b""
     except (OSError, ValueError) as error:
         raise LookupFailed(f"could not reach GitHub: {type(error).__name__}") from error
 
 
+RATE_LIMITED = (
+    "GitHub's API is rate limited or failing, so the latest sai-cli release"
+    " cannot be determined; try again later"
+)
+
+
 def from_api(api_base: str, deadline: float) -> tuple[bool, str | None]:
-    """Return (answered, tag). `answered` is False when the API is rate
-    limited or failing and the web fallback should run."""
+    """Return (answered, tag) after reading every page of the release list.
+
+    `answered` is False when the API is rate limited or failing. The list is
+    ordered by date, not version, so no page is skipped, and only the last
+    page proves that sai-cli has no release.
+    """
+    releases: list[Any] = []
     for page in range(1, MAX_PAGES + 1):
         url = (
             f"{api_base.rstrip('/')}/repos/{REPO}/releases"
             f"?per_page={PAGE_SIZE}&page={page}"
         )
-        status, _, body = request(url, "GET", deadline)
+        status, headers, body = request(url, "GET", deadline)
         if status in FALLBACK_STATUSES or status >= 500:
             return False, None
         if status != 200:
@@ -116,64 +181,182 @@ def from_api(api_base: str, deadline: float) -> tuple[bool, str | None]:
         if len(body) > MAX_BODY:
             raise LookupFailed("GitHub API answer is too large")
         try:
-            releases = json.loads(body)
+            found = json.loads(body)
         except ValueError as error:
             raise LookupFailed("GitHub API answered with malformed JSON") from error
-        if not isinstance(releases, list):
+        if not isinstance(found, list):
             raise LookupFailed("GitHub API answered with malformed JSON")
-        tag = latest_tag(releases)
-        if tag is not None or len(releases) < PAGE_SIZE:
-            return True, tag
-    return True, None
+        releases.extend(found)
+        if 'rel="next"' not in headers.get("link", ""):
+            return True, latest_tag(releases)
+    raise LookupFailed(
+        f"the release list is longer than {MAX_PAGES} pages; the lookup is incomplete"
+    )
 
 
-def from_redirect(web_base: str, deadline: float) -> str | None:
-    """Read the tag from the Location of the web /releases/latest redirect."""
+def any_release(web_base: str, deadline: float) -> bool:
+    """Ask the web /releases/latest redirect whether any release exists.
+
+    The page follows GitHub's single latest release for the whole
+    repository, so the tag it names is not an answer, only proof of a
+    release.
+    """
     url = f"{web_base.rstrip('/')}/{REPO}/releases/latest"
     status, headers, _ = request(url, "HEAD", deadline)
-    location = {name.lower(): value for name, value in headers.items()}.get("location")
+    location = headers.get("location")
     if status not in (301, 302, 303, 307, 308) or not location:
         raise LookupFailed(f"release page answered HTTP {status} without a redirect")
-    path = unquote(urlsplit(location).path).rstrip("/")
-    if path.endswith("/releases"):
-        return None
-    _, marker, tag = path.partition("/releases/tag/")
-    if not marker or parse_tag(tag) is None:
-        raise LookupFailed(f"latest release {tag!r} is not a sai-cli release")
-    return tag
+    return not unquote(urlsplit(location).path).rstrip("/").endswith("/releases")
 
 
-def find_latest(api_base: str = API_BASE, web_base: str = WEB_BASE) -> str | None:
+def find_latest(
+    api_base: str = API_BASE, web_base: str = WEB_BASE, timeout: float = TOTAL_TIMEOUT
+) -> str | None:
     """Return the latest sai-cli release tag, or None when there is none yet."""
-    deadline = time.monotonic() + TOTAL_TIMEOUT
-    answered, tag = from_api(api_base, deadline)
-    return tag if answered else from_redirect(web_base, deadline)
+
+    def work(deadline: float) -> str | None:
+        answered, tag = from_api(api_base, deadline)
+        if answered:
+            return tag
+        if any_release(web_base, deadline):
+            raise LookupFailed(RATE_LIMITED)
+        return None
+
+    return within(timeout, "looking up the latest release", work)
+
+
+def version_of(tag: str) -> str:
+    return tag[len(TAG_PREFIX) :]
+
+
+def wheel_name(version: str) -> str:
+    return f"sai_cli-{version}-py3-none-any.whl"
+
+
+def download_base(tag: str, web_base: str = WEB_BASE) -> str:
+    return f"{web_base.rstrip('/')}/{REPO}/releases/download/{quote(tag)}"
 
 
 def wheel_url(tag: str, web_base: str = WEB_BASE) -> str:
-    version = tag[len(TAG_PREFIX) :]
-    base = f"{web_base.rstrip('/')}/{REPO}/releases/download/{quote(tag)}"
-    return f"{base}/sai_cli-{version}-py3-none-any.whl"
+    return f"{download_base(tag, web_base)}/{wheel_name(version_of(tag))}"
 
 
-def plan(tag: str | None, source: bool, web_base: str = WEB_BASE) -> tuple[str, str]:
-    """Return a note for the person and the requirement `uv tool install`
-    gets."""
-    git = f"git+{WEB_BASE}/{REPO}"
-    if tag is None:
-        note = "No sai-cli release is published yet; installing from source (main)."
-        return note, git
-    version = tag[len(TAG_PREFIX) :]
-    if source:
-        return f"Building sai-cli {version} from source.", f"{git}@{tag}"
-    return f"Installing sai-cli {version} from its release wheel.", wheel_url(
-        tag, web_base
-    )
+def download(url: str, target: Path, limit: int, deadline: float) -> None:
+    """Save URL to TARGET, following redirects, within LIMIT bytes."""
+    name = url.rsplit("/", 1)[-1]
+    what = f"downloading {name}"
+    call = urllib.request.Request(url, headers={"User-Agent": "sai-cli"})
+    size = 0
+    try:
+        with (
+            urllib.request.urlopen(call, timeout=left(deadline, what)) as response,
+            target.open("wb") as handle,
+        ):
+            while True:
+                left(deadline, what)
+                chunk = response.read(1 << 16)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise LookupFailed(f"{name} is larger than expected")
+                handle.write(chunk)
+    except urllib.error.HTTPError as error:
+        raise LookupFailed(f"{what} answered HTTP {error.code}") from error
+    except (OSError, ValueError) as error:
+        raise LookupFailed(f"{what} failed: {type(error).__name__}") from error
+
+
+def expected_hash(sums: str, name: str) -> str | None:
+    """Return the SHA-256 that SHA256SUMS text lists for file NAME."""
+    for line in sums.splitlines():
+        digest, _, listed = line.strip().partition(" ")
+        if listed.strip().lstrip("*") == name and re.fullmatch(
+            r"[0-9a-fA-F]{64}", digest
+        ):
+            return digest.lower()
+    return None
+
+
+def fetch_wheel(
+    tag: str,
+    directory: Path,
+    web_base: str = WEB_BASE,
+    timeout: float = DOWNLOAD_TIMEOUT,
+) -> tuple[Path, str]:
+    """Download TAG's wheel and SHA256SUMS into DIRECTORY, check the hash,
+    and return the wheel and its SHA-256."""
+    name = wheel_name(version_of(tag))
+    wheel, sums = directory / name, directory / "SHA256SUMS"
+    base = download_base(tag, web_base)
+
+    def work(deadline: float) -> None:
+        download(f"{base}/SHA256SUMS", sums, MAX_SUMS, deadline)
+        download(f"{base}/{name}", wheel, MAX_WHEEL, deadline)
+
+    within(timeout, "downloading the release", work)
+    expected = expected_hash(sums.read_text(errors="replace"), name)
+    if expected is None:
+        raise LookupFailed(f"SHA256SUMS does not list {name}")
+    actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if actual != expected:
+        raise LookupFailed(f"{name} does not match its SHA256SUMS entry")
+    return wheel, actual
 
 
 def find_uv() -> str | None:
     """The uv that runs this script, or the one on PATH."""
     return os.environ.get("UV") or shutil.which("uv")
+
+
+def write_record(uv: str, tag: str, digest: str) -> str | None:
+    """Record which release the installed wheel came from, beside the tool's
+    environment, so `sai update` knows this is a release install. Return why
+    it could not be written, or None."""
+    try:
+        done = subprocess.run(
+            [uv, "tool", "dir"], capture_output=True, text=True, check=True, timeout=60
+        )
+        tools = Path(done.stdout.strip())
+        infos = sorted(
+            (tools / "sai-cli").glob("lib/python*/site-packages/sai_cli-*.dist-info")
+        )
+        infos += sorted(
+            (tools / "sai-cli").glob("Lib/site-packages/sai_cli-*.dist-info")
+        )
+        installed = hashlib.sha256((infos[0] / "RECORD").read_bytes()).hexdigest()
+        record = {
+            "schema": RECORD_SCHEMA,
+            "tag": tag,
+            "sha256": digest,
+            "installed": installed,
+            "wheel": None,
+        }
+        fd, temp = tempfile.mkstemp(dir=tools, prefix=".sai-cli-release-")
+        with os.fdopen(fd, "w") as handle:
+            json.dump(record, handle)
+        os.replace(temp, tools / RECORD_NAME)
+    except (OSError, subprocess.SubprocessError, IndexError) as error:
+        return type(error).__name__
+    return None
+
+
+def uv_tool_install(uv: str | None, requirement: str, shown: str, dry_run: bool) -> int:
+    """Print and run `uv tool install REQUIREMENT`; return the exit code."""
+    print(f"$ {shlex.join(['uv', 'tool', 'install', shown])}", flush=True)
+    if dry_run:
+        print("Dry run: nothing was installed.")
+        return 0
+    if uv is None:
+        print(
+            "error: uv is not on PATH; install it from https://docs.astral.sh/uv/",
+            file=sys.stderr,
+        )
+        return 1
+    code = subprocess.run([uv, "tool", "install", requirement], check=False).returncode
+    if code != 0:
+        print(f"error: uv tool install failed with exit code {code}", file=sys.stderr)
+    return code
 
 
 def main(argv: list[str]) -> int:
@@ -186,37 +369,60 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--api-base", default=API_BASE, help=argparse.SUPPRESS)
     parser.add_argument("--web-base", default=WEB_BASE, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--timeout", type=float, default=TOTAL_TIMEOUT, help=argparse.SUPPRESS
+    )
     args = parser.parse_args(argv)
+    git = f"git+{WEB_BASE}/{REPO}"
+
+    def give_up(error: Exception) -> int:
+        print(f"error: {error}", file=sys.stderr)
+        print(f"To build from source instead: uv tool install {git}", file=sys.stderr)
+        return 1
 
     try:
-        tag = find_latest(args.api_base, args.web_base)
+        tag = find_latest(args.api_base, args.web_base, args.timeout)
     except LookupFailed as error:
-        print(f"error: {error}", file=sys.stderr)
-        print(
-            f"To build from source instead: uv tool install git+{WEB_BASE}/{REPO}",
-            file=sys.stderr,
-        )
-        return 1
-    note, requirement = plan(tag, args.source, args.web_base)
-    print(note)
+        return give_up(error)
     uv = find_uv()
-    command = [uv or "uv", "tool", "install", requirement]
-    print(f"$ {shlex.join(['uv', *command[1:]])}", flush=True)
-    if args.dry_run:
-        print("Dry run: nothing was installed.")
-        return 0
-    if uv is None:
-        print(
-            "error: uv is not on PATH; install it from https://docs.astral.sh/uv/",
-            file=sys.stderr,
-        )
-        return 1
-    code = subprocess.run(command, check=False).returncode
-    if code != 0:
-        print(f"error: uv tool install failed with exit code {code}", file=sys.stderr)
-        return code
-    print("Installed. Run `sai --help` to start.")
-    return 0
+    if tag is None or args.source:
+        if tag is None:
+            print("No sai-cli release is published yet; installing from source (main).")
+            requirement = git
+        else:
+            print(f"Building sai-cli {version_of(tag)} from source.")
+            # The full ref: a branch with the tag's name must not shadow it.
+            requirement = f"{git}@refs/tags/{tag}"
+        code = uv_tool_install(uv, requirement, requirement, args.dry_run)
+    else:
+        print(f"Installing sai-cli {version_of(tag)} from its release wheel.")
+        if args.dry_run:
+            print(
+                f"Would download {wheel_url(tag, args.web_base)}, check it against"
+                " the release's SHA256SUMS, and run `uv tool install` on the file."
+            )
+            print("Dry run: nothing was installed.")
+            return 0
+        with tempfile.TemporaryDirectory(prefix="sai-install-") as temp:
+            try:
+                wheel, digest = fetch_wheel(
+                    tag, Path(temp), args.web_base, args.timeout * 4
+                )
+            except LookupFailed as error:
+                return give_up(error)
+            print(f"Verified {wheel.name} against the release's SHA256SUMS.")
+            code = uv_tool_install(uv, str(wheel), str(wheel), False)
+            if code == 0 and uv is not None:
+                problem = write_record(uv, tag, digest)
+                if problem is not None:
+                    print(
+                        "warning: could not record the release this install came"
+                        f" from ({problem}); `sai update` will not update it.",
+                        file=sys.stderr,
+                    )
+    if code == 0 and not args.dry_run:
+        print("Installed. Run `sai --help` to start.")
+    return code
 
 
 if __name__ == "__main__":

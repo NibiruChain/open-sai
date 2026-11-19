@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,14 @@ SUBMIT = """mutation($input:RecordUserIntentInput!) { recordUserIntent(input:$in
 
 class KeeperError(Exception):
     """Keeper rejected a query or transport failed."""
+
+
+class UdUnavailable(KeeperError):
+    """ud is installed but could not say whether it has a wallet."""
+
+
+class SigningFailed(KeeperError):
+    """The signing command did not run, exited with an error, or timed out."""
 
 
 class AdmissionRejected(KeeperError):
@@ -142,10 +151,8 @@ def _challenge_hex(value: object) -> str:
     return digits
 
 
-def check_session_typed_data(
-    typed_data: dict[str, Any], address: str, nonce: str
-) -> None:
-    """Refuse typed data that is not Keeper's session challenge for ADDRESS.
+def check_session_typed_data(typed_data: dict[str, Any], addr: str, nonce: str) -> None:
+    """Refuse typed data that is not Keeper's session challenge for ADDR.
 
     The signer must never receive a payload the endpoint substituted, such as
     a token permit or an order.
@@ -158,7 +165,7 @@ def check_session_typed_data(
             and domain["name"] == "Sai"
             and domain["version"] == "1"
             and isinstance(message["account"], str)
-            and message["account"].lower() == address.lower()
+            and message["account"].lower() == addr.lower()
             and _challenge_hex(message["challenge"]) == _challenge_hex(nonce)
         )
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
@@ -167,15 +174,15 @@ def check_session_typed_data(
         raise KeeperError("Challenge is not a Sai trading session request")
 
 
-def fetch_challenge(endpoint: str, address: str) -> tuple[dict[str, Any], str]:
+def fetch_challenge(endpoint: str, addr: str) -> tuple[dict[str, Any], str]:
     """Return checked typed data to sign and its challenge nonce."""
-    challenge = request(endpoint, CHALLENGE, {"address": address})[
+    challenge = request(endpoint, CHALLENGE, {"address": addr})[
         "createUserIntentAuthChallenge"
     ]
-    if challenge["evmAddress"].lower() != address.lower():
-        raise KeeperError("Challenge address does not match the requested account")
+    if challenge["evmAddress"].lower() != addr.lower():
+        raise KeeperError("Challenge addr does not match the requested account")
     typed_data = challenge["typedData"]
-    check_session_typed_data(typed_data, address, challenge["nonce"])
+    check_session_typed_data(typed_data, addr, challenge["nonce"])
     declared = {field["name"] for field in typed_data["types"]["EIP712Domain"]}
     domain = typed_data["domain"]
     typed_data["domain"] = {
@@ -190,7 +197,7 @@ def fetch_challenge(endpoint: str, address: str) -> tuple[dict[str, Any], str]:
 
 def signed_session(
     endpoint: str,
-    address: str,
+    addr: str,
     sign_command: list[str],
     *,
     interactive: bool = False,
@@ -201,7 +208,7 @@ def signed_session(
     stderr, so it can prompt for a keystore password. Only stdout, the
     signature, is captured. The signature and JWT stay in memory.
     """
-    typed_data, nonce = fetch_challenge(endpoint, address)
+    typed_data, nonce = fetch_challenge(endpoint, addr)
     with tempfile.TemporaryDirectory(prefix="sai-auth-") as temp:
         path = Path(temp) / "challenge.json"
         path.write_text(json.dumps(typed_data), encoding="utf-8")
@@ -216,23 +223,23 @@ def signed_session(
                 timeout=300 if interactive else 120,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise KeeperError("Wallet signing failed") from exc
+            raise SigningFailed("Wallet signing failed") from exc
     signature = proc.stdout.strip()
     if not signature.startswith("0x") or len(signature) != 132:
         raise KeeperError("Wallet signer returned an invalid signature")
     session = request(endpoint, SESSION, {"signature": signature, "challenge": nonce})[
         "createUserIntentSession"
     ]
-    if session["evmAddress"].lower() != address.lower():
-        raise KeeperError("Session address does not match the requested account")
+    if session["evmAddress"].lower() != addr.lower():
+        raise KeeperError("Session addr does not match the requested account")
     return session
 
 
-def wallet_session(endpoint: str, address: str, wallet: str) -> dict[str, str]:
+def wallet_session(endpoint: str, addr: str, wallet: str) -> dict[str, str]:
     """Sign the challenge with a ud wallet; ud supplies the keystore password."""
     return signed_session(
         endpoint,
-        address,
+        addr,
         [
             "ud",
             "evm",
@@ -263,7 +270,7 @@ class UdWallet:
     wallet run` signs only when it is `matching`.
     """
 
-    address: str
+    addr: str
     cast_state: str | None
 
     @property
@@ -292,12 +299,30 @@ def parse_wallet(output: str) -> UdWallet | None:
     return None
 
 
-def ud_wallet(wallet: str) -> UdWallet | None:
-    """Read a ud wallet's public details, or None if ud cannot show it.
+def ud_says_unknown(wallet: str, stderr: str) -> bool:
+    """Whether `ud evm wallet show` reported exactly "no wallet by that name".
 
-    `ud evm wallet show` prints public data only. Its stdin and stderr are
-    closed so it can never prompt, and only the address and Cast state leave
-    this function.
+    The whole final line must be ud's missing-wallet message for this name.
+    Any other text, even one that mentions an unknown wallet, is a failed
+    lookup, so a broken ud never looks like a confirmed absence.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return False
+    pattern = rf"(Error: )?wallet {re.escape(wallet)} is not in pass entry \S+"
+    return re.fullmatch(pattern, lines[-1]) is not None
+
+
+def ud_wallet(wallet: str) -> UdWallet | None:
+    """Read a ud wallet's public details, or None when there is none.
+
+    None means ud is not installed or says it has no wallet by that name.
+    Any other failure raises `UdUnavailable`, because the caller then cannot
+    tell whether ud holds another account under the name.
+
+    `ud evm wallet show` prints public data only. Its stdin is closed so it
+    can never prompt. Its stderr is read only to recognize an unknown name,
+    and only the addr and Cast state leave this function.
     """
     if shutil.which("ud") is None:
         return None
@@ -305,19 +330,25 @@ def ud_wallet(wallet: str) -> UdWallet | None:
         proc = subprocess.run(
             ["ud", "evm", "wallet", "show", wallet],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             text=True,
-            check=True,
+            check=False,
             timeout=60,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return parse_wallet(proc.stdout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UdUnavailable(f"`ud evm wallet show {wallet}` did not run") from exc
+    if proc.returncode != 0:
+        if ud_says_unknown(wallet, proc.stderr):
+            return None
+        raise UdUnavailable(f"`ud evm wallet show {wallet}` failed")
+    found = parse_wallet(proc.stdout)
+    if found is None:
+        raise UdUnavailable(f"`ud evm wallet show {wallet}` printed no addr")
+    return found
 
 
 def cast_address(account: str) -> str:
-    """Read a Foundry keystore address; cast may prompt for its password."""
+    """Read a Foundry keystore addr; cast may prompt for its password."""
     try:
         proc = subprocess.run(
             ["cast", "wallet", "address", "--account", account],
@@ -328,17 +359,17 @@ def cast_address(account: str) -> str:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise KeeperError(f"cast could not read keystore account {account}") from exc
-    address = proc.stdout.strip()
-    if not address.startswith("0x") or len(address) != 42:
-        raise KeeperError("cast returned an invalid address")
-    return address
+    addr = proc.stdout.strip()
+    if not addr.startswith("0x") or len(addr) != 42:
+        raise KeeperError("cast returned an invalid addr")
+    return addr
 
 
-def cast_session(endpoint: str, address: str, account: str) -> dict[str, str]:
+def cast_session(endpoint: str, addr: str, account: str) -> dict[str, str]:
     """Sign the challenge with a Foundry keystore through `cast wallet sign`."""
     return signed_session(
         endpoint,
-        address,
+        addr,
         ["cast", "wallet", "sign", "--account", account, "--data", "--from-file"],
         interactive=True,
     )

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
 import shlex
-import shutil
 import sys
 import time
 from collections.abc import Mapping
@@ -102,7 +102,7 @@ def keeper_url(ctx: click.Context) -> str:
 
 
 def session(ctx: click.Context) -> dict[str, str]:
-    return sessions.load_active_session(keeper_url(ctx), ctx.obj["as_address"])
+    return sessions.load_active_session(keeper_url(ctx), ctx.obj["as_addr"])
 
 
 @click.group(invoke_without_command=True)
@@ -134,8 +134,8 @@ def session(ctx: click.Context) -> dict[str, str]:
 )
 @click.option(
     "--as",
-    "as_address",
-    metavar="ADDRESS",
+    "as_addr",
+    metavar="ADDR",
     help="Run this command as another connected account instead of the"
     " active one. See `sai auth list`.",
 )
@@ -146,7 +146,7 @@ def main(
     ws_endpoint: str | None,
     lcd_endpoint: str | None,
     json_output: bool,
-    as_address: str | None,
+    as_addr: str | None,
 ) -> None:
     """Inspect Sai markets and account data, and submit trading intents.
 
@@ -156,16 +156,18 @@ def main(
     ctx.ensure_object(dict)
     passed = (endpoint, ws_endpoint, lcd_endpoint)
     flags = {key: value for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)}
-    ctx.obj.update(flags=flags, settings=None, json=json_output, as_address=as_address)
+    ctx.obj.update(flags=flags, settings=None, json=json_output, as_addr=as_addr)
     if auto_update_applies(ctx.invoked_subcommand, json_output):
         updater.tick(warn)
     if ctx.invoked_subcommand is None:
         repl(ctx)
 
 
-# Commands that never start or announce an automatic update: `mcp` serves
-# agents over stdio, and `update` and `doctor` report on updates themselves.
-NO_AUTO_UPDATE = frozenset({"mcp", "update", "doctor"})
+# Commands that never start or announce an automatic update. `mcp` serves
+# agents over stdio; `update` and `doctor` report on updates themselves;
+# `config` must be able to turn updates off before one starts; `logs` and
+# `skill` only print.
+NO_AUTO_UPDATE = frozenset({"mcp", "update", "doctor", "config", "logs", "skill"})
 
 
 def auto_update_applies(
@@ -193,8 +195,8 @@ def forwarded_flags(obj: dict[str, Any]) -> list[str]:
             args += [option, value]
     if obj["json"]:
         args.append("--json")
-    if obj.get("as_address"):
-        args += ["--as", obj["as_address"]]
+    if obj.get("as_addr"):
+        args += ["--as", obj["as_addr"]]
     return args
 
 
@@ -251,50 +253,85 @@ def auth() -> None:
 
 
 @auth.command("login")
+@click.argument("name")
 @click.option(
-    "--account",
-    help="Foundry keystore name (~/.foundry/keystores). cast may prompt for"
-    " the keystore password.",
-)
-@click.option(
-    "--wallet",
-    help="Wallet name for people who use the `ud` tool. Requires `ud`; signs"
-    " through `ud evm wallet run` without a prompt.",
-)
-@click.option(
-    "--address",
-    help="EVM address to sign in as. With --account it skips `cast wallet"
-    " address`; with --wallet it must match the ud wallet's address.",
+    "--addr",
+    metavar="ADDR",
+    help="EVM addr you expect NAME to hold. Sign-in stops before signing if"
+    " ud or the keystore file reports another addr.",
 )
 @click.pass_context
-def login(
-    ctx: click.Context, account: str | None, address: str | None, wallet: str | None
-) -> None:
-    """Sign Keeper's trading-session challenge with a local key.
+def login(ctx: click.Context, name: str, addr: str | None) -> None:
+    """Connect the account whose key is NAME by signing Keeper's challenge.
 
-    Use --account for a Foundry keystore: sai runs `cast wallet address` and
-    `cast wallet sign`, and cast may prompt for the keystore password. If you
-    use the `ud` tool, --wallet signs with a ud wallet instead. The CLI checks
-    that the challenge is a Sai `UserTradingSession` for this address before
-    anything signs it.
+    NAME is a Foundry keystore in ~/.foundry/keystores (see `cast wallet
+    list`). sai fetches Keeper's sign-in challenge, checks that it is a Sai
+    `UserTradingSession` for that account, has the key sign it, and stores
+    the session Keeper returns. The session lasts as long as Keeper issues
+    it, 30 days in production, and lets sai trade for that account.
+
+    If the `ud` tool is on PATH and has a wallet named NAME, sai signs
+    through `ud evm wallet run`, which supplies the keystore password.
+    Otherwise `cast wallet sign` asks for it.
+
+    To connect without a local key, copy a token from Sai Web and run `sai
+    auth import`.
+
+    \b
+    Examples:
+      sai auth login trading-bot
+          Sign with ~/.foundry/keystores/trading-bot; cast asks for its
+          password.
+      sai auth login trading-bot --addr 0xYOUR_ADDR
+          Same, but stop if the keystore records another addr.
+      sai auth import
+          Use a session token copied from Sai Web instead of a key.
     """
-    if bool(account) == bool(wallet):
-        raise click.UsageError("Pass exactly one of --account or --wallet")
     try:
-        result = signed_login(keeper_url(ctx), account, wallet, address)
+        result = signed_login(keeper_url(ctx), name, addr)
         result["endpoint"] = keeper_url(ctx)
         storage.save_session(result)
         emit(ctx, sessions.summary(result))
+    except NeedsTerminal as exc:
+        # The same command, so the endpoint and --addr stay in force.
+        flags = forwarded_flags(ctx.find_root().obj)
+        chosen = ["--addr", addr] if addr else []
+        command = shlex.join(["sai", *flags, "auth", "login", name, *chosen])
+        raise click.ClickException(f"{exc} Run `{command}` in a terminal.") from exc
     except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 
+class NeedsTerminal(ValueError):
+    """Sign-in can continue only where cast can prompt for a password."""
+
+
+def keystore_path(name: str) -> Path:
+    return Path.home() / ".foundry" / "keystores" / name
+
+
+def keystore_addr(name: str) -> str | None:
+    """Read the plaintext `address` a Foundry keystore records, if any.
+
+    Reading it needs no password. The field is not bound to the encrypted
+    key, so an edited file can pass the --addr check; Keeper then rejects
+    the signature, and no session is stored.
+    """
+    try:
+        value = json.loads(keystore_path(name).read_text(encoding="utf-8"))
+        raw = value["address"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(raw, str):
+        return None
+    addr = raw if raw.lower().startswith("0x") else "0x" + raw
+    return addr if keeper.is_address(addr) else None
+
+
 def checked_address(found: str, expected: str | None) -> str:
-    """Return FOUND, or fail when the --address cross-check disagrees."""
+    """Return FOUND, or fail when the --addr cross-check disagrees."""
     if expected is not None and expected.lower() != found.lower():
-        raise ValueError(
-            f"--address {expected} does not match the wallet address {found}"
-        )
+        raise ValueError(f"--addr {expected} does not match the wallet addr {found}")
     return found
 
 
@@ -311,36 +348,104 @@ def ud_state_hint(wallet: str, state: str | None) -> str:
     return f"{prefix}; check `ud evm wallet show {wallet}`"
 
 
-def signed_login(
-    endpoint: str, account: str | None, wallet: str | None, address: str | None
-) -> dict[str, str]:
-    """Sign in with a Foundry keystore (--account) or a ud wallet (--wallet).
+def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
+    """Sign in with the key named NAME.
 
-    --account never looks for ud: it signs with cast even when ud is
-    installed and knows a wallet by the same name.
+    A ud wallet that can sign goes first, because ud keeps the password for
+    the keystore of the same name and signs without a prompt. If ud then
+    fails to sign, for example because the keystore has another password,
+    cast signs with the same keystore and asks for the password. Without a
+    ud wallet that can sign, the Foundry keystore NAME signs through cast.
+
+    When ud and the keystore hold different accounts under NAME, nothing
+    signs unless --addr picks the keystore's account. The same holds when ud
+    is installed but its lookup fails, since it may hold another account.
     """
-    if address is not None and not keeper.is_address(address):
-        raise ValueError(f"Not an EVM address: {address}")
-    if account:
-        if address is None:
-            address = keeper.cast_address(account)
-        return keeper.cast_session(endpoint, address, account)
-    assert wallet
-    if shutil.which("ud") is None:
+    if addr is not None and not keeper.is_address(addr):
+        raise ValueError(f"Not an EVM addr: {addr}")
+    has_keystore = keystore_path(name).is_file()
+    try:
+        found = keeper.ud_wallet(name)
+    except keeper.UdUnavailable as exc:
+        if not has_keystore:
+            raise ValueError(f"{exc}; check that ud works, then retry") from exc
+        found_addr = keystore_addr(name) or keeper.cast_address(name)
+        if addr is None or addr.lower() != found_addr.lower():
+            raise ValueError(
+                f"{exc}, so sai cannot tell whether ud holds another account"
+                f" named {name}. Check that ud works, then retry. To sign in"
+                f" as the Foundry keystore's account {found_addr}, pass"
+                f" `--addr {found_addr}`."
+            ) from exc
+        return keeper.cast_session(endpoint, addr, name)
+    if found is not None and found.can_sign:
+        addr = checked_address(found.addr, addr)
+        try:
+            return keeper.wallet_session(endpoint, addr, name)
+        except keeper.SigningFailed as exc:
+            if not has_keystore:
+                raise
+            if not sys.stdin.isatty():
+                raise NeedsTerminal(
+                    f"ud could not sign with {name}. The Foundry keystore"
+                    f" ~/.foundry/keystores/{name} may have another password,"
+                    " which cast can ask for."
+                ) from exc
+            # The keystore may have changed since ud looked it up. cast finds
+            # it by name, so read it again and sign only as the same account.
+            current = keystore_addr(name) or keeper.cast_address(name)
+            if current.lower() != addr.lower():
+                raise ValueError(
+                    f"The Foundry keystore ~/.foundry/keystores/{name} now"
+                    f" holds {current}, not {addr}; nothing was signed with it."
+                ) from exc
+            warn(
+                f"ud could not sign with {name}; signing with the Foundry"
+                f" keystore ~/.foundry/keystores/{name} instead."
+            )
+            return keeper.cast_session(endpoint, addr, name)
+    if has_keystore:
+        # Check --addr before anything signs: from the keystore file when it
+        # records the addr, otherwise from cast, which may ask for the
+        # password.
+        found_addr = keystore_addr(name) or keeper.cast_address(name)
+        if found is not None and found.addr.lower() != found_addr.lower():
+            addr = chosen_keystore_addr(name, found, found_addr, addr)
+        addr = checked_address(found_addr, addr)
+        return keeper.cast_session(endpoint, addr, name)
+    if found is not None:
+        raise ValueError(ud_state_hint(name, found.cast_state))
+    raise ValueError(
+        f"No key named {name}: there is no Foundry keystore"
+        f" ~/.foundry/keystores/{name}. Run `cast wallet list` to see"
+        " keystores, or connect with `sai auth import`."
+    )
+
+
+def chosen_keystore_addr(
+    name: str, ud: keeper.UdWallet, keystore: str, addr: str | None
+) -> str:
+    """Return ADDR when it picks the keystore's account, or fail.
+
+    ud and the Foundry keystore hold different accounts under NAME, and ud
+    cannot sign with its own until the names stop colliding. sai never picks
+    one for the person.
+    """
+    both = (
+        f"{name} names two accounts: ud's wallet holds {ud.addr} and the"
+        f" Foundry keystore ~/.foundry/keystores/{name} holds {keystore}."
+    )
+    if addr is None:
         raise ValueError(
-            "--wallet needs the `ud` tool on PATH; use --account NAME with a"
-            " Foundry keystore, or `sai auth import`"
+            f"{both} To sign in as the keystore's account, run `sai auth login"
+            f" {name} --addr {keystore}`. To sign in as ud's account,"
+            f" rename the keystore, then run `ud evm wallet sync {name}`."
         )
-    found = keeper.ud_wallet(wallet)
-    if found is None:
-        raise ValueError(
-            f"`ud evm wallet show {wallet}` failed or printed no address;"
-            " check that ud knows this wallet"
-        )
-    if not found.can_sign:
-        raise ValueError(ud_state_hint(wallet, found.cast_state))
-    address = checked_address(found.address, address)
-    return keeper.wallet_session(endpoint, address, wallet)
+    if addr.lower() == ud.addr.lower():
+        raise ValueError(f"{both} {ud_state_hint(name, ud.cast_state)}")
+    if addr.lower() != keystore.lower():
+        raise ValueError(f"{both} --addr {addr} matches neither.")
+    return addr
 
 
 NO_CLIPBOARD = (
@@ -382,7 +487,7 @@ def import_token(ctx: click.Context) -> None:
     In a terminal, paste the token at the hidden prompt or press Enter to read
     the clipboard. Without a terminal, as when an agent runs this, read the
     clipboard. After storing the token, clear the clipboard if it still holds
-    the token. Prints the address, expiry, and endpoint, never the token.
+    the token. Prints the addr, expiry, and endpoint, never the token.
     """
     try:
         token = read_token()
@@ -399,10 +504,10 @@ def import_token(ctx: click.Context) -> None:
 
 
 @auth.command("logout")
-@click.argument("address", required=False)
+@click.argument("addr", required=False)
 @click.pass_context
-def logout(ctx: click.Context, address: str | None) -> None:
-    """Remove ADDRESS, or the active account, from this machine.
+def logout(ctx: click.Context, addr: str | None) -> None:
+    """Remove ADDR, or the active account, from this machine.
 
     Other connected accounts stay connected; when the active one is removed,
     none is active until `sai auth use`. Makes no network call. Keeper cannot
@@ -410,14 +515,14 @@ def logout(ctx: click.Context, address: str | None) -> None:
     it expires.
     """
     try:
-        removed = storage.delete_session(address or ctx.obj["as_address"])
+        removed = storage.delete_session(addr or ctx.obj["as_addr"])
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     emit(
         ctx,
         {
             "removed": removed is not None,
-            "address": None if removed == storage.UNREADABLE_REMOVED else removed,
+            "addr": None if removed == storage.UNREADABLE_REMOVED else removed,
             "note": "Keeper cannot revoke session tokens yet; the token stays"
             " valid until it expires.",
         },
@@ -450,16 +555,16 @@ def auth_list(ctx: click.Context) -> None:
 
 
 @auth.command("use")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def auth_use(ctx: click.Context, address: str) -> None:
-    """Make the connected ADDRESS the active account.
+def auth_use(ctx: click.Context, addr: str) -> None:
+    """Make the connected ADDR the active account.
 
     Commands without `--as` act on the active account. Sign in again to
-    connect a new one: `sai auth login` and `sai auth import` add accounts.
+    connect a new one: `sai auth login NAME` and `sai auth import` add accounts.
     """
     try:
-        emit(ctx, {**sessions.summary(storage.use_session(address)), "active": True})
+        emit(ctx, {**sessions.summary(storage.use_session(addr)), "active": True})
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -510,26 +615,26 @@ def perform_query(
 
 
 @account.command("positions")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def positions(ctx: click.Context, address: str) -> None:
-    """List positions and pending orders for ADDRESS."""
-    perform_query(ctx, keeper.POSITIONS, {"trader": address})
+def positions(ctx: click.Context, addr: str) -> None:
+    """List positions and pending orders for ADDR."""
+    perform_query(ctx, keeper.POSITIONS, {"trader": addr})
 
 
 @account.command("history")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def history(ctx: click.Context, address: str) -> None:
-    """Read trade history for ADDRESS."""
-    perform_query(ctx, keeper.HISTORY, {"trader": address})
+def history(ctx: click.Context, addr: str) -> None:
+    """Read trade history for ADDR."""
+    perform_query(ctx, keeper.HISTORY, {"trader": addr})
 
 
 @account.command("balances")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--ws-endpoint", help="Override the keeper.ws_endpoint setting.")
 @click.pass_context
-def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
+def balances(ctx: click.Context, addr: str, ws_endpoint: str | None) -> None:
     """Read one account balance snapshot from Keeper's subscription."""
     try:
         emit(
@@ -537,7 +642,7 @@ def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
             stream.snapshot(
                 ws_url(ctx, ws_endpoint),
                 stream.BALANCES,
-                {"user": address},
+                {"user": addr},
                 notify=warn,
             ),
         )
@@ -551,23 +656,23 @@ def intent() -> None:
 
 
 @intent.command("status")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--key", help="Specific intent key.")
 @click.pass_context
-def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
+def intent_status(ctx: click.Context, addr: str, key: str | None) -> None:
     """Read Keeper's latest intent records; reconcile a known key."""
     try:
-        emit(ctx, reconcile.reconcile(keeper_url(ctx), address, key))
+        emit(ctx, reconcile.reconcile(keeper_url(ctx), addr, key))
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
 
 
 @intent.command("local")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def intent_local(ctx: click.Context, address: str) -> None:
-    """List locally recorded intent identities for ADDRESS."""
-    emit(ctx, storage.list_pending(keeper_url(ctx), address))
+def intent_local(ctx: click.Context, addr: str) -> None:
+    """List locally recorded intent identities for ADDR."""
+    emit(ctx, storage.list_pending(keeper_url(ctx), addr))
 
 
 @main.group()
@@ -576,22 +681,22 @@ def trade() -> None:
 
 
 class PinnedSession:
-    """Load the --as account, or the active one, and keep using that address.
+    """Load the --as account, or the active one, and keep using that addr.
 
-    The first load fixes the address, so the output names the account that
+    The first load fixes the addr, so the output names the account that
     submitted even if another process switches accounts meanwhile.
     """
 
     def __init__(self, ctx: click.Context) -> None:
         self.ctx = ctx
-        self.address: str | None = None
+        self.addr: str | None = None
 
     def __call__(self) -> dict[str, str]:
-        if self.address is None:
+        if self.addr is None:
             result = session(self.ctx)
         else:
-            result = sessions.load_active_session(keeper_url(self.ctx), self.address)
-        self.address = result["evmAddress"]
+            result = sessions.load_active_session(keeper_url(self.ctx), self.addr)
+        self.addr = result["evmAddress"]
         return result
 
 
@@ -607,16 +712,16 @@ def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
     for one, which then must be connected.
     """
     load = loader(ctx)
-    account = load.address
+    account = load.addr
     if account is None:
         try:
             account = load()["evmAddress"]
         except ValueError:
             # A dry run needs no session, but a requested account must exist.
-            if ctx.obj["as_address"]:
+            if ctx.obj["as_addr"]:
                 raise
             account = None
-    emit(ctx, {"account": account, **result})
+    emit(ctx, {"addr": account, **result})
 
 
 def warn(message: str) -> None:
@@ -899,28 +1004,28 @@ def watch() -> None:
 
 
 @watch.command("positions")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--ws-endpoint")
 @click.pass_context
-def watch_positions(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
-    """Follow position snapshots for ADDRESS until interrupted."""
+def watch_positions(ctx: click.Context, addr: str, ws_endpoint: str | None) -> None:
+    """Follow position snapshots for ADDR until interrupted."""
     watch_stream(
         ws_url(ctx, ws_endpoint),
         stream.POSITIONS,
-        {"user": address},
+        {"user": addr},
     )
 
 
 @watch.command("balances")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--ws-endpoint")
 @click.pass_context
-def watch_balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
+def watch_balances(ctx: click.Context, addr: str, ws_endpoint: str | None) -> None:
     """Follow balances, preserving Sai deposit and credit labels."""
     watch_stream(
         ws_url(ctx, ws_endpoint),
         stream.BALANCES,
-        {"user": address},
+        {"user": addr},
     )
 
 
@@ -1139,7 +1244,7 @@ def mcp_serve(
     """Serve Sai tools to an agent client over stdio.
 
     Stdout carries only MCP protocol messages. Every tool is listed; trade
-    tools submit only while an account is signed in with `sai auth login`
+    tools submit only while an account is signed in with `sai auth login NAME`
     or `sai auth import`. Endpoints resolve once, at start, like the CLI's:
     these flags, then SAI_* variables, then $SAI_HOME/config.toml.
     """
@@ -1444,16 +1549,10 @@ def check_update(ctx: click.Context, api_base: str, web_base: str) -> None:
         latest = None
     except update.UpdateError as exc:
         raise click.ClickException(f"update check failed: {exc}") from exc
-    if latest is not None:
-        try:
-            # An update that holds the lock saves its own check.
-            with updater.locked() as held:
-                if held:
-                    updater.write_state(
-                        {"latest": latest.tag, "checkedAt": update.now()}
-                    )
-        except OSError as exc:
-            warn(f"Warning: could not save the update check: {exc}")
+    # No release is a result too: it replaces a cached, withdrawn one.
+    changes = {"latest": latest.tag if latest else None, "checkedAt": update.now()}
+    if not updater.save_state(changes):
+        warn("Warning: could not save the update check.")
     install = update.install_kind(web_base=web_base)
     report = update_report(package_version(), latest, install)
     if ctx.obj["json"]:
@@ -1509,23 +1608,30 @@ def update_command(
             raise click.UsageError("--check takes no other update option.")
         check_update(ctx, api_base, web_base)
         return
-    install = True
-    if background:
-        # Windows locks the running sai.exe, so there the background run only
-        # notifies.
-        install = settings(ctx).update_auto and os.name != "nt"
-    outcome = updater.update_now(
-        updater.Options(
-            api_base=api_base,
-            web_base=web_base,
-            to=to_version,
-            source=source,
-            install=install,
-            background=background,
-        )
+    flags = ctx.find_root().obj["flags"]
+
+    def auto() -> bool:
+        """The update.auto setting, read when the install is about to start,
+        so an opt-out made after this run began still holds. Windows locks
+        the running sai.exe, so there the background run only notifies."""
+        try:
+            return sai_settings.load(flags).update_auto and os.name != "nt"
+        except sai_settings.SettingsError:
+            return False
+
+    options = updater.Options(
+        api_base=api_base,
+        web_base=web_base,
+        to=to_version,
+        source=source,
+        allowed=auto if background else None,
+        background=background,
     )
     if background:
+        with contextlib.suppress(KeyboardInterrupt):
+            updater.update_now(options)
         return
+    outcome = updater.update_now(options)
     if ctx.obj["json"]:
         emit(ctx, outcome.to_json())
     else:

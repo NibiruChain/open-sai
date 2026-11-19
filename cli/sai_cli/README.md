@@ -96,7 +96,7 @@ yet: signing out of Sai Web clears only the browser copy, not the CLI's.
 `auth import` stores a token copied from Sai Web. The **Connect Sai CLI /
 MCP** button that copies it is in review
 (https://github.com/SaiDotFun/sai-web/pull/1591); until it ships, use
-`auth login --account` below.
+`auth login NAME` below.
 
 - With a terminal, it asks for the token at a hidden prompt. Press Enter
   without typing to read the clipboard.
@@ -107,40 +107,56 @@ MCP** button that copies it is in review
   terminal.
 - It never reads the token from arguments, environment variables, or piped
   stdin, and never prints it. Like `auth login` and `auth status`, it prints
-  only `address`, `expiresAt`, and `endpoint`.
+  only `addr`, `expiresAt`, and `endpoint`.
 - After storing the token, it reads the clipboard again and clears it only if
   it still holds the token. Anything copied in the meantime stays.
 
 `auth login` signs Keeper's challenge with a local key. Before anything
 signs, the CLI checks that the typed data has primary type
-`UserTradingSession`, domain `Sai` version `1`, your address, and the issued
+`UserTradingSession`, domain `Sai` version `1`, your addr, and the issued
 challenge nonce.
 
-- `auth login --account NAME` uses the Foundry keystore `NAME`. It runs `cast
-  wallet address --account NAME` and `cast wallet sign --account NAME --data
-  --from-file PATH` on your terminal, and `cast` prompts for the keystore
-  password.
-- `auth login --wallet NAME` is for people who use the `ud` tool. The CLI
-  reads the address from `ud evm wallet show NAME` and signs with `ud evm
-  wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
-  prompt. Login fails unless ud reports the wallet's Cast keystore as
-  `matching`.
+`auth login NAME` picks the key named `NAME`:
 
-`--address ADDRESS` is optional. With `--account`, it replaces `cast wallet
-address` and saves one password prompt. With `--wallet`, the CLI refuses to
-sign when it differs from the wallet's address.
+- If the `ud` tool is on `PATH` and `ud evm wallet show NAME` reports a
+  wallet whose Cast keystore is `matching`, the CLI signs with `ud evm
+  wallet run NAME -- wallet sign --data --from-file PATH`, which needs no
+  prompt. ud holds the password for the keystore of the same name. If ud
+  fails to sign, for example because the keystore has another password, the
+  CLI signs with `cast` instead when run in a terminal, and `cast` asks for
+  the password.
+- Otherwise it uses the Foundry keystore `~/.foundry/keystores/NAME`. It
+  reads the addr from the keystore file (or `cast wallet address --account
+  NAME` if the file has none) and runs `cast wallet sign --account NAME
+  --data --from-file PATH` on your terminal, where `cast` prompts for the
+  keystore password.
+- If ud and the keystore hold different accounts under `NAME`, it stops
+  before signing and names both. `--addr` with the keystore's addr signs in
+  as that account. ud cannot sign with its own until the keystore is renamed
+  and `ud evm wallet sync NAME` has run.
+- If `ud` is installed but its lookup fails, the CLI cannot tell whether ud
+  holds another account under `NAME`, so it stops. `--addr` with the
+  keystore's addr signs in as that account.
+- With neither, it stops and names where it looked.
+
+`--addr ADDR` is optional. The CLI refuses to sign when ud or the keystore
+reports a different addr. For a keystore it reads the file's plaintext
+`address` field, which needs no password, and falls back to `cast wallet
+address` only when the file has none. That field is not bound to the
+encrypted key: if someone edited it, the check passes, Keeper rejects the
+signature, and nothing is stored.
 
 ### Several Accounts
 
 Each `auth login` or `auth import` connects an account and makes it active.
 Signing in with another account keeps the ones already connected; signing in
-again with the same address refreshes its session.
+again with the same addr refreshes its session.
 
 - `auth list` shows each connected account, its expiry, and which is active.
-- `auth use ADDRESS` makes another connected account active.
-- `--as ADDRESS`, before the command, runs one command as another connected
+- `auth use ADDR` makes another connected account active.
+- `--as ADDR`, before the command, runs one command as another connected
   account: `sai --as 0x... trade close 3`.
-- `auth logout [ADDRESS]` removes one account, by default the active one.
+- `auth logout [ADDR]` removes one account, by default the active one.
   The others stay connected. After removing the active account, none is
   active until `auth use`.
 
@@ -155,7 +171,7 @@ encrypted by AES-GCM with a fixed key built into the CLI, like the Cosmos SDK
 This only keeps the token out of plaintext; anyone who can read the file and
 this source can decrypt it. Older versions could encrypt the session with a
 passphrase. The CLI refuses those files and asks you to run `sai auth import`
-or `sai auth login` again. A single-account `session.json` from before
+or `sai auth login NAME` again. A single-account `session.json` from before
 multiple accounts still loads and moves into `sessions.json` at the next
 sign-in or switch.
 
@@ -216,18 +232,18 @@ client lists clients and changes nothing, and `uninstall` with no client is a
 usage error.
 
 The server lists every tool regardless of sign-in. Each `trade_*` call checks
-the session of the account it acts as (the active one, or its `address`)
+the session of the account it acts as (the active one, or its `addr`)
 before it rebuilds the preview: no session returns
 `SIGNED_OUT`, an expired one `SESSION_EXPIRED`, and one for another endpoint
 or an unreadable file `SESSION_UNAVAILABLE`. Each message tells the agent to
-have the user run `sai auth login` or `sai auth import`. A signed-in trade
+have the user run `sai auth login NAME` or `sai auth import`. A signed-in trade
 still needs the `previewDigest` of the preview the user confirmed.
 
 ## Commands
 
-Commands include `market list`, `market prices`, `account positions ADDRESS`,
-`account balances ADDRESS`, `account history ADDRESS`, `trade open`, `trade
-close`, `trade partial-close`, `trade tpsl`, `intent status ADDRESS --key KEY`,
+Commands include `market list`, `market prices`, `account positions ADDR`,
+`account balances ADDR`, `account history ADDR`, `trade open`, `trade
+close`, `trade partial-close`, `trade tpsl`, `intent status ADDR --key KEY`,
 and live `watch` streams. Run any command with `--help` for details. Trading
 requires a funded account; funding is performed separately. Trade commands
 support `--dry-run` to inspect the local semantic request.
@@ -253,7 +269,7 @@ for the index to synchronize and retry; no margin intent has been submitted.
 The CLI persists non-secret request identities under `$SAI_HOME/trader` or
 `~/.sai/trader`. A network error after submission leaves the outcome unknown,
 and an unknown intent blocks new trades on the account. Reconcile it with
-`intent status ADDRESS --key KEY`. If Keeper has no record of the key five
+`intent status ADDR --key KEY`. If Keeper has no record of the key five
 minutes after submission, past Keeper's two-minute admission expiry, the CLI
 marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
