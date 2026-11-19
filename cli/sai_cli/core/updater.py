@@ -13,6 +13,11 @@ and covers a whole install, verify, and rollback, so every SAI_HOME that
 shares the tool takes the same one. The state lock is `$SAI_HOME/update.lock`
 and covers each read-modify-write of that profile's `update.json`.
 
+What this protects against is a bad release, a failed network, two commands
+racing, and mistakes such as uv pointed at another directory. It does not
+defend against someone who can already write to uv's tool directory or to
+$SAI_HOME; they can replace `sai` outright.
+
 Everything this module uses from the package and its dependencies is imported
 at the top: uv replaces those files while this process runs, so none of them
 may be imported after the install starts.
@@ -263,9 +268,14 @@ def fetch_wheel(
 
 # Install, verify, roll back
 
+# Where uv and the checks run. Never the caller's directory: uv reads
+# project settings from its working directory, and Python can import from it.
+NEUTRAL_DIR = os.path.abspath(os.sep)
+
 
 def run(command: Sequence[str], timeout: float) -> tuple[int, str]:
-    """Run COMMAND and return its exit code and combined output."""
+    """Run COMMAND in NEUTRAL_DIR and return its exit code and combined
+    output."""
     try:
         done = subprocess.run(
             list(command),
@@ -275,6 +285,7 @@ def run(command: Sequence[str], timeout: float) -> tuple[int, str]:
             text=True,
             errors="replace",
             timeout=timeout,
+            cwd=NEUTRAL_DIR,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -285,7 +296,8 @@ def run(command: Sequence[str], timeout: float) -> tuple[int, str]:
 
 
 def find_uv() -> str | None:
-    return shutil.which("uv")
+    found = shutil.which("uv")
+    return os.path.abspath(found) if found else None
 
 
 def _last_line(output: str) -> str:
@@ -293,11 +305,12 @@ def _last_line(output: str) -> str:
     return lines[-1][:300] if lines else "no output"
 
 
-def _python(prefix: Path) -> Path:
-    """The interpreter of the environment at PREFIX."""
+def _executables(environment: Path) -> tuple[Path, Path]:
+    """The `sai` and `python` executables inside ENVIRONMENT."""
     if os.name == "nt":
-        return prefix / "Scripts" / "python.exe"
-    return prefix / "bin" / "python"
+        scripts = environment / "Scripts"
+        return scripts / "sai.exe", scripts / "python.exe"
+    return environment / "bin" / "sai", environment / "bin" / "python"
 
 
 def registered_launcher(prefix: Path) -> Path | None:
@@ -312,7 +325,7 @@ def registered_launcher(prefix: Path) -> Path | None:
     for entry in entries if isinstance(entries, list) else []:
         if isinstance(entry, dict) and entry.get("name") in ("sai", "sai.exe"):
             path = entry.get("install-path")
-            if isinstance(path, str):
+            if isinstance(path, str) and os.path.isabs(path):
                 return Path(path)
     return None
 
@@ -324,17 +337,40 @@ def _same(left: Path, right: Path) -> bool:
         return False
 
 
-def destination_error(prefix: Path, uv: str, runner: Runner) -> str | None:
-    """Return why `uv tool install` would not replace the install at PREFIX,
-    or None when it would.
+def launcher_owner_error(prefix: Path, launcher: Path) -> str | None:
+    """Return why LAUNCHER does not run the install at PREFIX, or None.
+
+    uv links the executable directory's `sai` to the one inside the tool's
+    environment. Two tool directories can share an executable directory, and
+    then the last install owns `sai` while the other's receipt still names
+    it. Updating that other install would take the launcher over.
+    """
+    inside = _executables(prefix)[0]
+    try:
+        if launcher.is_symlink() or os.name != "nt":
+            if launcher.resolve(strict=True) == inside.resolve(strict=True):
+                return None
+            # Not a link to this environment: a copied script names the
+            # environment's interpreter in its first line.
+            with launcher.open("rb") as handle:
+                head = handle.read(4096)
+            if os.fsencode(str(prefix.resolve())) in head:
+                return None
+            return f"{launcher} runs another install, not the one at {prefix}"
+    except OSError:
+        return f"{launcher} is missing or unreadable"
+    # Windows copies a launcher executable; its owner cannot be read here.
+    return None
+
+
+def destination_error(prefix: Path, launcher: Path, uv: str, runner: Runner) -> str | None:
+    """Return why `uv tool install` would not replace the install at PREFIX
+    and its LAUNCHER, or None when it would.
 
     uv installs into the tool and executable directories of its current
-    settings. If those are not where this install lives, an update would
-    change some other install and leave this one as it is.
+    settings. If those are not where this install lives, or its launcher
+    now belongs to another install, an update would change something else.
     """
-    launcher = registered_launcher(prefix)
-    if launcher is None:
-        return "this install's uv receipt names no `sai` executable"
     found: list[Path] = []
     for extra in ((), ("--bin",)):
         code, output = runner([uv, "tool", "dir", *extra], VERIFY_TIMEOUT)
@@ -349,30 +385,69 @@ def destination_error(prefix: Path, uv: str, runner: Runner) -> str | None:
             f"uv puts executables in {executables}, but this install's `sai`"
             f" is {launcher}"
         )
-    return None
+    return launcher_owner_error(prefix, launcher)
 
 
-def verify(
-    prefix: Path, version: str, imports: Sequence[str], runner: Runner
+def check_runs(
+    sai: Path, python: Path, version: str, imports: Sequence[str], runner: Runner
 ) -> str | None:
-    """Return why the install at PREFIX is not a working VERSION, or None.
-
-    It runs the registered `sai`, the one on PATH that clients use, and
-    imports the package with the environment's interpreter.
-    """
-    launcher = registered_launcher(prefix)
-    if launcher is None:
-        return "the install's uv receipt names no `sai` executable"
-    code, output = runner([str(launcher), "--version"], VERIFY_TIMEOUT)
+    """Return why SAI does not print VERSION or PYTHON cannot import the
+    package, or None. Python runs isolated (`-I`), so it imports from its own
+    environment and never from a working directory or PYTHONPATH."""
+    code, output = runner([str(sai), "--version"], VERIFY_TIMEOUT)
     if code != 0:
         return f"`sai --version` failed: {_last_line(output)}"
     if not output.strip().endswith(f" {version}"):
         return f"`sai --version` printed {_last_line(output)!r}, not {version}"
     statement = "import " + ", ".join(imports)
-    code, output = runner([str(_python(prefix)), "-c", statement], VERIFY_TIMEOUT)
+    code, output = runner([str(python), "-I", "-c", statement], VERIFY_TIMEOUT)
     if code != 0:
         return f"the package does not import: {_last_line(output)}"
     return None
+
+
+def verify(
+    prefix: Path,
+    launcher: Path,
+    version: str,
+    imports: Sequence[str],
+    runner: Runner,
+) -> str | None:
+    """Return why the install at PREFIX is not a working VERSION, or None.
+
+    It runs LAUNCHER, the registered `sai` that clients use, after checking
+    that it still runs this install.
+    """
+    owner = launcher_owner_error(prefix, launcher)
+    if owner is not None:
+        return owner
+    return check_runs(launcher, _executables(prefix)[1], version, imports, runner)
+
+
+def preverify(
+    spec: str, version: str, prefix: Path, uv: str, options: Options
+) -> str | None:
+    """Install SPEC into a throwaway environment and return why it is not a
+    working VERSION, or None.
+
+    This runs before the real install is touched, so a release that cannot
+    start never replaces a working one. The environment uses the tool's own
+    interpreter and lives in a private temporary directory.
+    """
+    runner = options.runner
+    with tempfile.TemporaryDirectory(prefix="sai-update-") as temp:
+        environment = Path(os.path.abspath(temp)) / "venv"
+        sai, python = _executables(environment)
+        base = str(_executables(prefix)[1])
+        steps = (
+            [uv, "venv", "--python", base, str(environment)],
+            [uv, "pip", "install", "--python", str(python), spec],
+        )
+        for step in steps:
+            code, output = runner(step, UV_TIMEOUT)
+            if code != 0:
+                return f"uv {step[1]} failed in the trial install: {_last_line(output)}"
+        return check_runs(sai, python, version, options.imports, runner)
 
 
 def install_spec(uv: str, spec: str, runner: Runner) -> str | None:
@@ -391,14 +466,31 @@ def write_record(prefix: Path, tag: str, digest: str, wheel: Path) -> None:
     update.write_json(update.release_record_path(prefix), record.to_json())
 
 
+def private_cache() -> Path:
+    """Create the wheel cache, private to the user, and return its absolute
+    path. A symlinked `cache` or `cache/wheels` is refused: writes and
+    pruning would land in someone else's directory."""
+    cache = update.wheel_cache()
+    cache.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for directory in (cache.parent, cache):
+        if directory.is_symlink():
+            raise UpdateFailed(f"{directory} is a symlink; sai keeps no wheels there")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    return cache
+
+
 def prune_wheels(keep: Sequence[str]) -> None:
-    """Delete cached wheels other than the versions in KEEP."""
+    """Delete this updater's cached wheels other than the versions in KEEP:
+    regular files named exactly like a sai-cli release wheel, in a cache
+    directory that is not a symlink."""
     names = {update.wheel_name(version) for version in keep}
     try:
-        for path in update.wheel_cache().glob("sai_cli-*.whl"):
-            if path.name not in names:
+        cache = private_cache()
+        for path in cache.iterdir():
+            owned = update.is_wheel_name(path.name) and not path.is_symlink()
+            if owned and path.is_file() and path.name not in names:
                 path.unlink(missing_ok=True)
-    except OSError:
+    except (OSError, UpdateFailed):
         pass
 
 
@@ -439,9 +531,10 @@ class Options:
     to: str | None = None
     # Build the release from Git instead of installing its wheel.
     source: bool = False
-    # Asked right before installing; False records that an update is
-    # available and installs nothing. The background run passes the
-    # update.auto setting, read fresh, so an opt-out made meanwhile holds.
+    # Asked when the release is known and again right before uv replaces the
+    # install; False records that an update is available and installs
+    # nothing. The background run passes the update.auto setting, read
+    # fresh, so an opt-out made at any point before the install holds.
     allowed: Callable[[], bool] | None = None
     # The background run: never waits for the lock and never retries a
     # version that already failed.
@@ -502,6 +595,8 @@ class Current:
 
     install: update.Install
     version: str
+    # The registered `sai`, kept for the whole update.
+    launcher: Path
     # The release record, when the install came from a verified wheel.
     record: update.ReleaseRecord | None
 
@@ -510,10 +605,14 @@ class Current:
         return Path(self.install.prefix)
 
 
+# (spec for uv, (tag, sha256, wheel) when the spec is a wheel)
+Source = tuple[str, "tuple[str, str, Path] | None"]
+
+
 def _download_to_cache(release: update.Release, options: Options) -> tuple[Path, str]:
-    """Download and verify RELEASE's wheel and keep it in the wheel cache."""
-    cache = update.wheel_cache()
-    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    """Download and verify RELEASE's wheel in a private directory, then keep
+    it in the wheel cache. Return its absolute path and SHA-256."""
+    cache = private_cache()
     with tempfile.TemporaryDirectory(dir=cache, prefix=".download-") as temp:
         wheel, digest = fetch_wheel(release, Path(temp), options.download_timeout)
         kept = cache / wheel.name
@@ -521,51 +620,61 @@ def _download_to_cache(release: update.Release, options: Options) -> tuple[Path,
     return kept, digest
 
 
-def rollback_sources(
-    current: Current, options: Options
-) -> Iterator[tuple[str, tuple[str, str, Path] | None]]:
-    """Yield what can put CURRENT's version back, most trusted first, as
-    (spec for uv, (tag, sha256, wheel) for a wheel or None).
+def prepare_rollback(current: Current, options: Options) -> Source | None:
+    """Get what can put CURRENT's version back, before anything is replaced,
+    so a rollback needs no network. None when nothing can be had.
 
-    A kept wheel counts only while its bytes still hash to what the release
-    record says. Otherwise the release is downloaded and checked against its
-    SHA256SUMS again. A Git install goes back to its recorded commit.
+    A kept wheel counts only while it lies in the private cache and its
+    bytes still hash to what the release record says. Otherwise the current
+    release is downloaded and checked against its SHA256SUMS now. A Git
+    install goes back to its recorded commit.
     """
     record, install = current.record, current.install
     tag = update.tag_for(current.version)
     if record is not None and record.wheel:
         kept = Path(record.wheel)
         try:
-            intact = kept.is_file() and sha256(kept) == record.sha256
-        except OSError:
+            intact = (
+                kept.is_absolute()
+                and kept.parent == private_cache()
+                and kept.is_file()
+                and not kept.is_symlink()
+                and sha256(kept) == record.sha256
+            )
+        except (OSError, UpdateFailed):
             intact = False
         if intact:
-            yield str(kept), (record.tag, record.sha256, kept)
+            return str(kept), (record.tag, record.sha256, kept)
     if install.kind == update.UV_TOOL_RELEASE:
         try:
             release = update.release_for(tag, options.web_base)
             wheel, digest = _download_to_cache(release, options)
         except (UpdateFailed, OSError):
-            pass
-        else:
-            yield str(wheel), (tag, digest, wheel)
-    if install.kind == update.UV_TOOL_GIT and install.url and install.commit:
-        yield f"git+{install.url}@{install.commit}", None
-
-
-def restore(current: Current, options: Options, uv: str) -> str | None:
-    """Put CURRENT's version back and verify it. Return None when it runs
-    again, or the last error."""
-    error = "no verified copy of the previous version is available"
-    for spec, wheel in rollback_sources(current, options):
-        error = install_spec(uv, spec, options.runner) or verify(
-            current.prefix, current.version, options.imports, options.runner
-        )
-        if error is None:
-            if wheel is not None:
-                with contextlib.suppress(OSError):
-                    write_record(current.prefix, *wheel)
             return None
+        return str(wheel), (tag, digest, wheel)
+    if install.kind == update.UV_TOOL_GIT and install.url and install.commit:
+        return f"git+{install.url}@{install.commit}", None
+    return None
+
+
+def restore(
+    current: Current, source: Source | None, options: Options, uv: str
+) -> str | None:
+    """Put CURRENT's version back from SOURCE and verify it. Return None
+    when it runs again, or the error."""
+    if source is None:
+        return "no verified copy of the previous version could be prepared"
+    spec, wheel = source
+    error = install_spec(uv, spec, options.runner) or verify(
+        current.prefix,
+        current.launcher,
+        current.version,
+        options.imports,
+        options.runner,
+    )
+    if error is None and wheel is not None:
+        with contextlib.suppress(OSError):
+            write_record(current.prefix, *wheel)
     return error
 
 
@@ -586,28 +695,21 @@ def _uninterrupted() -> Generator[None]:
 def _install(
     options: Options, current: Current, release: update.Release, uv: str
 ) -> tuple[Outcome, bool]:
-    """Install RELEASE over CURRENT, verify it, and roll back on failure.
+    """Install RELEASE over CURRENT. Returns the outcome and whether Ctrl-C
+    interrupted the run.
 
-    Returns the outcome and whether Ctrl-C interrupted the run. An interrupt
-    after uv started replacing files still ends with a working install.
+    The order is what keeps a working `sai`: stage and hash the new wheel,
+    run it in a throwaway environment, get a rollback copy of the current
+    version, and only then let uv replace the install. The check afterwards
+    and the rollback are the second line.
     """
     prefix, installed, target = current.prefix, current.version, release.version
     runner, imports = options.runner, options.imports
 
-    def failed(reason: str) -> Outcome:
-        """Report REASON after making sure the previous version still runs."""
-        if verify(prefix, installed, imports, runner) is None:
-            message = f"{reason}. sai {installed} is unchanged."
-            return Outcome(FAILED, message, installed, target)
-        error = restore(current, options, uv)
-        if error is None:
-            message = f"{reason}. Rolled back to sai {installed}."
-            return Outcome(FAILED, message, installed, target, rolled_back=True)
-        message = (
-            f"{reason}. Rolling back to sai {installed} also failed: {error}."
-            f" Reinstall with: {update.INSTALL_COMMAND}"
-        )
-        return Outcome(FAILED, message, installed, target)
+    def unchanged(reason: str, status: str = FAILED) -> tuple[Outcome, bool]:
+        prune_wheels((installed,))
+        message = f"Could not update to {target}: {reason}. sai {installed} is unchanged."
+        return Outcome(status, message, installed, target), False
 
     wheel: tuple[str, str, Path] | None = None
     if options.source:
@@ -617,24 +719,41 @@ def _install(
         try:
             kept, digest = _download_to_cache(release, options)
         except (UpdateFailed, OSError) as exc:
-            reason = str(exc) if isinstance(exc, UpdateFailed) else type(exc).__name__
-            message = f"Could not update to {target}: {reason}."
-            return (
-                Outcome(
-                    FAILED,
-                    f"{message} sai {installed} is unchanged.",
-                    installed,
-                    target,
-                ),
-                False,
+            return unchanged(
+                str(exc) if isinstance(exc, UpdateFailed) else type(exc).__name__
             )
         spec, wheel = str(kept), (release.tag, digest, kept)
+
+    trial = preverify(spec, target, prefix, uv, options)
+    if trial is not None:
+        return unchanged(f"the release failed its trial install: {trial}")
+    rollback = prepare_rollback(current, options)
+    if options.allowed is not None and not options.allowed():
+        # Turned off while this run downloaded and tested the release.
+        prune_wheels((installed,))
+        message = f"sai {target} is available. Run `sai update` to install it."
+        return Outcome(AVAILABLE, message, installed, target), False
+
+    def failed(reason: str) -> Outcome:
+        """Report REASON after making sure the previous version still runs."""
+        if verify(prefix, current.launcher, installed, imports, runner) is None:
+            message = f"{reason}. sai {installed} is unchanged."
+            return Outcome(FAILED, message, installed, target)
+        error = restore(current, rollback, options, uv)
+        if error is None:
+            message = f"{reason}. Rolled back to sai {installed}."
+            return Outcome(FAILED, message, installed, target, rolled_back=True)
+        message = (
+            f"{reason}. Rolling back to sai {installed} also failed: {error}."
+            f" Reinstall with: {update.INSTALL_COMMAND}"
+        )
+        return Outcome(FAILED, message, installed, target)
 
     interrupted = False
     try:
         error = install_spec(uv, spec, runner)
         if error is None:
-            error = verify(prefix, target, imports, runner)
+            error = verify(prefix, current.launcher, target, imports, runner)
         if error is None and wheel is not None:
             try:
                 write_record(prefix, *wheel)
@@ -657,6 +776,11 @@ def _install(
         f"Updated sai from {installed} to {target}. Restart agent clients and"
         " any open `sai` shell so they load it."
     )
+    if rollback is None:
+        message += (
+            f" No copy of {installed} could be kept for a rollback; the new"
+            " version passed its trial install first."
+        )
     return Outcome(UPDATED, message, target, target), False
 
 
@@ -675,7 +799,7 @@ def update_now(options: Options | None = None) -> Outcome:
     install = update.install_kind(options.prefix, options.web_base)
     if not install.official:
         return _unsupported(install)
-    prefix = Path(install.prefix)
+    prefix = Path(os.path.abspath(install.prefix))
     wait = 0.0 if options.background else LOCK_WAIT
     with locked(tool_lock_path(prefix), wait) as held:
         if not held:
@@ -684,13 +808,12 @@ def update_now(options: Options | None = None) -> Outcome:
             return Outcome(status, message, update.installed_version(prefix))
         # Everything about the install is read after taking the lock: an
         # update that just finished may have changed its version and origin.
-        install = update.install_kind(options.prefix, options.web_base)
+        install = update.install_kind(prefix, options.web_base)
         if not install.official:
             return _unsupported(install)
         installed = update.installed_version(prefix)
         if installed is None:
             return Outcome(FAILED, "Could not read the installed sai version.")
-        current = Current(install, installed, update.read_release_record(prefix))
         if options.background:
             save_state({"startedAt": time.time()})
         try:
@@ -726,20 +849,28 @@ def update_now(options: Options | None = None) -> Outcome:
         ):
             message = f"The update to {target} already failed; run `sai update`."
             return Outcome(FAILED, message, installed, target)
-        uv = options.uv or find_uv()
-        if uv is None:
+        found = options.uv or find_uv()
+        if found is None:
             outcome = Outcome(
                 FAILED, "uv is not on PATH, so sai cannot update.", installed, target
             )
             _record(outcome, installed, seen)
             return outcome
-        mismatch = destination_error(prefix, uv, options.runner)
-        if mismatch is not None:
+        uv = os.path.abspath(found)
+        launcher = registered_launcher(prefix)
+        mismatch = (
+            "this install's uv receipt names no `sai` executable"
+            if launcher is None
+            else destination_error(prefix, launcher, uv, options.runner)
+        )
+        if mismatch is not None or launcher is None:
             message = (
                 f"`sai update` stopped before changing anything: {mismatch}."
                 " Run it with the uv settings this sai was installed with."
             )
             return Outcome(UNSUPPORTED, message, installed, target)
+        record = update.read_release_record(prefix)
+        current = Current(install, installed, launcher, record)
         outcome, interrupted = _install(options, current, release, uv)
         _record(outcome, installed, seen)
         if interrupted:
@@ -805,17 +936,23 @@ def due(state: dict[str, Any], now: float | None = None) -> bool:
 
 
 def background_command() -> list[str]:
-    return [sys.executable, "-m", "sai_cli", "update", "--background"]
+    """The detached worker. `-I` keeps Python from importing from the
+    directory the person happens to be in, or from PYTHONPATH."""
+    return [sys.executable, "-I", "-m", "sai_cli", "update", "--background"]
 
 
 def spawn(command: Sequence[str]) -> None:
     """Start COMMAND detached, so it outlives this process and shares no
     terminal with it."""
+    # A neutral directory, and SAI_HOME made absolute first so a relative
+    # one still means the same place there.
     options: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
+        "cwd": NEUTRAL_DIR,
+        "env": {**os.environ, "SAI_HOME": str(update.sai_home())},
     }
     if sys.platform == "win32":
         options["creationflags"] = (

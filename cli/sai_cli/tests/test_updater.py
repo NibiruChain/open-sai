@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -111,6 +112,13 @@ def user_files(home: Path) -> dict[str, bytes]:
 
 
 BROKEN_IMPORT = 'raise ImportError("this release cannot import")\n'
+# Imports in a trial environment but not once it is the installed tool, so
+# only the check after the install can catch it.
+BROKEN_WHEN_INSTALLED = (
+    "import os, sys\n"
+    'if os.sep + "tools" + os.sep in sys.prefix + os.sep:\n'
+    '    raise ImportError("this release cannot import once installed")\n'
+)
 
 
 # Real uv
@@ -118,7 +126,9 @@ BROKEN_IMPORT = 'raise ImportError("this release cannot import")\n'
 
 @pytest.mark.slow
 @needs_uv
-def test_upgrade_keeps_the_sai_path_and_the_users_files(uv_dirs, sai_home):
+def test_upgrade_keeps_the_sai_path_and_the_users_files(
+    uv_dirs, sai_home, monkeypatch
+):
     wheels = {"0.1.0": build_wheel("0.1.0"), "0.2.0": build_wheel("0.2.0")}
     (sai_home / "trader").mkdir(parents=True)
     (sai_home / "trader" / "sessions.json").write_bytes(b'{"keep": "me"}\n')
@@ -130,6 +140,12 @@ def test_upgrade_keeps_the_sai_path_and_the_users_files(uv_dirs, sai_home):
         assert tool.kind() == update.UV_TOOL_RELEASE
         link = os.readlink(tool.sai) if tool.sai.is_symlink() else None
         before = user_files(sai_home)
+        # The person's directory holds a package named like ours. uv and the
+        # checks run elsewhere, with an isolated Python, and never import it.
+        poisoned = uv_dirs / "checkout"
+        (poisoned / "sai_cli").mkdir(parents=True)
+        (poisoned / "sai_cli" / "__init__.py").write_text("raise SystemExit(9)\n")
+        monkeypatch.chdir(poisoned)
 
         outcome = tool.update()
 
@@ -217,21 +233,48 @@ def test_broken_wheel_keeps_the_old_version(uv_dirs):
 
 @pytest.mark.slow
 @needs_uv
-def test_a_release_that_fails_to_import_rolls_back(uv_dirs):
+def test_a_release_that_cannot_import_never_replaces_the_install(uv_dirs):
+    """The new wheel runs in a throwaway environment first. The installed
+    version is withdrawn, so no rollback could be had; nothing is replaced."""
+    wheels = {
+        "0.1.0": build_wheel("0.1.0", "ORIGINAL = True\n"),
+        "0.2.0": build_wheel("0.2.0", BROKEN_IMPORT),
+    }
+    with Stub(release_routes(wheels, latest=["0.2.0"])) as stub:
+        tool = Tool(uv_dirs, stub.url)
+        tool.install_release("0.1.0")
+        for name in (update.wheel_name("0.1.0"), "SHA256SUMS"):
+            stub.routes.pop(f"{downloads('0.1.0')}/{name}")
+        environment = tool.prefix.stat().st_ino
+        outcome = tool.update()
+    assert outcome.status == updater.FAILED
+    assert not outcome.rolled_back
+    assert "failed its trial install" in outcome.message
+    assert "the package does not import" in outcome.message
+    assert "sai 0.1.0 is unchanged" in outcome.message
+    assert tool.version() == "0.1.0"
+    assert "ORIGINAL" in tool.server_source()
+    assert tool.prefix.stat().st_ino == environment
+    assert list(update.wheel_cache().glob("*.whl")) == []
+
+
+@pytest.mark.slow
+@needs_uv
+def test_a_release_that_breaks_only_once_installed_rolls_back(uv_dirs):
     wheels = {
         "0.1.0": build_wheel("0.1.0"),
         "0.2.0": build_wheel("0.2.0"),
-        "0.3.0": build_wheel("0.3.0", BROKEN_IMPORT),
+        "0.3.0": build_wheel("0.3.0", BROKEN_WHEN_INSTALLED),
     }
     with Stub(release_routes(wheels, latest=["0.3.0"])) as stub:
         tool = Tool(uv_dirs, stub.url)
         tool.install_release("0.1.0")
 
-        # From a release URL install: the old release is downloaded and
-        # checked against its SHA256SUMS again, not handed to uv as a URL.
+        # From a release URL install: the current release is downloaded and
+        # checked against its SHA256SUMS before anything is replaced.
         first = tool.update()
         assert first.status == updater.FAILED
-        assert first.rolled_back
+        assert first.rolled_back, first.message
         assert "the package does not import" in first.message
         assert "Rolled back to sai 0.1.0" in first.message
         assert tool.version() == "0.1.0"
@@ -246,7 +289,7 @@ def test_a_release_that_fails_to_import_rolls_back(uv_dirs):
         stub.routes.pop(f"{downloads('0.2.0')}/{update.wheel_name('0.2.0')}")
         second = tool.update()
         assert second.status == updater.FAILED
-        assert second.rolled_back
+        assert second.rolled_back, second.message
         assert tool.version() == "0.2.0"
         assert tool.kind() == update.UV_TOOL_RELEASE
         kept = sorted(path.name for path in update.wheel_cache().glob("*.whl"))
@@ -261,13 +304,87 @@ def test_a_release_that_fails_to_import_rolls_back(uv_dirs):
 
 @pytest.mark.slow
 @needs_uv
+def test_another_install_owning_the_shared_launcher_stops_the_update(
+    uv_dirs, monkeypatch
+):
+    """Two uv tool directories share one executable directory. B installed
+    last and owns `sai`; A's receipt still names it. Updating A must not
+    take B's launcher."""
+    wheels = {"0.1.0": build_wheel("0.1.0"), "0.2.0": build_wheel("0.2.0")}
+    with Stub(release_routes(wheels)) as stub:
+        tool = Tool(uv_dirs, stub.url)
+        tool.install_release("0.1.0")
+        monkeypatch.setenv("UV_TOOL_DIR", str(uv_dirs / "tools-b"))
+        name = update.wheel_name("0.1.0")
+        assert REAL_UV is not None
+        subprocess.run(
+            [REAL_UV, "tool", "install", "--force", f"{stub.url}{downloads('0.1.0')}/{name}"],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        owner = os.path.realpath(tool.sai)
+        assert str(uv_dirs / "tools-b") in owner
+        monkeypatch.setenv("UV_TOOL_DIR", str(uv_dirs / "tools"))
+        outcome = tool.update()
+    assert outcome.status == updater.UNSUPPORTED
+    assert outcome.exit_code == 3
+    assert "runs another install" in outcome.message
+    assert os.path.realpath(tool.sai) == owner
+    assert tool.version() == "0.1.0"
+    assert update.installed_version(tool.prefix) == "0.1.0"
+
+
+@pytest.mark.slow
+@needs_uv
+def test_the_wheel_cache_stays_inside_sai_home(uv_dirs, sai_home):
+    """A symlinked cache is refused, and pruning removes only this updater's
+    own wheels."""
+    wheels = {"0.1.0": build_wheel("0.1.0"), "0.2.0": build_wheel("0.2.0")}
+    shared = uv_dirs / "shared-wheels"
+    shared.mkdir()
+    (shared / "sai_cli-9.9.9-py3-none-any.whl").write_bytes(b"someone else's")
+    sai_home.mkdir()
+    (sai_home / "cache").symlink_to(shared)
+    with Stub(release_routes(wheels)) as stub:
+        tool = Tool(uv_dirs, stub.url)
+        tool.install_release("0.1.0")
+        refused = tool.update()
+        assert refused.status == updater.FAILED
+        assert "is a symlink" in refused.message
+        assert tool.version() == "0.1.0"
+        assert sorted(path.name for path in shared.iterdir()) == [
+            "sai_cli-9.9.9-py3-none-any.whl"
+        ]
+
+        (sai_home / "cache").unlink()
+        cache = update.wheel_cache()
+        cache.mkdir(parents=True)
+        for name in ("sai_cli-0.0.1-py3-none-any.whl", "sai_cli-extra-1.0.whl", "other.whl"):
+            (cache / name).write_bytes(b"x")
+        (cache / "sai_cli-0.0.2-py3-none-any.whl").symlink_to(
+            shared / "sai_cli-9.9.9-py3-none-any.whl"
+        )
+        assert tool.update().status == updater.UPDATED
+        assert sorted(path.name for path in cache.iterdir()) == [
+            "other.whl",
+            "sai_cli-0.0.2-py3-none-any.whl",
+            "sai_cli-0.1.0-py3-none-any.whl",
+            "sai_cli-0.2.0-py3-none-any.whl",
+            "sai_cli-extra-1.0.whl",
+        ]
+        assert (shared / "sai_cli-9.9.9-py3-none-any.whl").read_bytes() == b"someone else's"
+
+
+@pytest.mark.slow
+@needs_uv
 def test_rollback_does_not_trust_a_changed_wheel_in_the_cache(uv_dirs):
     """A kept wheel whose bytes no longer match the release record is not
     installed; the release is downloaded and verified again."""
     wheels = {
         "0.1.0": build_wheel("0.1.0"),
         "0.2.0": build_wheel("0.2.0", "GENUINE = True\n"),
-        "0.3.0": build_wheel("0.3.0", BROKEN_IMPORT),
+        "0.3.0": build_wheel("0.3.0", BROKEN_WHEN_INSTALLED),
     }
     with Stub(release_routes(wheels, latest=["0.2.0"])) as stub:
         tool = Tool(uv_dirs, stub.url)
@@ -396,10 +513,15 @@ GIT = git_origin(COMMIT_A, "sai-cli/v0.1.0")
 
 
 def official_prefix(root: Path, direct: dict | None = None) -> Path:
-    """An official uv tool install under ROOT/tools with its `sai` in
-    ROOT/bin, as uv's receipt records it."""
+    """An official uv tool install under ROOT/tools whose `sai` in ROOT/bin
+    links into the environment, as uv lays it out and records it."""
     prefix = make_prefix(root / "tools" / "sai-cli", direct or GIT, receipt=True)
+    inside = prefix / "bin" / "sai"
+    inside.parent.mkdir()
+    inside.write_text("#!/bin/sh\n")
     launcher = root / "bin" / "sai"
+    launcher.parent.mkdir(exist_ok=True)
+    launcher.symlink_to(inside)
     with (prefix / "uv-receipt.toml").open("a") as receipt:
         receipt.write(
             f'entrypoints = [{{ name = "sai", install-path = "{launcher}" }}]\n'
@@ -415,56 +537,86 @@ def set_install(prefix: Path, version: str, direct: dict) -> None:
 
 
 class Script:
-    """A runner that records commands and plays uv and the installed sai.
+    """A runner that records commands and plays uv, the trial environment,
+    and the installed sai.
 
-    COMMITS maps a Git commit to the version it installs. A version in
-    BROKEN installs but fails `sai --version`. INTERRUPT raises Ctrl-C from
-    the first `sai --version` after an install.
+    COMMITS maps a Git commit to the version it installs. FAIL_TRIAL fails
+    the trial `uv pip install`; FAIL_INSTALL fails `uv tool install`. A
+    version in BROKEN fails `sai --version` everywhere; one in
+    BROKEN_INSTALLED only as the installed tool. INTERRUPT raises Ctrl-C
+    from the first installed `sai --version` after an install.
     """
 
     def __init__(
         self,
         root: Path,
         version: str,
+        fail_trial: bool = False,
         fail_install: bool = False,
         commits: dict[str, str] | None = None,
         broken: Sequence[str] = (),
+        broken_installed: Sequence[str] = (),
         interrupt: bool = False,
     ) -> None:
         self.root = root
+        self.launcher = str(root / "bin" / "sai")
         self.version = version
+        self.staged = ""
+        self.fail_trial = fail_trial
         self.fail_install = fail_install
         self.commits = commits or {COMMIT_A: "0.1.0"}
         self.broken = broken
+        self.broken_installed = broken_installed
         self.interrupt = interrupt
         self.commands: list[list[str]] = []
+
+    def named(self, spec: str) -> str:
+        """The version a requirement installs."""
+        reference = spec.rsplit("@", 1)[-1]
+        if reference in self.commits:
+            return self.commits[reference]
+        return re.findall(r"\d+\.\d+\.\d+", spec)[-1]
 
     def __call__(self, command: Sequence[str], timeout: float) -> tuple[int, str]:
         self.commands.append(list(command))
         if command[1:3] == ["tool", "dir"]:
             name = "bin" if command[-1] == "--bin" else "tools"
             return 0, f"{self.root / name}\n"
+        if command[1:2] == ["venv"]:
+            return 0, ""
+        if command[1:3] == ["pip", "install"]:
+            if self.fail_trial:
+                return 2, "error: no such revision"
+            self.staged = self.named(command[-1])
+            return 0, "Installed 1 package"
         if command[1:3] == ["tool", "install"]:
             if self.fail_install:
-                return 2, "error: no such revision"
-            reference = command[-1].rsplit("@", 1)[-1]
-            self.version = self.commits.get(reference) or reference.rsplit("v", 1)[-1]
+                return 2, "error: disk full"
+            self.version = self.named(command[-1])
             return 0, "Installed 1 executable: sai"
         if command[-1] == "--version":
-            if self.interrupt:
+            installed = command[0] == self.launcher
+            version = self.version if installed else self.staged
+            if installed and self.interrupt:
                 self.interrupt = False
                 raise KeyboardInterrupt
-            if self.version in self.broken:
+            if version in self.broken or (installed and version in self.broken_installed):
                 return 1, "Traceback: broken"
-            return 0, f"sai, version {self.version}\n"
+            return 0, f"sai, version {version}\n"
         return 0, ""
 
     @property
     def installs(self) -> list[str]:
         return [c[-1] for c in self.commands if c[1:3] == ["tool", "install"]]
 
+    @property
+    def trials(self) -> list[str]:
+        return [c[-1] for c in self.commands if c[1:3] == ["pip", "install"]]
 
-def scripted(tmp_path: Path, stub: Stub, script: Script, **changes) -> updater.Options:
+
+def scripted(
+    tmp_path: Path, stub: Stub, script: Script, **changes
+) -> updater.Options:
     prefix = tmp_path / "tools" / "sai-cli"
     if not prefix.exists():
         official_prefix(tmp_path)
@@ -484,35 +636,74 @@ def test_source_builds_the_exact_release_tag_from_git(tmp_path, sai_home):
         outcome = updater.update_now(scripted(tmp_path, stub, script, source=True))
     assert outcome.status == updater.UPDATED, outcome.message
     # refs/tags/…: a branch named like the tag cannot shadow it.
-    assert script.installs == [f"git+{GIT_URL}@refs/tags/sai-cli/v0.2.0"]
-    assert script.commands[:2] == [
-        ["/fake/uv", "tool", "dir"],
-        ["/fake/uv", "tool", "dir", "--bin"],
-    ]
-    # The verification runs the registered launcher, the one on PATH.
+    spec = f"git+{GIT_URL}@refs/tags/sai-cli/v0.2.0"
+    assert script.installs == [spec]
+    kinds = [" ".join(c[1:3]) for c in script.commands if c[0] == "/fake/uv"]
+    # uv's destination is checked first, the release runs in a trial
+    # environment next, and only then is the install replaced.
+    assert kinds == ["tool dir", "tool dir", "venv --python", "pip install", "tool install"]
+    assert script.trials == [spec]
+    # The check after the install runs the registered launcher, the one on
+    # PATH, and imports with an isolated interpreter.
     assert [str(tmp_path / "bin" / "sai"), "--version"] in script.commands
-    assert script.commands[-1][-1] == (
-        "import sai_cli.sai_cli, sai_cli.mcp_server.server"
-    )
+    last = script.commands[-1]
+    assert last[1:] == ["-I", "-c", "import sai_cli.sai_cli, sai_cli.mcp_server.server"]
+    assert last[0] == str(tmp_path / "tools" / "sai-cli" / "bin" / "python")
     assert stub.requests == [("GET", API_PATH)]
-    assert not update.wheel_cache().exists()
+    assert not update.wheel_cache().exists() or not list(update.wheel_cache().iterdir())
 
 
-def test_a_missing_source_tag_keeps_the_old_version(tmp_path, sai_home):
+def test_a_release_that_fails_its_trial_is_never_installed(tmp_path, sai_home):
+    for script in (
+        Script(tmp_path, "0.1.0", fail_trial=True),
+        Script(tmp_path, "0.1.0", broken=["0.2.0"]),
+    ):
+        with Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub:
+            outcome = updater.update_now(scripted(tmp_path, stub, script, source=True))
+        assert outcome.status == updater.FAILED
+        assert "failed its trial install" in outcome.message
+        assert "sai 0.1.0 is unchanged" in outcome.message
+        assert script.installs == []
+        assert len(script.trials) == 1
+
+
+def test_a_failed_install_keeps_the_old_version(tmp_path, sai_home):
     script = Script(tmp_path, "0.1.0", fail_install=True)
     with Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub:
         outcome = updater.update_now(scripted(tmp_path, stub, script, source=True))
     assert outcome.status == updater.FAILED
-    assert "no such revision" in outcome.message
+    assert "disk full" in outcome.message
     assert "sai 0.1.0 is unchanged" in outcome.message
     # One install attempt, then a check that the old version still runs.
     assert len(script.installs) == 1
+
+
+def test_a_relative_sai_home_gives_uv_an_absolute_wheel(
+    tmp_path, monkeypatch
+):
+    """uv runs in another directory, so every path it gets is absolute."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SAI_HOME", "relative-home")
+    wheels = {"0.2.0": build_wheel("0.2.0")}
+    script = Script(tmp_path, "0.1.0")
+    with Stub(release_routes(wheels)) as stub:
+        outcome = updater.update_now(scripted(tmp_path, stub, script))
+    cache = tmp_path / "relative-home" / "cache" / "wheels"
+    wheel = str(cache / update.wheel_name("0.2.0"))
+    assert script.trials == [wheel]
+    # The record needs a real install; the scripted one has no RECORD file.
+    assert "could not record the release" in outcome.message
+    assert script.installs[0] == wheel
+    assert cache.stat().st_mode & 0o777 == 0o700
+    for command in script.commands:
+        assert all(os.path.isabs(part) for part in command[:1])
 
 
 def test_uv_installing_elsewhere_stops_with_exit_3(tmp_path, sai_home):
     """The scripted uv reports another tool directory than the install's."""
     official_prefix(tmp_path)
     script = Script(tmp_path / "another-uv-home", "0.1.0")
+    script.launcher = str(tmp_path / "bin" / "sai")
     with Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub:
         outcome = updater.update_now(scripted(tmp_path, stub, script, source=True))
     assert outcome.status == updater.UNSUPPORTED
@@ -525,7 +716,7 @@ def test_ctrl_c_during_verification_still_leaves_a_working_install(tmp_path, sai
     """uv already replaced the old version with one that does not run when
     Ctrl-C arrives; the old version is put back before the interrupt goes
     on."""
-    script = Script(tmp_path, "0.1.0", broken=["0.2.0"], interrupt=True)
+    script = Script(tmp_path, "0.1.0", broken_installed=["0.2.0"], interrupt=True)
     with (
         Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub,
         pytest.raises(KeyboardInterrupt),
@@ -549,7 +740,7 @@ def test_a_waiting_update_reads_the_install_after_it_gets_the_lock(
     what was installed when B started."""
     prefix = official_prefix(tmp_path)
     commits = {COMMIT_A: "0.1.0", COMMIT_B: "0.2.0"}
-    script = Script(tmp_path, "0.1.0", commits=commits, broken=["0.3.0"])
+    script = Script(tmp_path, "0.1.0", commits=commits, broken_installed=["0.3.0"])
     monkeypatch.setattr(updater, "LOCK_WAIT", 30.0)
     outcomes: list[updater.Outcome] = []
     with Stub({API_PATH: listing("sai-cli/v0.3.0")}) as stub:
@@ -694,6 +885,32 @@ def test_the_opt_out_is_read_right_before_installing(tmp_path, sai_home):
     assert state["startedAt"] > 0
 
 
+def test_an_opt_out_during_the_download_still_stops_the_install(tmp_path, sai_home):
+    """update.auto is asked again right before uv replaces the install, after
+    the download and the trial. Turned off in that window, nothing is
+    replaced."""
+    wheels = {"0.2.0": build_wheel("0.2.0")}
+    script = Script(tmp_path, "0.1.0")
+    asked: list[int] = []
+    with Stub(release_routes(wheels)) as stub:
+
+        def allowed() -> bool:
+            asked.append(len(stub.requests))
+            return len(asked) == 1
+
+        options = scripted(tmp_path, stub, script, allowed=allowed, background=True)
+        outcome = updater.update_now(options)
+    assert outcome.status == updater.AVAILABLE
+    # Once when the release was known, once after both files were fetched.
+    assert asked[0] == 1
+    assert asked[1] >= 3
+    assert len(script.trials) == 1
+    assert script.installs == []
+    result = updater.read_state()["result"]
+    assert (result["status"], result["to"]) == (updater.AVAILABLE, "0.2.0")
+    assert list(update.wheel_cache().glob("*.whl")) == []
+
+
 def test_background_run_skips_when_another_update_holds_the_lock(tmp_path, sai_home):
     script = Script(tmp_path, "0.1.0")
     prefix = official_prefix(tmp_path)
@@ -713,18 +930,18 @@ def test_background_run_skips_when_another_update_holds_the_lock(tmp_path, sai_h
 
 
 def test_background_run_does_not_retry_a_version_that_failed(tmp_path, sai_home):
-    script = Script(tmp_path, "0.1.0", fail_install=True)
+    script = Script(tmp_path, "0.1.0", fail_trial=True)
     with Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub:
         options = scripted(tmp_path, stub, script, source=True, background=True)
         first = updater.update_now(options)
-        attempts = len(script.installs)
+        attempts = len(script.trials)
         second = updater.update_now(options)
-        assert len(script.installs) == attempts
+        assert len(script.trials) == attempts == 1
         manual = updater.update_now(replace(options, background=False))
     assert first.status == second.status == updater.FAILED
     assert "already failed" in second.message
     assert "no such revision" in manual.message
-    assert len(script.installs) == attempts + 1
+    assert len(script.trials) == attempts + 1
 
 
 def test_lock_waits_for_the_holder(sai_home):
@@ -819,7 +1036,10 @@ def test_tick_prints_a_notice_once_and_starts_one_background_run(tmp_path, sai_h
     for _ in range(3):
         updater.tick(printed.append, start, prefix)
     assert printed == ["sai 0.2.0 is available. Run `sai update` to install it."]
-    assert started == [[sys.executable, "-m", "sai_cli", "update", "--background"]]
+    # -I: the worker never imports from the person's directory.
+    assert started == [
+        [sys.executable, "-I", "-m", "sai_cli", "update", "--background"]
+    ]
     state = updater.read_state()
     assert state["notified"] == "available:0.2.0"
 
@@ -901,14 +1121,28 @@ def test_a_run_that_cannot_start_is_retried_soon(tmp_path, sai_home):
     assert len(attempts) == 2
 
 
-def test_spawn_starts_a_detached_process(tmp_path):
+def test_spawn_starts_a_detached_process_in_a_neutral_directory(
+    tmp_path, monkeypatch
+):
+    """The worker does not inherit the person's directory, and a relative
+    SAI_HOME still names the same place for it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SAI_HOME", "relative-home")
     marker = tmp_path / "ran"
-    code = f"import os, pathlib; pathlib.Path({str(marker)!r}).write_text(str(os.getsid(0)))"
-    updater.spawn([sys.executable, "-c", code])
+    code = (
+        "import json, os, pathlib; "
+        f"pathlib.Path({str(marker)!r}).write_text(json.dumps("
+        '[os.getsid(0), os.getcwd(), os.environ["SAI_HOME"]]))'
+    )
+    updater.spawn([sys.executable, "-I", "-c", code])
     deadline = time.monotonic() + 30
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert marker.read_text() != str(os.getsid(0))
+    time.sleep(0.1)
+    session, cwd, home = json.loads(marker.read_text())
+    assert session != os.getsid(0)
+    assert cwd == updater.NEUTRAL_DIR != str(tmp_path)
+    assert home == str(tmp_path / "relative-home")
 
 
 @pytest.mark.parametrize(

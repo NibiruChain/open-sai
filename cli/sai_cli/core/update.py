@@ -124,6 +124,14 @@ def wheel_name(version: str) -> str:
     return f"sai_cli-{version}-py3-none-any.whl"
 
 
+_WHEEL_NAME = re.compile(rf"^sai_cli-{_NUMBER}\.{_NUMBER}\.{_NUMBER}-py3-none-any\.whl$")
+
+
+def is_wheel_name(name: str) -> bool:
+    """True for exactly the file name of a sai-cli release wheel."""
+    return _WHEEL_NAME.match(name) is not None
+
+
 def release_for(tag: str, web_base: str = WEB_BASE, repo: str = REPO) -> Release:
     """Build the release of TAG with its download URLs.
 
