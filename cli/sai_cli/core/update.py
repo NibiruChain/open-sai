@@ -245,6 +245,14 @@ RATE_LIMITED = (
 )
 
 
+def _is_release_list(location: str, latest_url: str) -> bool:
+    """True when LOCATION is exactly the repository's release list, the
+    page LATEST_URL redirects to when no release exists. A tag whose name
+    ends in `/releases`, such as `docs/releases`, is not the list."""
+    expected = urlsplit(latest_url).path.removesuffix("/latest")
+    return urlsplit(location).path.rstrip("/").lower() == expected.lower()
+
+
 def _from_redirect(
     client: httpx.Client, url: str, deadline: float, connect: float
 ) -> str:
@@ -262,8 +270,7 @@ def _from_redirect(
         raise UpdateError(
             f"release page answered HTTP {response.status_code} without a redirect"
         )
-    path = unquote(urlsplit(location).path).rstrip("/")
-    if path.endswith("/releases"):
+    if _is_release_list(location, url):
         raise NoRelease(NO_RELEASE)
     raise UpdateError(RATE_LIMITED)
 
@@ -595,7 +602,15 @@ def guidance(install: Install) -> Guidance:
 
 
 def sai_home() -> Path:
-    return Path(os.environ.get("SAI_HOME", Path.home() / ".sai"))
+    """$SAI_HOME or ~/.sai, as an absolute path, so a relative SAI_HOME
+    means the same directory to every process this one starts."""
+    return Path(os.path.abspath(os.environ.get("SAI_HOME", Path.home() / ".sai")))
+
+
+def wheel_cache() -> Path:
+    """Where the install script and `sai update` keep the verified wheel uv
+    installed from. uv's receipt names that file, so it has to stay."""
+    return sai_home() / "cache" / "wheels"
 
 
 def cache_path() -> Path:

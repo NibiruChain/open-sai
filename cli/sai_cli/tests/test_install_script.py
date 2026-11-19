@@ -62,6 +62,7 @@ def fake_uv(tmp_path) -> dict[str, str]:
     return {
         "PATH": str(bin_dir),
         "HOME": str(tmp_path / "home"),
+        "SAI_HOME": str(tmp_path / "sai-home"),
         "TMPDIR": str(tmp_path),
         "FAKE_UV_LOG": str(tmp_path / "uv.log"),
         "FAKE_UV_TOOLS": str(tmp_path / "tools"),
@@ -127,7 +128,12 @@ def test_installs_the_verified_wheel_of_the_highest_release(fake_uv, tmp_path):
     digest = hashlib.sha256(WHEELS["0.10.0"]).hexdigest()
     assert install_call["sha256"] == digest
     assert "://" not in str(wheel)
-    assert not wheel.exists()
+    # The wheel stays where uv's receipt points, in the private wheel cache,
+    # so `uv tool upgrade --all` can read it again.
+    assert wheel == tmp_path / "sai-home" / "cache" / "wheels" / wheel.name
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == digest
+    assert wheel.parent.stat().st_mode & 0o777 == 0o700
+    assert [path.name for path in wheel.parent.iterdir()] == [wheel.name]
     lines = result.stdout.splitlines()
     assert lines[0] == "Installing sai-cli 0.10.0 from its release wheel."
     assert lines[1] == f"Verified {wheel.name} against the release's SHA256SUMS."
@@ -139,16 +145,49 @@ def test_installs_the_verified_wheel_of_the_highest_release(fake_uv, tmp_path):
         "tag": "sai-cli/v0.10.0",
         "sha256": digest,
         "installed": hashlib.sha256(b"installed by the fake uv\n").hexdigest(),
-        "wheel": None,
+        "wheel": str(wheel),
     }
 
 
-def test_a_wheel_that_differs_from_sha256sums_is_not_installed(fake_uv):
+def test_a_wheel_that_differs_from_sha256sums_is_not_installed(fake_uv, tmp_path):
     with Stub(release_routes(WHEELS, bad_hash=["0.10.0"])) as stub:
         result = run(fake_uv, stub)
     assert result.returncode == 1
     assert "does not match its SHA256SUMS entry" in result.stderr
     assert calls(fake_uv) == []
+    assert list((tmp_path / "sai-home" / "cache" / "wheels").iterdir()) == []
+
+
+def test_a_relative_sai_home_still_gives_uv_an_absolute_wheel(fake_uv, tmp_path):
+    with Stub(release_routes(WHEELS)) as stub:
+        command = [sys.executable, str(SCRIPT), "--api-base", stub.url]
+        command += ["--web-base", stub.url]
+        result = subprocess.run(
+            command,
+            env={**fake_uv, "SAI_HOME": "relative-home"},
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    assert result.returncode == 0, result.stderr
+    wheel = Path(installs(fake_uv)[0][2])
+    assert wheel.is_absolute()
+    assert wheel.parent == tmp_path / "relative-home" / "cache" / "wheels"
+
+
+def test_a_symlinked_wheel_cache_is_refused(fake_uv, tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (tmp_path / "sai-home").mkdir()
+    (tmp_path / "sai-home" / "cache").symlink_to(shared)
+    with Stub(release_routes(WHEELS)) as stub:
+        result = run(fake_uv, stub)
+    assert result.returncode == 1
+    assert "is a symlink" in result.stderr
+    assert calls(fake_uv) == []
+    assert list(shared.iterdir()) == []
 
 
 def test_a_release_without_its_files_is_not_installed(fake_uv):
@@ -219,9 +258,13 @@ def test_falls_back_to_git_main_with_a_note_before_the_first_release(
     )
 
 
-@pytest.mark.parametrize("tag", ["sai-cli%2Fv0.3.1", "sai-rs/v1.0.0"])
+@pytest.mark.parametrize(
+    "tag", ["sai-cli%2Fv0.3.1", "sai-rs/v1.0.0", "docs%2Freleases", "docs/releases"]
+)
 def test_a_rate_limited_api_with_releases_installs_nothing(fake_uv, tag):
-    """The web page's latest release can be stale, so it is never installed."""
+    """The web page's latest release can be stale, so it is never installed.
+    A tag that ends in `/releases` is still a release, not the empty list:
+    the script must not fall back to main."""
     location = f"https://github.com/{update.REPO}/releases/tag/{tag}"
     routes: Routes = {API_PATH: (403, {}, b"{}"), WEB_PATH: redirect(location)}
     with Stub(routes) as stub:
@@ -332,6 +375,7 @@ def test_real_uv_install_is_recognized_as_a_release_install(tmp_path):
         "PATH": f"{Path(REAL_UV).parent}:/usr/bin:/bin",
         "HOME": str(Path.home()),
         "TMPDIR": str(tmp_path),
+        "SAI_HOME": str(tmp_path / "sai-home"),
         "UV_TOOL_DIR": str(tmp_path / "tools"),
         "UV_TOOL_BIN_DIR": str(tmp_path / "bin"),
         "UV_CACHE_DIR": str(tmp_path / "uv-cache"),
@@ -357,3 +401,14 @@ def test_real_uv_install_is_recognized_as_a_release_install(tmp_path):
     assert record is not None
     assert record.tag == "sai-cli/v0.10.0"
     assert record.sha256 == hashlib.sha256(WHEELS["0.10.0"]).hexdigest()
+    # uv's saved requirement still resolves: the bulk upgrade works.
+    upgrade = subprocess.run(
+        [REAL_UV, "tool", "upgrade", "--all"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert upgrade.returncode == 0, upgrade.stderr
+    assert update.install_kind(prefix).kind == update.UV_TOOL_RELEASE
