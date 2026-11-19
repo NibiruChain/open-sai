@@ -105,15 +105,15 @@ def _load_v2(fields: dict[str, Any]) -> dict[str, Any]:
         session = _check_session(_decrypt(fields, _V2_AAD))
     except (ValueError, KeyError, TypeError, InvalidTag) as exc:
         raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
-    address = session["evmAddress"].lower()
-    return {"active": address, "sessions": {address: session}}
+    addr = session["evmAddress"].lower()
+    return {"active": addr, "sessions": {addr: session}}
 
 
 def load_accounts() -> dict[str, Any]:
     """Decrypt every connected account.
 
-    Returns {"active": address or None, "sessions": {address: session}}, with
-    addresses in lowercase. An empty set means nobody is signed in. A version
+    Returns {"active": addr or None, "sessions": {addr: session}}, with
+    addrs in lowercase. An empty set means nobody is signed in. A version
     2 `session.json` is read in place; the next save rewrites it.
     """
     fields = _read_envelope(_sessions_path())
@@ -193,18 +193,18 @@ def _remove_files() -> None:
     _v2_path().unlink(missing_ok=True)
 
 
-def _find(accounts: dict[str, Any], address: str) -> str:
-    key = address.lower()
+def _find(accounts: dict[str, Any], addr: str) -> str:
+    key = addr.lower()
     if key not in accounts["sessions"]:
         raise ValueError(
-            f"{address} is not connected; run `sai auth list` to see connected"
+            f"{addr} is not connected; run `sai auth list` to see connected"
             " accounts, or sign in with `sai auth login` or `sai auth import`"
         )
     return key
 
 
 def save_session(session: dict[str, str]) -> None:
-    """Add or replace the account for SESSION's address and make it active.
+    """Add or replace the account for SESSION's addr and make it active.
 
     A store that cannot be read (damaged, or from a passphrase version) is
     replaced, since signing in is how the person recovers from it.
@@ -214,32 +214,32 @@ def save_session(session: dict[str, str]) -> None:
             accounts = load_accounts()
         except ValueError:
             accounts: dict[str, Any] = {"active": None, "sessions": {}}
-        address = session["evmAddress"].lower()
-        accounts["sessions"][address] = session
-        accounts["active"] = address
+        addr = session["evmAddress"].lower()
+        accounts["sessions"][addr] = session
+        accounts["active"] = addr
         _save_accounts(accounts)
 
 
-def load_session(address: str | None = None) -> dict[str, str]:
-    """Return the session for ADDRESS, or the active account's session."""
+def load_session(addr: str | None = None) -> dict[str, str]:
+    """Return the session for ADDR, or the active account's session."""
     accounts = load_accounts()
-    if address is not None:
-        return accounts["sessions"][_find(accounts, address)]
+    if addr is not None:
+        return accounts["sessions"][_find(accounts, addr)]
     if accounts["active"] is None:
         if accounts["sessions"]:
             raise ValueError(
-                "No active Sai account; run `sai auth use ADDRESS` with an"
-                " address from `sai auth list`"
+                "No active Sai account; run `sai auth use ADDR` with an"
+                " addr from `sai auth list`"
             )
         raise ValueError(NO_SESSION)
     return accounts["sessions"][accounts["active"]]
 
 
-def use_session(address: str) -> dict[str, str]:
-    """Make the connected ADDRESS the active account and return its session."""
+def use_session(addr: str) -> dict[str, str]:
+    """Make the connected ADDR the active account and return its session."""
     with _locked():
         accounts = load_accounts()
-        key = _find(accounts, address)
+        key = _find(accounts, addr)
         accounts["active"] = key
         _save_accounts(accounts)
         return accounts["sessions"][key]
@@ -250,11 +250,11 @@ def session_exists() -> bool:
     return (home() / "sessions.json").is_file() or _v2_path().is_file()
 
 
-def delete_session(address: str | None = None) -> str | None:
-    """Remove ADDRESS, or the active account, from this machine.
+def delete_session(addr: str | None = None) -> str | None:
+    """Remove ADDR, or the active account, from this machine.
 
-    Returns the removed address, or None when there was nothing to remove.
-    Removing the active account leaves no account active. Without ADDRESS, a
+    Returns the removed addr, or None when there was nothing to remove.
+    Removing the active account leaves no account active. Without ADDR, a
     store that cannot be read is deleted and reported as removed.
     """
     with _locked():
@@ -264,16 +264,16 @@ def delete_session(address: str | None = None) -> str | None:
         try:
             accounts = load_accounts()
         except ValueError:
-            if address is not None:
+            if addr is not None:
                 raise
             _remove_files()
             return UNREADABLE_REMOVED
-        if address is None:
+        if addr is None:
             key = accounts["active"]
             if key is None:
                 return None
         else:
-            key = address.lower()
+            key = addr.lower()
             if key not in accounts["sessions"]:
                 return None
         removed = accounts["sessions"].pop(key)["evmAddress"]

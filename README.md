@@ -75,16 +75,16 @@ Trading needs a Sai session. There are two ways to get one:
 - **With a Foundry keystore.** This works today. Run
   `sai auth login --account NAME`, where `NAME` is a keystore in
   `~/.foundry/keystores`. The CLI fetches Keeper's sign-in challenge, checks
-  that it is a Sai trading-session request for your address, and only then
+  that it is a Sai trading-session request for your addr, and only then
   runs `cast wallet sign`, which asks for the keystore password.
 
 If you use the `ud` tool, `sai auth login --wallet NAME` signs with a ud
 wallet instead, without a prompt.
 
 You can connect several accounts. Each sign-in adds an account and makes it
-active. `sai auth list` shows them, `sai auth use ADDRESS` switches the active
-one, `sai --as ADDRESS ...` runs one command as another, and `sai auth logout
-[ADDRESS]` removes one.
+active. `sai auth list` shows them, `sai auth use ADDR` switches the active
+one, `sai --as ADDR ...` runs one command as another, and `sai auth logout
+[ADDR]` removes one.
 
 After connecting, commands run without prompts until the session expires. Know
 what the token is:
@@ -166,7 +166,7 @@ account, and `trading`, which reports whether trades can submit and why not
 
 With several accounts connected, `auth_list` shows them, `auth_use` switches
 the active one (for the CLI too), and preview and trade tools take an
-optional `address` to act as another connected account. A preview names its
+optional `addr` to act as another connected account. A preview names its
 account, and a trade refuses if the account changed after the preview. A
 trade for an account that is not signed in for this server's endpoint is
 refused the same way.
