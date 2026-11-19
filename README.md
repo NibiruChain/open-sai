@@ -18,8 +18,9 @@ uv run https://raw.githubusercontent.com/SaiDotFun/open-sai/main/scripts/install
 sai --help
 ```
 
-The [install script](scripts/install.py) finds the newest `sai-cli` release
-and runs `uv tool install` on its wheel. Run the same command again to move to
+The [install script](scripts/install.py) finds the newest `sai-cli` release,
+downloads its wheel, checks it against the release's `SHA256SUMS`, and runs
+`uv tool install` on that file. Run the same command again to move to
 a newer release. Until the first release is published, the script says so and
 installs from `main`.
 
