@@ -302,6 +302,41 @@ def test_a_release_that_breaks_only_once_installed_rolls_back(uv_dirs):
 
 @pytest.mark.slow
 @needs_uv
+def test_with_no_previous_wheel_the_environment_copy_restores_the_install(uv_dirs):
+    """The installed release is withdrawn, so no rollback wheel can be had.
+    The new release passes its trial but breaks once installed. The copy of
+    the old environment is swapped back and the old version works again."""
+    wheels = {
+        "0.1.0": build_wheel("0.1.0", "ORIGINAL = True\n"),
+        "0.2.0": build_wheel("0.2.0", BROKEN_WHEN_INSTALLED),
+    }
+    with Stub(release_routes(wheels, latest=["0.2.0"])) as stub:
+        tool = Tool(uv_dirs, stub.url)
+        tool.install_release("0.1.0")
+        for name in (update.wheel_name("0.1.0"), "SHA256SUMS"):
+            stub.routes.pop(f"{downloads('0.1.0')}/{name}")
+        link = os.path.realpath(tool.sai)
+        outcome = tool.update()
+    assert outcome.status == updater.FAILED
+    assert outcome.rolled_back, outcome.message
+    assert "the package does not import" in outcome.message
+    assert "Rolled back to sai 0.1.0" in outcome.message
+    assert tool.version() == "0.1.0"
+    assert "ORIGINAL" in tool.server_source()
+    assert os.path.realpath(tool.sai) == link
+    # The old install is whole: it still counts as the same release install.
+    assert tool.kind() == update.UV_TOOL_RELEASE
+    assert sorted(path.name for path in (uv_dirs / "tools").iterdir()) == [
+        ".gitignore",
+        ".lock",
+        ".sai-cli-update.lock",
+        "sai-cli",
+    ]
+    assert list(update.wheel_cache().glob("*.whl")) == []
+
+
+@pytest.mark.slow
+@needs_uv
 def test_another_install_owning_the_shared_launcher_stops_the_update(
     uv_dirs, monkeypatch
 ):
@@ -570,7 +605,8 @@ class Script:
     ) -> None:
         self.root = root
         self.launcher = str(root / "bin" / "sai")
-        self.version = version
+        self.prefix = root / "tools" / "sai-cli"
+        self.start = version
         self.staged = ""
         self.fail_trial = fail_trial
         self.fail_install = fail_install
@@ -579,6 +615,12 @@ class Script:
         self.broken_installed = broken_installed
         self.interrupt = interrupt
         self.commands: list[list[str]] = []
+
+    @property
+    def version(self) -> str:
+        """The installed version, read from the environment on disk, so a
+        swapped-back copy of the environment reports the old version."""
+        return update.installed_version(self.prefix) or self.start
 
     def named(self, spec: str) -> str:
         """The version a requirement installs."""
@@ -602,7 +644,9 @@ class Script:
         if command[1:3] == ["tool", "install"]:
             if self.fail_install:
                 return 2, "error: disk full"
-            self.version = self.named(command[-1])
+            dist = next(self.prefix.glob("lib/*/site-packages/sai_cli-*.dist-info"))
+            version = self.named(command[-1])
+            (dist / "METADATA").write_text(f"Name: sai-cli\nVersion: {version}\n")
             return 0, "Installed 1 executable: sai"
         if command[-1] == "--version":
             installed = command[0] == self.launcher
@@ -694,6 +738,92 @@ def test_a_failed_install_keeps_the_old_version(tmp_path, sai_home):
     assert len(script.installs) == 1
 
 
+def test_without_anything_to_roll_back_to_the_install_is_not_touched(
+    tmp_path, sai_home, monkeypatch
+):
+    """No verified wheel and no copy of the environment: stop with exit 1."""
+    monkeypatch.setattr(updater, "snapshot_environment", lambda prefix: None)
+    script = Script(tmp_path, "0.1.0")
+    with Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub:
+        outcome = updater.update_now(scripted(tmp_path, stub, script, source=True))
+    assert outcome.status == updater.FAILED
+    assert outcome.exit_code == 1
+    assert "nothing to roll back to could be prepared" in outcome.message
+    assert "sai 0.1.0 is unchanged" in outcome.message
+    assert len(script.trials) == 1
+    assert script.installs == []
+
+
+def test_two_tools_sharing_one_sai_home_do_not_prune_each_other(tmp_path, sai_home):
+    """Tool A is mid-update and holds the cache lock, with its rollback
+    wheel in the shared cache. Tool B's update, under its own tool lock,
+    must wait and must not delete that wheel."""
+    cache = updater.private_cache()
+    rollback = cache / update.wheel_name("0.0.9")
+    rollback.write_bytes(b"tool A's rollback wheel")
+    wheels = {"0.2.0": build_wheel("0.2.0")}
+    script = Script(tmp_path, "0.1.0")
+    with Stub(release_routes(wheels)) as stub:
+        options = scripted(tmp_path, stub, script, background=True)
+        with updater.locked(updater.cache_lock_path()) as held:
+            assert held
+            busy = updater.update_now(options)
+            assert busy.status == updater.BUSY
+            assert script.trials == script.installs == []
+            assert rollback.read_bytes() == b"tool A's rollback wheel"
+        # A failed update never prunes; it removes only what it downloaded.
+        failing = Script(tmp_path, "0.1.0", fail_trial=True)
+        failed = updater.update_now(replace(options, runner=failing))
+    assert failed.status == updater.FAILED
+    assert sorted(path.name for path in cache.iterdir()) == [rollback.name]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes and ownership")
+def test_the_wheel_cache_must_be_private_and_ours(tmp_path, sai_home, monkeypatch):
+    """A cache other users could write to would let them swap a verified
+    wheel. Ours is tightened; someone else's is refused."""
+    wheels = sai_home / "cache" / "wheels"
+    wheels.mkdir(parents=True)
+    for directory in (sai_home, sai_home / "cache", wheels):
+        directory.chmod(0o777)
+    assert updater.private_cache() == wheels
+    for directory in (sai_home, sai_home / "cache", wheels):
+        assert directory.stat().st_mode & 0o777 == 0o700, directory
+
+    other = os.getuid() + 1
+    monkeypatch.setattr(updater.os, "getuid", lambda: other)
+    with pytest.raises(updater.UpdateFailed, match="belongs to another user"):
+        updater.private_cache()
+    script = Script(tmp_path, "0.1.0")
+    with Stub(release_routes({"0.2.0": build_wheel("0.2.0")})) as stub:
+        outcome = updater.update_now(scripted(tmp_path, stub, script))
+    assert outcome.status == updater.FAILED
+    assert "belongs to another user" in outcome.message
+    assert script.trials == script.installs == []
+
+
+def test_a_wheel_changed_after_verification_is_not_given_to_uv(tmp_path, sai_home):
+    """The kept wheel is hashed again right before uv opens it."""
+    wheels = {"0.2.0": build_wheel("0.2.0")}
+    script = Script(tmp_path, "0.1.0")
+    kept = update.wheel_cache() / update.wheel_name("0.2.0")
+    real = script.__call__
+
+    def swapping(command: Sequence[str], timeout: float) -> tuple[int, str]:
+        result = real(command, timeout)
+        if command[1:3] == ["pip", "install"]:
+            kept.write_bytes(b"swapped after the trial")
+        return result
+
+    with Stub(release_routes(wheels)) as stub:
+        options = replace(scripted(tmp_path, stub, script), runner=swapping)
+        outcome = updater.update_now(options)
+    assert outcome.status == updater.FAILED
+    assert "changed after it was verified" in outcome.message
+    assert "sai 0.1.0 is unchanged" in outcome.message
+    assert script.installs == []
+
+
 def test_a_relative_sai_home_gives_uv_an_absolute_wheel(tmp_path, monkeypatch):
     """uv runs in another directory, so every path it gets is absolute."""
     monkeypatch.chdir(tmp_path)
@@ -718,6 +848,7 @@ def test_uv_installing_elsewhere_stops_with_exit_3(tmp_path, sai_home):
     official_prefix(tmp_path)
     script = Script(tmp_path / "another-uv-home", "0.1.0")
     script.launcher = str(tmp_path / "bin" / "sai")
+    script.prefix = tmp_path / "tools" / "sai-cli"
     with Stub({API_PATH: listing("sai-cli/v0.2.0")}) as stub:
         outcome = updater.update_now(scripted(tmp_path, stub, script, source=True))
     assert outcome.status == updater.UNSUPPORTED
@@ -736,14 +867,14 @@ def test_ctrl_c_during_verification_still_leaves_a_working_install(tmp_path, sai
         pytest.raises(KeyboardInterrupt),
     ):
         updater.update_now(scripted(tmp_path, stub, script, source=True))
-    assert script.installs == [
-        f"git+{GIT_URL}@refs/tags/sai-cli/v0.2.0",
-        f"git+{GIT_URL}@{COMMIT_A}",
-    ]
+    # A Git install goes back to the copy of its environment, offline.
+    assert script.installs == [f"git+{GIT_URL}@refs/tags/sai-cli/v0.2.0"]
     assert script.version == "0.1.0"
     result = updater.read_state()["result"]
     assert (result["status"], result["rolledBack"]) == (updater.FAILED, True)
     assert "interrupted" in result["error"]
+    leftovers = [p.name for p in (tmp_path / "tools").iterdir() if "rollback" in p.name]
+    assert leftovers == []
 
 
 def test_a_waiting_update_reads_the_install_after_it_gets_the_lock(
@@ -768,17 +899,19 @@ def test_a_waiting_update_reads_the_install_after_it_gets_the_lock(
             time.sleep(0.5)
             # Update A finishes: version 0.2.0 from commit B.
             set_install(prefix, "0.2.0", git_origin(COMMIT_B, "sai-cli/v0.2.0"))
-            script.version = "0.2.0"
         waiter.join(60)
     assert len(outcomes) == 1
     outcome = outcomes[0]
     assert outcome.status == updater.FAILED
     assert outcome.rolled_back, outcome.message
     assert "Rolled back to sai 0.2.0" in outcome.message
-    assert script.installs == [
-        f"git+{GIT_URL}@refs/tags/sai-cli/v0.3.0",
-        f"git+{GIT_URL}@{COMMIT_B}",
-    ]
+    assert script.installs == [f"git+{GIT_URL}@refs/tags/sai-cli/v0.3.0"]
+    # The copy was taken after the lock, so it holds what update A left.
+    assert script.version == "0.2.0"
+    origin = json.loads(
+        next(prefix.glob("lib/*/site-packages/sai_cli-*.dist-info/direct_url.json")).read_text()
+    )
+    assert origin["vcs_info"]["commit_id"] == COMMIT_B
 
 
 def test_no_release_and_bad_versions_install_nothing(tmp_path, sai_home):

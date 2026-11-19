@@ -66,6 +66,10 @@ CHECK_INTERVAL = 24 * 60 * 60
 # this long instead of a day later.
 RETRY_INTERVAL = 15 * 60
 TOOL_LOCK_NAME = ".sai-cli-update.lock"
+# A copy of the tool's environment, kept beside it while an update that has
+# no verified wheel to go back to replaces it.
+SNAPSHOT_PREFIX = ".sai-cli-rollback-"
+BROKEN_PREFIX = ".sai-cli-broken-"
 # Modules the new version must import: the CLI and the MCP server.
 IMPORTS = ("sai_cli.sai_cli", "sai_cli.mcp_server.server")
 
@@ -91,6 +95,14 @@ class UpdateFailed(Exception):
 def state_lock_path() -> Path:
     """The lock for this profile's update.json."""
     return update.sai_home() / "update.lock"
+
+
+def cache_lock_path() -> Path:
+    """The lock for this profile's wheel cache, held for a whole install,
+    verify, and rollback. Two tools that share one SAI_HOME share the cache,
+    so neither may prune it while the other still needs its rollback wheel.
+    It is always taken after the tool lock."""
+    return update.sai_home() / "update-cache.lock"
 
 
 def tool_lock_path(prefix: Path) -> Path:
@@ -468,23 +480,66 @@ def write_record(prefix: Path, tag: str, digest: str, wheel: Path) -> None:
     update.write_json(update.release_record_path(prefix), record.to_json())
 
 
+def private_dir(path: Path, exact: bool) -> None:
+    """Make sure directory PATH is the current user's and that no one else
+    can write to it, creating it if needed.
+
+    A directory another user can write to would let them swap a verified
+    wheel before uv opens it. One of ours with loose modes is tightened to
+    0700; EXACT makes it 0700 in any case. One that is a symlink, belongs to
+    someone else, or cannot be tightened is refused.
+    """
+    if path.is_symlink():
+        raise UpdateFailed(f"{path} is a symlink; sai keeps no wheels under it")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    status = path.stat()
+    if hasattr(os, "getuid") and status.st_uid != os.getuid():
+        raise UpdateFailed(f"{path} belongs to another user; sai keeps no wheels there")
+    if os.name == "nt":
+        return
+    mode = status.st_mode & 0o777
+    if mode & 0o022 or (exact and mode != 0o700):
+        try:
+            path.chmod(0o700)
+        except OSError as exc:
+            raise UpdateFailed(
+                f"{path} is writable by other users and could not be made private"
+            ) from exc
+
+
 def private_cache() -> Path:
-    """Create the wheel cache, private to the user, and return its absolute
-    path. A symlinked `cache` or `cache/wheels` is refused: writes and
-    pruning would land in someone else's directory."""
+    """Return the absolute wheel cache after making $SAI_HOME, `cache`, and
+    `cache/wheels` private to the current user."""
     cache = update.wheel_cache()
-    cache.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for directory in (cache.parent, cache):
-        if directory.is_symlink():
-            raise UpdateFailed(f"{directory} is a symlink; sai keeps no wheels there")
-        directory.mkdir(mode=0o700, exist_ok=True)
+    try:
+        private_dir(cache.parent.parent, exact=False)
+        private_dir(cache.parent, exact=True)
+        private_dir(cache, exact=True)
+    except OSError as exc:
+        raise UpdateFailed(
+            f"the wheel cache is unusable: {type(exc).__name__}"
+        ) from exc
     return cache
 
 
+def wheel_error(wheel: tuple[str, str, Path] | None) -> str | None:
+    """Hash a kept wheel again, right before uv opens it. Return why it
+    cannot be used, or None."""
+    if wheel is None:
+        return None
+    _, digest, path = wheel
+    try:
+        private_cache()
+        intact = path.is_file() and not path.is_symlink() and sha256(path) == digest
+    except (OSError, UpdateFailed) as exc:
+        return f"the wheel cache is not private: {exc}"
+    return None if intact else f"{path.name} changed after it was verified"
+
+
 def prune_wheels(keep: Sequence[str]) -> None:
-    """Delete this updater's cached wheels other than the versions in KEEP:
-    regular files named exactly like a sai-cli release wheel, in a cache
-    directory that is not a symlink."""
+    """After a successful update, delete this updater's cached wheels other
+    than the versions in KEEP: regular files named exactly like a sai-cli
+    release wheel. The caller holds the cache lock."""
     names = {update.wheel_name(version) for version in keep}
     try:
         cache = private_cache()
@@ -607,29 +662,83 @@ class Current:
         return Path(self.install.prefix)
 
 
-# (spec for uv, (tag, sha256, wheel) when the spec is a wheel)
-Source = tuple[str, "tuple[str, str, Path] | None"]
+@dataclass(frozen=True)
+class Rollback:
+    """What puts the current version back, prepared before the install is
+    replaced. Either a verified wheel for uv, or a copy of the environment."""
+
+    # (tag, sha256, path) of a wheel verified against its release.
+    wheel: tuple[str, str, Path] | None = None
+    # A copy of the tool's environment directory.
+    snapshot: Path | None = None
 
 
-def _download_to_cache(release: update.Release, options: Options) -> tuple[Path, str]:
+def _download_to_cache(
+    release: update.Release, options: Options
+) -> tuple[Path, str, bool]:
     """Download and verify RELEASE's wheel in a private directory, then keep
-    it in the wheel cache. Return its absolute path and SHA-256."""
+    it in the wheel cache. Return its absolute path, its SHA-256, and
+    whether the cache had no such file before."""
     cache = private_cache()
     with tempfile.TemporaryDirectory(dir=cache, prefix=".download-") as temp:
         wheel, digest = fetch_wheel(release, Path(temp), options.download_timeout)
         kept = cache / wheel.name
+        created = not kept.exists()
         os.replace(wheel, kept)
-    return kept, digest
+    return kept, digest, created
 
 
-def prepare_rollback(current: Current, options: Options) -> Source | None:
+def clear_snapshots(prefix: Path) -> None:
+    """Remove environment copies an interrupted update left beside PREFIX.
+    The caller holds the tool lock."""
+    with contextlib.suppress(OSError):
+        for path in prefix.parent.iterdir():
+            if path.name.startswith((SNAPSHOT_PREFIX, BROKEN_PREFIX)):
+                shutil.rmtree(path, ignore_errors=True)
+
+
+def snapshot_environment(prefix: Path) -> Path | None:
+    """Copy the tool's environment at PREFIX to a private sibling directory
+    and return it, or None when it cannot be copied. The copy sits in uv's
+    tool directory, so swapping it back is a rename on one filesystem."""
+    target = prefix.parent / f"{SNAPSHOT_PREFIX}{os.getpid()}"
+    try:
+        shutil.copytree(prefix, target, symlinks=True)
+        target.chmod(0o700)
+    except OSError:
+        shutil.rmtree(target, ignore_errors=True)
+        return None
+    return target
+
+
+def swap_back(prefix: Path, snapshot: Path, launcher: Path) -> str | None:
+    """Put the copied environment SNAPSHOT back at PREFIX and make LAUNCHER
+    run it again. Return the error, or None."""
+    broken = prefix.parent / f"{BROKEN_PREFIX}{os.getpid()}"
+    try:
+        shutil.rmtree(broken, ignore_errors=True)
+        if prefix.exists():
+            os.rename(prefix, broken)
+        os.rename(snapshot, prefix)
+        shutil.rmtree(broken, ignore_errors=True)
+        if os.name != "nt" and launcher_owner_error(prefix, launcher) is not None:
+            launcher.unlink(missing_ok=True)
+            launcher.symlink_to(_executables(prefix)[0])
+    except OSError as exc:
+        return f"could not put the previous environment back: {type(exc).__name__}"
+    return None
+
+
+def prepare_rollback(current: Current, options: Options) -> Rollback | None:
     """Get what can put CURRENT's version back, before anything is replaced,
-    so a rollback needs no network. None when nothing can be had.
+    so a rollback needs no network. None when nothing can be had; the update
+    then stops.
 
-    A kept wheel counts only while it lies in the private cache and its
-    bytes still hash to what the release record says. Otherwise the current
-    release is downloaded and checked against its SHA256SUMS now. A Git
-    install goes back to its recorded commit.
+    For a release install that is its wheel: the kept one, while it lies in
+    the private cache and its bytes still hash to what the release record
+    says, or else the current release downloaded and checked against its
+    SHA256SUMS now. Without such a wheel, and for a Git install, it is a
+    copy of the environment itself.
     """
     record, install = current.record, current.install
     tag = update.tag_for(current.version)
@@ -646,37 +755,41 @@ def prepare_rollback(current: Current, options: Options) -> Source | None:
         except (OSError, UpdateFailed):
             intact = False
         if intact:
-            return str(kept), (record.tag, record.sha256, kept)
+            return Rollback(wheel=(record.tag, record.sha256, kept))
     if install.kind == update.UV_TOOL_RELEASE:
         try:
             release = update.release_for(tag, options.web_base)
-            wheel, digest = _download_to_cache(release, options)
+            wheel, digest, _ = _download_to_cache(release, options)
         except (UpdateFailed, OSError):
-            return None
-        return str(wheel), (tag, digest, wheel)
-    if install.kind == update.UV_TOOL_GIT and install.url and install.commit:
-        return f"git+{install.url}@{install.commit}", None
-    return None
+            pass
+        else:
+            return Rollback(wheel=(tag, digest, wheel))
+    snapshot = snapshot_environment(current.prefix)
+    return Rollback(snapshot=snapshot) if snapshot is not None else None
 
 
 def restore(
-    current: Current, source: Source | None, options: Options, uv: str
+    current: Current, rollback: Rollback, options: Options, uv: str
 ) -> str | None:
-    """Put CURRENT's version back from SOURCE and verify it. Return None
+    """Put CURRENT's version back from ROLLBACK and verify it. Return None
     when it runs again, or the error."""
-    if source is None:
-        return "no verified copy of the previous version could be prepared"
-    spec, wheel = source
-    error = install_spec(uv, spec, options.runner) or verify(
+    if rollback.snapshot is not None:
+        error = swap_back(current.prefix, rollback.snapshot, current.launcher)
+    else:
+        assert rollback.wheel is not None
+        error = wheel_error(rollback.wheel) or install_spec(
+            uv, str(rollback.wheel[2]), options.runner
+        )
+    error = error or verify(
         current.prefix,
         current.launcher,
         current.version,
         options.imports,
         options.runner,
     )
-    if error is None and wheel is not None:
+    if error is None and rollback.wheel is not None:
         with contextlib.suppress(OSError):
-            write_record(current.prefix, *wheel)
+            write_record(current.prefix, *rollback.wheel)
     return error
 
 
@@ -698,94 +811,108 @@ def _install(
     options: Options, current: Current, release: update.Release, uv: str
 ) -> tuple[Outcome, bool]:
     """Install RELEASE over CURRENT. Returns the outcome and whether Ctrl-C
-    interrupted the run.
+    interrupted the run. The caller holds the tool lock and the cache lock.
 
     The order is what keeps a working `sai`: stage and hash the new wheel,
-    run it in a throwaway environment, get a rollback copy of the current
-    version, and only then let uv replace the install. The check afterwards
-    and the rollback are the second line.
+    run it in a throwaway environment, get something to roll back to, and
+    only then let uv replace the install. Without a rollback it stops. The
+    check afterwards and the rollback are the second line. The cache is
+    pruned only after the new version has passed that check.
     """
     prefix, installed, target = current.prefix, current.version, release.version
     runner, imports = options.runner, options.imports
+    wheel: tuple[str, str, Path] | None = None
+    created = False
 
-    def unchanged(reason: str, status: str = FAILED) -> tuple[Outcome, bool]:
-        prune_wheels((installed,))
+    def discard() -> None:
+        """Remove the wheel this run downloaded and did not install."""
+        if wheel is not None and created and target != installed:
+            with contextlib.suppress(OSError):
+                wheel[2].unlink(missing_ok=True)
+
+    def unchanged(reason: str) -> tuple[Outcome, bool]:
+        discard()
         message = (
             f"Could not update to {target}: {reason}. sai {installed} is unchanged."
         )
-        return Outcome(status, message, installed, target), False
+        return Outcome(FAILED, message, installed, target), False
 
-    wheel: tuple[str, str, Path] | None = None
     if options.source:
         # The full ref: a branch named like the tag must not shadow it.
         spec = f"git+{options.git_url}@refs/tags/{release.tag}"
     else:
         try:
-            kept, digest = _download_to_cache(release, options)
+            kept, digest, created = _download_to_cache(release, options)
         except (UpdateFailed, OSError) as exc:
             return unchanged(
                 str(exc) if isinstance(exc, UpdateFailed) else type(exc).__name__
             )
         spec, wheel = str(kept), (release.tag, digest, kept)
 
-    trial = preverify(spec, target, prefix, uv, options)
+    trial = wheel_error(wheel) or preverify(spec, target, prefix, uv, options)
     if trial is not None:
         return unchanged(f"the release failed its trial install: {trial}")
     rollback = prepare_rollback(current, options)
-    if options.allowed is not None and not options.allowed():
-        # Turned off while this run downloaded and tested the release.
-        prune_wheels((installed,))
-        message = f"sai {target} is available. Run `sai update` to install it."
-        return Outcome(AVAILABLE, message, installed, target), False
-
-    def failed(reason: str) -> Outcome:
-        """Report REASON after making sure the previous version still runs."""
-        if verify(prefix, current.launcher, installed, imports, runner) is None:
-            message = f"{reason}. sai {installed} is unchanged."
-            return Outcome(FAILED, message, installed, target)
-        error = restore(current, rollback, options, uv)
-        if error is None:
-            message = f"{reason}. Rolled back to sai {installed}."
-            return Outcome(FAILED, message, installed, target, rolled_back=True)
-        message = (
-            f"{reason}. Rolling back to sai {installed} also failed: {error}."
-            f" Reinstall with: {update.INSTALL_COMMAND}"
-        )
-        return Outcome(FAILED, message, installed, target)
-
-    interrupted = False
-    try:
-        error = install_spec(uv, spec, runner)
-        if error is None:
-            error = verify(prefix, current.launcher, target, imports, runner)
-        if error is None and wheel is not None:
-            try:
-                write_record(prefix, *wheel)
-            except OSError as exc:
-                error = f"could not record the release: {type(exc).__name__}"
-    except KeyboardInterrupt:
-        interrupted = True
-        error = "interrupted"
-    if error is not None:
-        with _uninterrupted():
-            outcome = failed(f"Could not update to {target}: {error}")
-            prune_wheels((installed,))
-        return outcome, interrupted
-    if wheel is None:
-        # A Git install has no release record; drop a stale one.
-        with contextlib.suppress(OSError):
-            update.release_record_path(prefix).unlink(missing_ok=True)
-    prune_wheels((installed, target))
-    message = (
-        f"Updated sai from {installed} to {target}. Restart agent clients and"
-        " any open `sai` shell so they load it."
-    )
     if rollback is None:
-        message += (
-            f" No copy of {installed} could be kept for a rollback; the new"
-            " version passed its trial install first."
+        return unchanged(
+            f"nothing to roll back to could be prepared: no verified wheel of"
+            f" {installed} and no copy of its environment"
         )
-    return Outcome(UPDATED, message, target, target), False
+    try:
+        if options.allowed is not None and not options.allowed():
+            # Turned off while this run downloaded and tested the release.
+            discard()
+            message = f"sai {target} is available. Run `sai update` to install it."
+            return Outcome(AVAILABLE, message, installed, target), False
+
+        def failed(reason: str) -> Outcome:
+            """Report REASON after making sure the previous version runs."""
+            if verify(prefix, current.launcher, installed, imports, runner) is None:
+                message = f"{reason}. sai {installed} is unchanged."
+                return Outcome(FAILED, message, installed, target)
+            error = restore(current, rollback, options, uv)
+            if error is None:
+                message = f"{reason}. Rolled back to sai {installed}."
+                return Outcome(FAILED, message, installed, target, rolled_back=True)
+            message = (
+                f"{reason}. Rolling back to sai {installed} also failed: {error}."
+                f" Reinstall with: {update.INSTALL_COMMAND}"
+            )
+            return Outcome(FAILED, message, installed, target)
+
+        interrupted = False
+        try:
+            # The wheel is hashed once more right before uv opens it.
+            error = wheel_error(wheel) or install_spec(uv, spec, runner)
+            if error is None:
+                error = verify(prefix, current.launcher, target, imports, runner)
+            if error is None and wheel is not None:
+                try:
+                    write_record(prefix, *wheel)
+                except OSError as exc:
+                    error = f"could not record the release: {type(exc).__name__}"
+        except KeyboardInterrupt:
+            interrupted = True
+            error = "interrupted"
+        if error is not None:
+            with _uninterrupted():
+                outcome = failed(f"Could not update to {target}: {error}")
+                discard()
+            return outcome, interrupted
+        if wheel is None:
+            # A Git install has no release record; drop a stale one.
+            with contextlib.suppress(OSError):
+                update.release_record_path(prefix).unlink(missing_ok=True)
+        # Only now, verified: keep the new wheel and the one to go back to.
+        prune_wheels((installed, target))
+        message = (
+            f"Updated sai from {installed} to {target}. Restart agent clients and"
+            " any open `sai` shell so they load it."
+        )
+        return Outcome(UPDATED, message, target, target), False
+    finally:
+        if rollback.snapshot is not None:
+            shutil.rmtree(rollback.snapshot, ignore_errors=True)
 
 
 def _unsupported(install: update.Install) -> Outcome:
@@ -875,7 +1002,18 @@ def update_now(options: Options | None = None) -> Outcome:
             return Outcome(UNSUPPORTED, message, installed, target)
         record = update.read_release_record(prefix)
         current = Current(install, installed, launcher, record)
-        outcome, interrupted = _install(options, current, release, uv)
+        clear_snapshots(prefix)
+        # The cache lock comes second, always after the tool lock, and is
+        # held until the install is verified or rolled back.
+        with locked(cache_lock_path(), wait) as cache_held:
+            if not cache_held:
+                message = (
+                    "Another sai update is using this SAI_HOME's wheel cache;"
+                    " try again shortly."
+                )
+                status = BUSY if options.background else FAILED
+                return Outcome(status, message, installed, target)
+            outcome, interrupted = _install(options, current, release, uv)
         _record(outcome, installed, seen)
         if interrupted:
             raise KeyboardInterrupt
