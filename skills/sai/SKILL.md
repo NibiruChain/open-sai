@@ -19,7 +19,7 @@ Settings live in `~/.sai/config.toml` (under `$SAI_HOME` when set), shared
 with the MCP server. Change them with `sai config set KEY VALUE` and `sai
 config unset KEY`, not by editing the file or MCP client config. `sai --json
 config list` shows each key's value and source (`flag`, `env`, `file`,
-`default`, `derived`). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
+`default`, `derived`, or `invalid` for an unreadable `logs.*` value). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
 derives it from the Keeper endpoint), `lcd.endpoint`, `update.auto`,
 `logs.enabled`, `logs.keep_days`. A flag
 such as `--endpoint` or a variable such as `SAI_ENDPOINT` overrides the file

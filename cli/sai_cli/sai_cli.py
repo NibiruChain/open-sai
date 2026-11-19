@@ -176,7 +176,7 @@ class LoggedGroup(click.Group):
         run: dict[str, Any] = {"exitCode": 0}
         started = time.monotonic()
         with log.bind(surface=surface, command=command):
-            log.event("command.start", argv=argv)
+            log.event("command.start", argv=log.argv(argv[:64]))
             self.runs.append(run)
             try:
                 return super().main(args, *rest, **extra)
@@ -196,6 +196,9 @@ class LoggedGroup(click.Group):
                 raise
             finally:
                 self.runs.pop()
+                # The message can quote what the person typed.
+                if isinstance(run.get("error"), str):
+                    run["error"] = log.untrusted(run["error"])
                 log.event(
                     "command.end",
                     "info" if run["exitCode"] == 0 else "warn",

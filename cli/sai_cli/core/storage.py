@@ -105,6 +105,7 @@ def _load_v2(fields: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported session version; {SIGN_IN_AGAIN}")
     try:
         session = _check_session(_decrypt(fields, _V2_AAD))
+        log.remember([session["token"]])
     except (ValueError, KeyError, TypeError, InvalidTag) as exc:
         raise ValueError(f"Cannot unlock session; {SIGN_IN_AGAIN}") from exc
     addr = session["evmAddress"].lower()
@@ -135,6 +136,7 @@ def load_accounts() -> dict[str, Any]:
         if not isinstance(stored, dict):
             raise TypeError("Invalid session set")
         sessions = {k: _check_session(v) for k, v in stored.items()}
+        log.remember(session["token"] for session in sessions.values())
         active = accounts.get("active")
         if active is not None and active not in sessions:
             active = None
@@ -145,6 +147,7 @@ def load_accounts() -> dict[str, Any]:
 
 def _save_accounts(accounts: dict[str, Any]) -> None:
     """Encrypt ACCOUNTS and store them at mode 0600; drop the version 2 file."""
+    log.remember(s.get("token") for s in accounts["sessions"].values())
     nonce = os.urandom(12)
     plaintext = json.dumps(accounts).encode()
     ciphertext = AESGCM(_SESSION_KEY).encrypt(nonce, plaintext, _AAD)

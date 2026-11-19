@@ -9,19 +9,24 @@ Every line carries `ts`, `level`, `event`, `surface`, `pid`, `version`,
 which orders events that share a millisecond), then the fields bound with
 `bind`, then the event's own fields.
 
-`event` does no I/O and never blocks: it stamps the line and puts it on a
-bounded queue. One daemon thread drains the queue and does everything that
-can wait on a disk: reading the configuration, redacting, opening, writing,
-and deleting old files. When the queue is full the event is dropped and
-counted, and a later `log.dropped` line reports the count. The process waits
-a short time at exit for the queue to drain. So a slow or stuck filesystem
+`event` never blocks and never touches the logs directory: it stamps the
+line, copies its fields, and puts it on a bounded queue. Its one file access
+is a look at the session file at most once a second, to learn the tokens. One daemon thread drains the queue and does everything that
+can wait on a disk: reading the configuration, scrubbing, opening, writing,
+and deleting old files. The queue is bounded by count and by size, and each
+event's fields are cut to a fixed budget as they are copied. When the queue
+is full the event is dropped and counted, and a later `log.dropped` line
+reports the count. The process waits a fraction of a second at exit for the
+queue to drain and drops what is left. So a slow or stuck filesystem
 can cost log lines, never an MCP reply or the time between reserving an
 intent and submitting it.
 
 Callers pass only values that are safe to store: never the session token, a
-signature, or clipboard text. The writer still treats every string as
-untrusted: it reduces URLs to their origin, and removes stored session
-tokens, anything shaped like a JWT, and long hex strings such as signatures.
+signature, or clipboard text. Every string is still treated as untrusted.
+`event` removes each session token this process knows of as it copies the
+fields, so a later sign-out cannot leave a queued token unredacted. The
+writer then reduces URLs to their origin, and removes anything shaped like a
+JWT and long hex strings such as signatures.
 Text from outside sai, wrapped in `untrusted`, is cut shorter and loses hex
 strings of 64 digits or more.
 
@@ -74,10 +79,23 @@ PRUNE_MARKER = ".pruned"
 MAX_TEXT = 2000
 MAX_UNTRUSTED = 300
 MAX_LINE = 16 * 1024
-# Events waiting for the writer. Past this, events are dropped and counted.
+# What `event` copies from one call: characters of text in all, items of
+# any one list or mapping, and nesting depth. The rest is cut.
+EVENT_CHARS = 12 * 1024
+MAX_ITEMS = 64
+MAX_DEPTH = 6
+CUT = "[cut]"
+# Events waiting for the writer, by count and by characters of text. Past
+# either, events are dropped and counted.
 QUEUE_SIZE = 2048
+QUEUE_CHARS = 4 * 1024 * 1024
 # How long the process waits at exit for the queue to drain.
-EXIT_FLUSH_SECONDS = 2.0
+EXIT_FLUSH_SECONDS = 0.3
+# How often `event` checks whether the session file changed.
+TOKEN_CHECK_SECONDS = 1.0
+# Extra lines `tail` reads from each file, so an event that was appended
+# after newer ones still sorts into place.
+TAIL_SLACK = 256
 # How long `event` skips a home whose logging is off or failing before it
 # lets the writer look again.
 RECHECK_SECONDS = 5.0
@@ -90,12 +108,18 @@ COMMON = ("ts", "level", "event", "surface", "pid", "version", "runId", "seq")
 RUN_ID = uuid.uuid4().hex
 _seq = itertools.count(1)
 _FILE = re.compile(
-    rf"^(?P<surface>{'|'.join(SURFACES)})-(?P<date>\d{{4}}-\d{{2}}-\d{{2}})\.jsonl$"
+    rf"(?P<surface>{'|'.join(SURFACES)})-(?P<date>\d{{4}}-\d{{2}}-\d{{2}})\.jsonl"
 )
 # Three base64url segments, the first a JSON object: a JWT such as the
 # session token.
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>\\]+")
+# A URL in running text: from its scheme to the next whitespace. Quotes,
+# brackets, commas, and semicolons are all legal inside a URL, so nothing
+# else ends it; whatever follows without a space is removed with it.
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S*")
+# The same, to the end of the string: for a value that is one token.
+_URL_REST = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://.*", re.DOTALL)
+_HOST = re.compile(r"[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]")
 # A 65-byte signature is 130 hex digits. A transaction hash or a preview
 # digest is 64, and stays unless the text is `untrusted`.
 _LONG_HEX = re.compile(r"(?:0x)?[0-9A-Fa-f]{100,}")
@@ -168,10 +192,10 @@ def resolve_config(
     """Return (`logs.enabled`, `logs.keep_days`) for the home ROOT from the
     two environment values and its config file.
 
-    Each key resolves on its own, environment first. Any logs value that is
+    Each key resolves on its own, environment first. With logging turned
+    off, `logs.keep_days` is not validated. Otherwise any logs value that is
     invalid, or a config file that cannot be read or parsed, turns logging
-    off: a typo in one key must not undo an opt-out in the other. The answer
-    is cached until the file or the values change.
+    off. The answer is cached until the file or the values change.
     """
     from . import settings
 
@@ -180,15 +204,21 @@ def resolve_config(
     cached = _config_cache.get(key)
     if cached is not None:
         return cached
+
+    def pick(name: str, raw: str | None, file: Mapping[str, Any]) -> Any:
+        if raw is not None and raw.strip():
+            return settings.parse_value(name, raw)
+        value = file.get(name, settings.BY_KEY[name].default)
+        if isinstance(value, settings.Invalid):
+            raise settings.SettingsError(value.message)
+        return value
+
+    value = (False, DEFAULT_KEEP_DAYS)
     try:
         file, _warnings = settings.read_file(path)
-        found: list[Any] = []
-        for name, raw in (("logs.enabled", raw_enabled), ("logs.keep_days", raw_keep)):
-            if raw is not None and raw.strip():
-                found.append(settings.parse_value(name, raw))
-            else:
-                found.append(file.get(name, settings.BY_KEY[name].default))
-        value = (bool(found[0]), int(found[1]))
+        if pick("logs.enabled", raw_enabled, file) is True:
+            # Only now does the other value matter.
+            value = (True, int(pick("logs.keep_days", raw_keep, file)))
     except Exception:  # noqa: BLE001 - unreadable settings mean no logging
         value = (False, DEFAULT_KEEP_DAYS)
     if len(_config_cache) > 64:
@@ -225,8 +255,9 @@ class Endpoint(str):
 
 
 def untrusted(value: Any) -> Untrusted | None:
-    """Mark VALUE as text from outside sai: it is cut to MAX_UNTRUSTED
-    characters and loses hex strings of 64 digits or more."""
+    """Mark VALUE as text from outside sai, or text that can quote input:
+    it is cut to MAX_UNTRUSTED characters, loses hex strings of 64 digits
+    or more, and ends at the first URL, which is cut to its origin."""
     return None if value is None else Untrusted(value)
 
 
@@ -236,48 +267,83 @@ def endpoint(value: Any) -> Endpoint | None:
     return None if value is None else Endpoint(value)
 
 
+class Arg(str):
+    """One whole value that may be a URL, such as a command-line token or
+    a tool argument: from a scheme to its end it is logged as an origin."""
+
+    __slots__ = ()
+
+
+def argv(tokens: Any) -> list[Arg]:
+    """Mark each of TOKENS as one whole value. Parses nothing."""
+    return [Arg(token) for token in tokens]
+
+
 def origin(value: str) -> str:
     """The scheme, host, and port of the URL VALUE, or a placeholder when it
     does not parse. Never raises."""
     try:
         parts = urlsplit(value.strip())
         host = parts.hostname or ""
-        if not parts.scheme or not host:
-            return REDACTED_URL
         if ":" in host:
             host = f"[{host}]"
+        # A host with any other character is not a host: it is text that ran
+        # into the URL, and may be the secret.
+        if not parts.scheme or not _HOST.fullmatch(host):
+            return REDACTED_URL
         port = parts.port
         return f"{parts.scheme}://{host}" + ("" if port is None else f":{port}")
     except ValueError:
         return REDACTED_URL
 
 
-_token_cache: tuple[Any, tuple[str, ...]] | None = None
+# Session tokens this process has seen. Tokens are only added: one that was
+# signed out or replaced may still sit in an event waiting to be written,
+# and Keeper keeps honoring it until it expires.
+_known: set[str] = set()
+_token_lock = threading.Lock()
+_token_key: Any = None
+_token_checked = 0.0
 
 
-def _tokens() -> tuple[str, ...]:
-    """Every stored session token. A successful read is cached until the
-    session file changes; a failed read is retried on the next call."""
-    global _token_cache
-    from . import storage
+def remember(tokens: Any) -> None:
+    """Add TOKENS to the session tokens every later event is cleared of.
+    `core.storage` calls this whenever it reads or writes the accounts."""
+    found = [token for token in tokens if isinstance(token, str) and token]
+    with _token_lock:
+        _known.update(found)
 
-    paths = (storage.home() / "sessions.json", storage.home() / "session.json")
-    key = tuple(_stat_key(path) for path in paths)
-    if _token_cache is not None and _token_cache[0] == key:
-        return _token_cache[1]
-    try:
-        stored = storage.load_accounts()["sessions"].values()
-        tokens = tuple(t for s in stored if (t := s.get("token")))
-    except (ValueError, KeyError, OSError):
-        _token_cache = None
-        return ()
-    _token_cache = (key, tokens)
-    return tokens
+
+def known_tokens(*, check: bool = False) -> tuple[str, ...]:
+    """The session tokens to remove, longest first.
+
+    Rereads the session store when its file changed, looking at most once
+    every TOKEN_CHECK_SECONDS unless CHECK is set. A failed read is retried
+    at the next look instead of being taken for "no tokens".
+    """
+    global _token_key, _token_checked
+    current = time.monotonic()
+    if check or current - _token_checked >= TOKEN_CHECK_SECONDS:
+        _token_checked = current
+        try:
+            from . import storage
+
+            paths = (storage.home() / "sessions.json", storage.home() / "session.json")
+            key = (str(paths[0]), *(_stat_key(path) for path in paths))
+            if key != _token_key:
+                # load_accounts calls remember().
+                storage.load_accounts()
+                _token_key = key
+        except Exception:  # noqa: BLE001 - retried at the next look
+            _token_key = None
+    with _token_lock:
+        return tuple(sorted(_known, key=len, reverse=True))
 
 
 def redact(text: str) -> str:
-    """Remove every connected account's session token from TEXT."""
-    for token in _tokens():
+    """Remove every session token this process knows of from TEXT, after
+    checking the session store for new ones."""
+    for token in known_tokens(check=True):
         text = text.replace(token, REDACTED)
     return text
 
@@ -290,22 +356,26 @@ def _cut(text: str, limit: int) -> str:
 
 def scrub(value: str, tokens: tuple[str, ...] | None = None) -> str:
     """VALUE with secrets removed and its length capped. TOKENS are the
-    stored session tokens, read when not given."""
+    session tokens to remove, looked up when not given."""
     if isinstance(value, Endpoint):
         return origin(value)
     text = str(value)
-    for token in _tokens() if tokens is None else tokens:
+    for token in known_tokens(check=True) if tokens is None else tokens:
         text = text.replace(token, REDACTED)
     text = _JWT.sub(REDACTED, text)
-    text = _URL.sub(lambda match: origin(match.group()), text)
     if isinstance(value, Untrusted):
+        # Where a URL ends inside someone else's text is a guess, and what
+        # follows may be part of it: everything from the URL on goes.
+        text = _URL_REST.sub(lambda match: f"{origin(match.group())} {CUT}", text)
         return _cut(_HEX.sub(REDACTED_HEX, text), MAX_UNTRUSTED)
+    pattern = _URL_REST if isinstance(value, Arg) else _URL
+    text = pattern.sub(lambda match: origin(match.group()), text)
     return _cut(_LONG_HEX.sub(REDACTED_HEX, text), MAX_TEXT)
 
 
 def clean(value: Any, tokens: tuple[str, ...] | None = None) -> Any:
     """Return VALUE as JSON-ready data with every string scrubbed."""
-    found = _tokens() if tokens is None else tokens
+    found = known_tokens(check=True) if tokens is None else tokens
     if isinstance(value, str):
         return scrub(value, found)
     if value is None or isinstance(value, (bool, int, float)):
@@ -319,18 +389,69 @@ def clean(value: Any, tokens: tuple[str, ...] | None = None) -> Any:
     return scrub(str(value), found)
 
 
-def _snapshot(value: Any, depth: int = 0) -> Any:
-    """Copy VALUE so later changes by the caller do not reach the writer.
-    Strings keep their `Untrusted` or `Endpoint` type."""
-    if value is None or isinstance(value, (str, bool, int, float)):
+def _clip(text: str, limit: int) -> str:
+    """TEXT cut to LIMIT characters at a space, so no half of a token, URL,
+    or signature is left at the end for the scrubbing to miss. A single
+    unbroken value that is too long is kept only if it starts as a URL,
+    which the writer reduces to its origin."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    space = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+    if space < 0:
+        if _URL.match(head):
+            return head
+        return f"{CUT} {len(text)} characters"
+    return f"{head[:space]} {CUT} {len(text) - space} more characters"
+
+
+def _snapshot(
+    value: Any, budget: list[int], tokens: tuple[str, ...], depth: int = 0
+) -> Any:
+    """Copy VALUE for the writer, within a fixed amount of work.
+
+    Strings lose the session tokens known now, are cut to MAX_TEXT, and
+    keep their `Untrusted`, `Endpoint`, or `Arg` type. Lists and mappings
+    keep MAX_ITEMS items to MAX_DEPTH levels. BUDGET[0] is the characters
+    of text left for this event; past it, values become a marker.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
         return value
-    if depth > 6:
-        return type(value).__name__
+    if budget[0] <= 0:
+        return CUT
+    if isinstance(value, str):
+        # Look a little past the cut, so a token that straddles it goes.
+        text = value[: MAX_TEXT + 4096]
+        whole = len(text) == len(value)
+        for token in tokens:
+            if token in text:
+                text = text.replace(token, REDACTED)
+        if not whole or len(text) > MAX_TEXT:
+            # Room is left for the marker, so the writer's own cap keeps it.
+            text = _clip(text, min(MAX_TEXT - 64, len(text) - 1))
+        budget[0] -= len(text)
+        kind = type(value)
+        return text if kind is str else kind(text)
+    if depth >= MAX_DEPTH:
+        return CUT
     if isinstance(value, Mapping):
-        return {str(k): _snapshot(v, depth + 1) for k, v in value.items()}
+        copied: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= MAX_ITEMS or budget[0] <= 0:
+                copied[CUT] = len(value) - index
+                break
+            name = _snapshot(str(key)[: MAX_UNTRUSTED + 1], budget, tokens, depth + 1)
+            copied[str(name)] = _snapshot(item, budget, tokens, depth + 1)
+        return copied
     if isinstance(value, (list, tuple, set, frozenset)):
-        return [_snapshot(item, depth + 1) for item in value]
-    return str(value)
+        items: list[Any] = []
+        for index, item in enumerate(value):
+            if index >= MAX_ITEMS or budget[0] <= 0:
+                items.append(f"{CUT} {len(value) - index} more items")
+                break
+            items.append(_snapshot(item, budget, tokens, depth + 1))
+        return items
+    return _snapshot(str(value), budget, tokens, depth)
 
 
 # Context
@@ -499,6 +620,28 @@ class LogDir:
             return False
         return True
 
+    def refused(self) -> list[tuple[str, str]]:
+        """Names shaped like sai's log files, or the prune marker, that the
+        writer will not append to, each with the reason."""
+        found: list[tuple[str, str]] = []
+        for name in self.names():
+            if parse_name(name) is None and name != PRUNE_MARKER:
+                continue
+            target, extra = self._target(name)
+            try:
+                info = os.stat(target, follow_symlinks=False, **extra)
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                found.append((name, "a symlink"))
+            elif not stat.S_ISREG(info.st_mode):
+                found.append((name, "not a regular file"))
+            elif info.st_nlink > 1:
+                found.append((name, "hard-linked elsewhere"))
+            elif hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+                found.append((name, "owned by another user"))
+        return found
+
     def files(self) -> list[tuple[date, str, str]]:
         """Sai's log files as (day, surface, name), oldest first: regular
         files named exactly `<surface>-YYYY-MM-DD.jsonl`."""
@@ -512,7 +655,7 @@ class LogDir:
 
 def parse_name(name: str) -> tuple[date, str] | None:
     """The day and surface in a log file NAME, or None for any other name."""
-    match = _FILE.match(name)
+    match = _FILE.fullmatch(name)
     if match is None:
         return None
     try:
@@ -538,6 +681,17 @@ def log_files(root: Path | None = None) -> list[tuple[date, str, Path]]:
         return []
     with opened:
         return [(day, surface, base / name) for day, surface, name in opened.files()]
+
+
+def refused_files(root: Path | None = None) -> list[tuple[Path, str]]:
+    """Entries under ROOT that sit where a log file goes and that the
+    writer refuses, each with the reason: for `sai doctor`."""
+    base = root or directory()
+    opened = LogDir.open(base)
+    if opened is None:
+        return []
+    with opened:
+        return [(base / name, reason) for name, reason in opened.refused()]
 
 
 # Retention
@@ -574,15 +728,21 @@ class _Item:
     """One event waiting for the writer, with the home and the logging
     values of the environment it was written under."""
 
-    __slots__ = ("keep", "line", "on", "root")
+    __slots__ = ("keep", "line", "on", "root", "size")
 
     def __init__(
-        self, root: str, on: str | None, keep: str | None, line: dict[str, Any]
+        self,
+        root: str,
+        on: str | None,
+        keep: str | None,
+        line: dict[str, Any],
+        size: int,
     ) -> None:
         self.root = root
         self.on = on
         self.keep = keep
         self.line = line
+        self.size = size
 
 
 _queue: queue.Queue[_Item] = queue.Queue(maxsize=QUEUE_SIZE)
@@ -591,6 +751,9 @@ _thread_lock = threading.Lock()
 # Held by the writer while it handles one event.
 _io_lock = threading.Lock()
 _dropped = 0
+# Characters of text in the queue, under _size_lock.
+_queued_chars = 0
+_size_lock = threading.Lock()
 # Homes whose logging is off or failing, with when the writer last looked.
 _skip: dict[tuple[str, str | None, str | None], float] = {}
 # The UTC day each home was last checked for old files.
@@ -623,8 +786,14 @@ def _write(item: _Item) -> None:
         return
     with opened:
         _skip.pop(key, None)
-        line = clean(item.line)
+        line = clean(item.line, known_tokens(check=True))
         today = now().date()
+        # The file is the one for the day the event happened, which a slow
+        # write across midnight would otherwise get wrong.
+        try:
+            day = date.fromisoformat(str(line["ts"])[:10])
+        except ValueError:
+            day = today
         data = encode(line)
         if _dropped:
             lost, _dropped = _dropped, 0
@@ -634,7 +803,7 @@ def _write(item: _Item) -> None:
         # A file that cannot be appended to loses this line only; the other
         # surfaces' files may be fine.
         with suppress(OSError):
-            opened.append(file_name(line["surface"], today), data)
+            opened.append(file_name(line["surface"], day), data)
         if _pruned.get(item.root) != today:
             _pruned[item.root] = today
             with suppress(OSError):
@@ -642,8 +811,11 @@ def _write(item: _Item) -> None:
 
 
 def _drain() -> None:
+    global _queued_chars
     while True:
         item = _queue.get()
+        with _size_lock:
+            _queued_chars -= item.size
         try:
             with _io_lock:
                 _write(item)
@@ -661,37 +833,73 @@ def _start() -> None:
             _thread.start()
 
 
-def event(name: str, level: str = "info", /, **fields: Any) -> None:
-    """Queue one event for the writer. Does no I/O, never blocks, and never
-    raises. With SAI_LOG off it returns before looking at FIELDS."""
-    global _dropped
+def _target() -> tuple[str, str | None, str | None] | None:
+    """The home and logging values an event would be written under now, or
+    None when it would not be written: logging is silenced, SAI_LOG is off,
+    or the writer found this home off or unusable moments ago."""
+    if _silenced:
+        return None
+    raw_on = os.environ.get("SAI_LOG")
+    if _off(raw_on):
+        return None
+    key = (str(home()), raw_on, os.environ.get("SAI_LOG_KEEP_DAYS"))
+    skipped = _skip.get(key)
+    if skipped is not None and time.monotonic() - skipped < RECHECK_SECONDS:
+        return None
+    return key
+
+
+def active() -> bool:
+    """Whether an event written now would be queued. Cheap, and never
+    raises: callers use it to skip preparing fields nobody will read."""
     try:
-        if _silenced:
-            return
-        raw_on = os.environ.get("SAI_LOG")
-        if _off(raw_on):
-            return
-        key = (str(home()), raw_on, os.environ.get("SAI_LOG_KEEP_DAYS"))
-        skipped = _skip.get(key)
-        if skipped is not None and time.monotonic() - skipped < RECHECK_SECONDS:
+        return _target() is not None
+    except Exception:  # noqa: BLE001 - a log check must not break a command
+        return False
+
+
+def event(name: str, level: str = "info", /, **fields: Any) -> None:
+    """Queue one event for the writer. Never blocks and never raises; with
+    logging off it returns before looking at FIELDS.
+
+    The work is bounded: FIELDS are copied within a fixed budget, cleared
+    of the session tokens known at this moment. The only file access is a
+    look at the session file at most once a second, and a read of it when
+    it changed.
+    """
+    global _dropped, _queued_chars
+    try:
+        key = _target()
+        if key is None:
             return
         context = dict(_context.get())
         surface = context.pop("surface", "cli")
         extra = {k: v for k, v in {**context, **fields}.items() if v is not None}
+        budget = [EVENT_CHARS]
         line = {
             "ts": stamp(now()),
             "level": level if level in LEVELS else "info",
-            "event": str(name),
+            "event": str(name)[:MAX_UNTRUSTED],
             "surface": surface if surface in SURFACES else "cli",
             "pid": os.getpid(),
             "version": VERSION,
             "runId": RUN_ID,
             "seq": next(_seq),
-            **_snapshot(extra),
+            **_snapshot(extra, budget, known_tokens()),
         }
+        size = EVENT_CHARS - budget[0]
+        with _size_lock:
+            full = _queued_chars + size > QUEUE_CHARS
+            if not full:
+                _queued_chars += size
+        if full:
+            _dropped += 1
+            return
         try:
-            _queue.put_nowait(_Item(*key, line))
+            _queue.put_nowait(_Item(*key, line, size))
         except queue.Full:
+            with _size_lock:
+                _queued_chars -= size
             _dropped += 1
             return
         if _thread is None or not _thread.is_alive():
@@ -720,11 +928,14 @@ def reset() -> None:
     """Write what is queued, then forget cached state, so the next event
     rereads the configuration and retries a directory that failed. For
     tests."""
-    global _token_cache, _silenced, _dropped
+    global _token_key, _token_checked, _silenced, _dropped
     flush()
     _silenced = 0
     _dropped = 0
-    _token_cache = None
+    _token_key = None
+    _token_checked = 0.0
+    with _token_lock:
+        _known.clear()
     _config_cache.clear()
     _skip.clear()
     _pruned.clear()
@@ -800,8 +1011,10 @@ def tail(
     """The last COUNT events, oldest first, across every surface or one.
 
     NAME keeps one event, or a family by its prefix: `keeper` matches
-    `keeper.request`. Each file is read from its end, and no more than
-    COUNT events are kept from any one file.
+    `keeper.request`. Each file is read from its end. An event can be
+    appended after a newer one, by another process or a slow writer, so
+    COUNT + TAIL_SLACK events are read from each file, merged by time, and
+    only then cut to COUNT.
     """
     if count <= 0:
         return []
@@ -817,7 +1030,7 @@ def tail(
         lines: list[dict[str, Any]] = []
         for day in sorted(by_day, reverse=True):
             for file in by_day[day]:
-                lines += _file_tail(opened, file, count, name, chunk)
+                lines += _file_tail(opened, file, count + TAIL_SLACK, name, chunk)
             if len(lines) >= count:
                 break
     lines.sort(key=lambda line: (str(line.get("ts", "")), _number(line.get("seq"))))

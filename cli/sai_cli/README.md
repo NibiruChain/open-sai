@@ -28,7 +28,8 @@ sai config unset keeper.endpoint
 
 `config list --json` returns `{"path", "settings": {KEY: {"value",
 "source", "env", "default"}}}`, where `source` is `flag`, `env`, `file`,
-`default`, or `derived`. `list` drops credentials from URLs; `get` prints the
+`default`, `derived`, or `invalid` (a `logs.*` value sai could not read,
+which turns logging off). `list` drops credentials from URLs; `get` prints the
 exact value. An unknown key or invalid value exits 2 and lists the valid keys.
 
 The first `set`, or an `unset` that removes a value, writes the whole file
@@ -326,22 +327,29 @@ variables, or response data. sai passes none of these to the logger, and the
 logger also treats every string as untrusted:
 
 - A URL anywhere, including in `argv` and `endpoint`, is cut to its scheme,
-  host, and port, so an API key in a path or query is not written.
-- Stored session tokens, anything shaped like a JWT, and hex strings of 100
-  digits or more, such as a signature, are replaced.
-- Text Keeper or a tool returned (`keeperErrors`, `errorMsg`, `error`) is
-  cut to 300 characters and also loses hex strings of 64 digits or more.
+  host, and port, so an API key in a path or query is not written. In
+  running text a URL runs to the next space; in a command-line token or a
+  tool argument it runs to the end of the value.
+- Session tokens are replaced when the event is made, so signing out
+  afterwards cannot leave one in a line that was still waiting to be
+  written. Anything shaped like a JWT, and hex strings of 100 digits or
+  more, such as a signature, are replaced too.
+- Text Keeper or a tool returned, and error messages that can quote what
+  was typed (`keeperErrors`, `errorMsg`, `error`), are cut to 300
+  characters, lose hex strings of 64 digits or more, and end at the first
+  URL.
 - `mcp.tool_call` logs only the parameters the tool defines.
   `unknownArguments` counts the rest, and a call to a tool the server does
   not have is logged as tool `unknown` with no arguments.
-- Other strings are cut at 2000 characters.
+- Other strings are cut at 2000 characters, lists and objects at 64 items,
+  and one event at about 12,000 characters.
 
 Logging never slows a command or a trade. Events go on an in-memory queue of
-2048, and one background thread redacts and writes them, so a slow disk
-cannot delay an MCP reply or the step between reserving an intent and
-submitting it. If the queue fills, sai drops events and later writes one
-`log.dropped` line with the count. At exit sai waits up to two seconds for
-the queue to empty.
+at most 2048 events and 4 MB, and one background thread scrubs and writes
+them, so a slow disk cannot delay an MCP reply or the step between reserving
+an intent and submitting it. If the queue fills, sai drops events and later
+writes one `log.dropped` line with the count. At exit sai waits up to 0.3
+seconds for the queue to empty and drops the rest.
 
 sai writes only inside a real `$SAI_HOME/logs` directory that you own. It
 does not follow a symlink at that path, and it does not append to a symlink,
@@ -358,13 +366,15 @@ files in the directory are left alone.
 
 `sai config set logs.enabled false` or `SAI_LOG=0` turns logging off;
 nothing is then written or created. A logs setting sai cannot read, such as
-`SAI_LOG_KEEP_DAYS=two`, or a config file that does not parse, also turns
-logging off. `sai logs`, `sai doctor --no-fix`, `--help`, `--version`, and
+`SAI_LOG_KEEP_DAYS=two`, also turns logging off and prints a warning; it
+never stops a command or `sai mcp serve`. `sai config list` shows its source
+as `invalid`. `sai logs`, `sai doctor --no-fix`, `--help`, `--version`, and
 `--skill` never write log lines.
 
 Each line is appended with a single write, so concurrent `sai` processes and
-MCP servers never interleave within a line. `sai logs tail` reads each file
-from its end, so it stays fast on a large file.
+MCP servers never interleave within a line. A line goes in the file for the
+UTC day in its `ts`. `sai logs tail` reads each file from its end, so it
+stays fast on a large file, and orders events by `ts` across files.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.

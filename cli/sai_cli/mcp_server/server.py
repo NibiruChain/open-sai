@@ -676,6 +676,10 @@ class SaiMCP(FastMCP):
         `mcp.tool_result` after. Events the tool writes meanwhile, such as
         Keeper requests, carry the same `tool` and `callId`."""
         started = time.monotonic()
+        with sai_log.bind(surface="mcp"):
+            logging = sai_log.active()
+        if not logging:
+            return await self.checked_call(name, arguments)
         known, unknown = self.loggable(name, arguments)
         tool = name if known is not None else "unknown"
         with sai_log.bind(surface="mcp", tool=tool, callId=uuid.uuid4().hex[:12]):
@@ -699,7 +703,12 @@ class SaiMCP(FastMCP):
                     durationMs=round((time.monotonic() - started) * 1000),
                 )
                 raise
-            summary = result_summary(result)
+            # A large result is decoded off the event loop.
+            text = result_text(result)
+            if text is not None and len(text) > INLINE_RESULT_CHARS:
+                summary = await asyncio.to_thread(result_summary, text)
+            else:
+                summary = result_summary(text)
             sai_log.event(
                 "mcp.tool_result",
                 "info" if summary["ok"] else "warn",
@@ -713,7 +722,10 @@ class SaiMCP(FastMCP):
 
         Arguments are logged before the tool validates them, so only the
         parameters the tool defines are kept, and a call to a tool this
-        server does not have logs none (the first value is then None).
+        server does not have logs none (the first value is then None). A
+        string is marked as one whole value, so a URL in it is cut to its
+        origin through to its end. The logger bounds how much of a large
+        value it copies.
         """
         try:
             tool = self._tool_manager.get_tool(name)
@@ -721,7 +733,13 @@ class SaiMCP(FastMCP):
             if tool is None:
                 return None, len(given)
             names = tool.parameters.get("properties", {})
-            known = {key: value for key, value in given.items() if key in names}
+            known = {
+                key: sai_log.Arg(given[key])
+                if isinstance(given[key], str)
+                else given[key]
+                for key in names
+                if key in given
+            }
             return known, len(given) - len(known)
         except Exception:  # noqa: BLE001 - logging must not fail a call
             return None, 0
@@ -750,11 +768,14 @@ class SaiMCP(FastMCP):
 RESULT_FIELDS = ("code", "error", "status", "intentKey", "previewDigest")
 
 
-def result_summary(result: Any) -> dict[str, Any]:
-    """What to log about a tool's RESULT: whether it worked, its error
-    `code`, the account it acted on, and an intent key or status."""
+# A result longer than this is decoded on a worker thread.
+INLINE_RESULT_CHARS = 16 * 1024
+
+
+def result_text(result: Any) -> str | None:
+    """The JSON text a tool returned, or None."""
     content = result[0] if isinstance(result, tuple) else result
-    text = next(
+    return next(
         (
             block.text
             for block in (content if isinstance(content, Sequence) else ())
@@ -762,6 +783,11 @@ def result_summary(result: Any) -> dict[str, Any]:
         ),
         None,
     )
+
+
+def result_summary(text: str | None) -> dict[str, Any]:
+    """What to log about a tool's result TEXT: whether it worked, its error
+    `code`, the account it acted on, and an intent key or status."""
     try:
         value = json.loads(text) if text is not None else None
     except ValueError:
@@ -769,12 +795,18 @@ def result_summary(result: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"ok": True}
     summary: dict[str, Any] = {"ok": "error" not in value}
-    summary.update({k: value[k] for k in RESULT_FIELDS if k in value})
+    # A result can echo an argument, so each string is one whole value to
+    # the logger, and the error text is untrusted.
+    for name in RESULT_FIELDS:
+        if isinstance(value.get(name), str):
+            summary[name] = sai_log.Arg(value[name])
+        elif isinstance(value.get(name), (bool, int, float)):
+            summary[name] = value[name]
     if isinstance(summary.get("error"), str):
         summary["error"] = sai_log.untrusted(summary["error"])
     account = value.get("account", value.get("addr"))
     if isinstance(account, str):
-        summary["account"] = account
+        summary["account"] = sai_log.Arg(account)
     return summary
 
 

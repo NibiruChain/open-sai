@@ -221,13 +221,45 @@ def test_bound_fields_reach_every_event_and_pick_the_surface(home):
     assert "tool" not in events(home, "command.start")[0]
 
 
-def test_long_values_are_cut_and_oversized_lines_keep_the_common_fields(home):
-    log.event("big.text", text="x" * 5000)
-    log.event("big.line", items=["y" * 1500 for _ in range(40)])
-    text, line = read_logs(home)
-    assert len(text["text"]) < 2100 and "3000 more characters" in text["text"]
-    assert set(line) == COMMON | {"truncated"} and line["truncated"] == ["items"]
+def test_each_event_is_copied_within_a_fixed_budget(home):
+    """What `event` copies is bounded, whatever a caller or an MCP client
+    hands it: long text, long lists, deep nesting, and the event overall."""
+    deep: Any = "leaf"
+    for _ in range(20):
+        deep = [deep]
+    log.event("big.text", words="word " * 2000, unbroken="x" * 5000)
+    log.event(
+        "big.list", items=list(range(100_000)), keys={str(i): i for i in range(500)}
+    )
+    log.event("big.depth", deep=deep)
+    log.event("big.total", items=["y " * 900 for _ in range(60)])
+    text, listed, nested, total = read_logs(home)
+    assert len(text["words"]) < 2100 and text["words"].startswith("word word")
+    assert f"{log.CUT} " in text["words"]
+    assert text["unbroken"] == f"{log.CUT} 5000 characters"
+    assert listed["items"][: log.MAX_ITEMS] == list(range(log.MAX_ITEMS))
+    assert listed["items"][-1] == f"{log.CUT} {100_000 - log.MAX_ITEMS} more items"
+    assert len(listed["keys"]) == log.MAX_ITEMS + 1
+    assert listed["keys"][log.CUT] == 500 - log.MAX_ITEMS
+    assert json.dumps(nested["deep"]).count("[") == log.MAX_DEPTH
+    assert total["items"][-1].startswith(f"{log.CUT} ") and len(total["items"]) < 60
+    kept = sum(len(item) for item in total["items"])
+    assert kept <= log.EVENT_CHARS + log.MAX_TEXT
     assert all(len(raw) <= log.MAX_LINE for raw in raw_logs(home).splitlines())
+
+
+def test_a_copy_of_a_huge_value_takes_bounded_time():
+    huge = ["z" * 1_000_000 for _ in range(2000)]
+    start = time.monotonic()
+    for _ in range(200):
+        log._snapshot({"addr": huge}, [log.EVENT_CHARS], ())
+    assert time.monotonic() - start < 5
+
+
+def test_an_oversized_line_keeps_the_common_fields():
+    line = {key: "v" for key in log.COMMON} | {"a": "x" * log.MAX_LINE, "b": 1}
+    kept = json.loads(log.encode(line))
+    assert set(kept) == COMMON | {"truncated"} and kept["truncated"] == ["a", "b"]
 
 
 WRITER = """
@@ -276,6 +308,72 @@ def test_strings_lose_stored_tokens_and_anything_shaped_like_a_jwt(home):
     assert raw.count(log.REDACTED) >= 5
     for secret in (stored, OPAQUE_TOKEN, unsaved):
         assert secret not in raw
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        f"/v1/it's/{PATH_KEY}/query",
+        f"/query?name=o'brien&api_key={URL_KEY}",
+        f"/a(b)/{PATH_KEY}",
+        f"/a;params/{PATH_KEY};v=1",
+        f"/a,b,{PATH_KEY}",
+        f"/%27%20%22/{PATH_KEY}?q=%3C{URL_KEY}%3E",
+        f'/"quoted"/{PATH_KEY}',
+        f"/<angle>/{PATH_KEY}",
+        f"/back\\slash/{PATH_KEY}",
+        f"#frag'{URL_KEY}",
+    ],
+)
+def test_a_url_is_scrubbed_through_to_its_end(tail):
+    """Quotes, brackets, commas, semicolons, and percent escapes are all
+    legal inside a URL, so none of them ends it."""
+    url = f"https://user:{URL_PASSWORD}@keeper.example:8443{tail}"
+    site = "https://keeper.example:8443"
+    secrets = (PATH_KEY, URL_KEY, URL_PASSWORD)
+    for text in (
+        log.scrub(log.Endpoint(url), ()),
+        log.scrub(log.Arg(url), ()),
+        log.scrub(log.Arg(f"--endpoint={url}"), ()),
+        log.scrub(f"failed for {url} then retry", ()),
+        log.scrub(log.Untrusted(f"error '{url}' (see {url}); {url}, {PATH_KEY}"), ()),
+        log.scrub(f'{{"url":"{url}","next":1}}', ()),
+    ):
+        assert not any(secret in text for secret in secrets), text
+        assert site in text or log.REDACTED_URL in text
+    assert log.scrub(log.Arg(url), ()) == site
+    assert log.scrub(log.Arg(f"--endpoint={url}"), ()) == f"--endpoint={site}"
+    assert (
+        log.scrub(f"failed for {url} then retry", ()) == f"failed for {site} then retry"
+    )
+    # One whole value: a space inside it does not end the URL either.
+    assert log.scrub(log.Arg(f"{url} and {PATH_KEY}"), ()) == site
+
+
+def test_text_that_ran_into_a_url_is_not_taken_for_its_host():
+    text = log.scrub(f'{{"url":"https://keeper.example","token":"{URL_KEY}"}}', ())
+    assert URL_KEY not in text and log.REDACTED_URL in text
+    assert log.origin(f"https://host,{URL_KEY}/x") == log.REDACTED_URL
+    assert log.origin(f"https://ho'st{URL_KEY}") == log.REDACTED_URL
+
+
+def test_urls_with_awkward_characters_do_not_reach_the_log(home, keeper_stub):
+    base, _state = keeper_stub
+    site = base.removesuffix("/query")
+    tricky = f"{site}/it's/{PATH_KEY}/query?a=(b);c,d&api_key=%27{URL_KEY}"
+    assert run_cli("--endpoint", tricky, "--json", "market", "prices")[0] == 0
+    assert (
+        run_cli(f"--endpoint={tricky}", "auth", "use", f"{tricky} {PATH_KEY}")[0] == 1
+    )
+    mcp = server.create_server(settings.load({"keeper.endpoint": tricky}))
+    assert "perp" in call(mcp, "account_positions", {"addr": f"{tricky} {PATH_KEY}"})
+    assert "oracle" in call(mcp, "market_prices")
+    raw = raw_logs(home)
+    for secret in (PATH_KEY, URL_KEY, "it's", "api_key"):
+        assert secret not in raw, secret
+    start = events(home, "command.start")[0]
+    assert start["argv"] == ["--endpoint", site, "--json", "market", "prices"]
+    assert events(home, "mcp.tool_call")[0]["arguments"] == {"addr": site}
 
 
 def test_urls_are_reduced_to_their_origin():
@@ -894,7 +992,56 @@ def test_settings_that_cannot_be_read_turn_logging_off(home, monkeypatch):
     (home / "config.toml").write_text("[logs]\nkeep_days = 5\n")
     assert log.config() == (True, 5)
     monkeypatch.setenv("SAI_LOG", "0")
-    assert log.config() == (False, 5)
+    assert log.config()[0] is False
+
+
+def test_invalid_logs_settings_never_stop_a_command_or_the_server(
+    home, monkeypatch, keeper_stub
+):
+    """A typo in a logging setting turns logging off. Keeper commands and
+    the MCP server still start, with or without logging turned off."""
+    base, _state = keeper_stub
+    for on in ("0", "1", None):
+        monkeypatch.setenv("SAI_LOG_KEEP_DAYS", "fourteen")
+        if on is None:
+            monkeypatch.delenv("SAI_LOG", raising=False)
+        else:
+            monkeypatch.setenv("SAI_LOG", on)
+        resolved = settings.load({"keeper.endpoint": base})
+        assert resolved.logs_enabled is False and resolved.endpoint == base
+        assert resolved.sources["logs.keep_days"] == ("env" if on == "0" else "invalid")
+        result = CliRunner().invoke(
+            main, ["--endpoint", base, "--json", "market", "prices"]
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == {"oracle": {"tokenPricesUsd": []}}
+        # Off by choice: the other value is not looked at, so no warning.
+        assert ("logging is off" in result.stderr) == (on != "0")
+        mcp = server.create_server(resolved)
+        assert "oracle" in call(mcp, "market_prices")
+    monkeypatch.delenv("SAI_LOG_KEEP_DAYS")
+    monkeypatch.setenv("SAI_LOG", "sometimes")
+    assert settings.load({}).logs_enabled is False
+    assert run_cli("--endpoint", base, "market", "prices")[0] == 0
+    monkeypatch.delenv("SAI_LOG")
+    (home / "config.toml").write_text("[logs]\nenabled = true\nkeep_days = -3\n")
+    warnings: list[str] = []
+    resolved = settings.load({}, warn=warnings.append)
+    assert resolved.logs_enabled is False
+    assert resolved.sources["logs.keep_days"] == "invalid"
+    assert len(warnings) == 1 and "logging is off" in warnings[0]
+    result = CliRunner().invoke(main, ["--endpoint", base, "market", "prices"])
+    assert result.exit_code == 0 and "logging is off" in result.stderr
+    # The config commands still say what is wrong.
+    assert run_cli("config", "set", "logs.keep_days", "many")[0] == 2
+    shown = CliRunner().invoke(main, ["--json", "config", "list"])
+    listed = json.loads(shown.stdout)["settings"]
+    assert listed["logs.keep_days"]["source"] == "invalid"
+    assert log.flush(60) and not (home / "logs").exists()
+    # A bad Keeper endpoint is still an error.
+    monkeypatch.setenv("SAI_ENDPOINT", "not a url")
+    with pytest.raises(settings.SettingsError):
+        settings.load({})
 
 
 # Failures to log
@@ -1060,6 +1207,7 @@ def test_tokens_are_reread_after_a_failed_session_read(home):
     """A session file that cannot be read for a moment must not leave the
     redactor with an empty token list once it can be read again."""
     save_session(keeper.MAINNET_HTTP, OTHER, OPAQUE_TOKEN)
+    log.reset()  # As a new process: nothing remembered from the sign-in.
     path = home / "trader" / "sessions.json"
     path.chmod(0o000)
     try:
@@ -1069,6 +1217,67 @@ def test_tokens_are_reread_after_a_failed_session_read(home):
     assert log.redact(f"failed {OPAQUE_TOKEN}") == f"failed {log.REDACTED}"
     log.event("probe", error=f"failed {OPAQUE_TOKEN}")
     assert OPAQUE_TOKEN not in raw_logs(home)
+
+
+def test_a_token_queued_before_sign_out_is_still_redacted(home):
+    """Sign-out removes the token from the store, but Keeper honors it until
+    it expires. An event queued before the sign-out, and events written
+    after it, must not keep it."""
+    save_session(keeper.MAINNET_HTTP, ADDR, OPAQUE_TOKEN)
+    renewed = OPAQUE_TOKEN + "-renewed"
+    with log._io_lock:
+        log.event("queued", error=f"failed with {OPAQUE_TOKEN}")
+        save_session(keeper.MAINNET_HTTP, ADDR, renewed)
+        storage.delete_session(ADDR)
+        assert not storage.session_exists()
+    log.event("later", error=f"old {OPAQUE_TOKEN} new {renewed}")
+    raw = raw_logs(home)
+    assert OPAQUE_TOKEN not in raw and raw.count(log.REDACTED) == 3
+    assert log.redact(f"x {OPAQUE_TOKEN}") == f"x {log.REDACTED}"
+
+
+def test_a_token_another_process_stored_is_redacted_when_the_event_is_made(home):
+    """This process never signed in: it learns the tokens from the session
+    file, looking again at most once a second."""
+    script = (
+        "import sys;from sai_cli.core import storage;"
+        "storage.save_session({'token':sys.argv[1],'evmAddress':sys.argv[2],"
+        "'endpoint':'https://k.example/query','expiresAt':'2999-01-01T00:00:00+00:00'})"
+    )
+    env = {**os.environ, "SAI_HOME": str(home), "SAI_LOG": "0"}
+    subprocess.run(
+        [sys.executable, "-c", script, OPAQUE_TOKEN, ADDR], env=env, check=True
+    )
+    with log._io_lock:
+        log.event("queued", error=f"failed with {OPAQUE_TOKEN}")
+        (home / "trader" / "sessions.json").unlink()
+    assert OPAQUE_TOKEN not in raw_logs(home)
+    other = OPAQUE_TOKEN + "-second"
+    subprocess.run([sys.executable, "-c", script, other, OTHER], env=env, check=True)
+    time.sleep(log.TOKEN_CHECK_SECONDS + 0.2)
+    with log._io_lock:
+        log.event("queued", error=f"failed with {other}")
+        (home / "trader" / "sessions.json").unlink()
+    assert other not in raw_logs(home) and raw_logs(home).count(log.REDACTED) == 2
+
+
+def test_a_stuck_writer_delays_exit_only_briefly_and_bounds_the_queue(home):
+    assert log.EXIT_FLUSH_SECONDS <= 0.3
+    with log._io_lock:
+        log.event("first")
+        start = time.monotonic()
+        assert log.flush(log.EXIT_FLUSH_SECONDS) is False
+        assert time.monotonic() - start < 2
+        # Big events fill the queue by size long before they fill it by count.
+        for _ in range(log.QUEUE_SIZE - 10):
+            log.event("big", items=["y " * 900 for _ in range(60)])
+        assert log._queued_chars <= log.QUEUE_CHARS
+        assert log._queue.qsize() < log.QUEUE_SIZE // 2
+    lines = read_logs(home)
+    dropped = [line for line in lines if line["event"] == "log.dropped"]
+    written = sum(line["event"] == "big" for line in lines)
+    assert len(dropped) == 1 and dropped[0]["count"] + written == log.QUEUE_SIZE - 10
+    assert log._queued_chars == 0
 
 
 # sai mcp serve
@@ -1114,6 +1323,13 @@ def test_sai_mcp_serve_logs_tool_calls_and_keeps_stdout_protocol_only(home):
         process.stdin.write(rpc(None, "notifications/initialized", {}))
         info = ask(2, "tools/call", {"name": "mcp_info", "arguments": {}})
         prices = ask(3, "tools/call", {"name": "market_prices", "arguments": {}})
+        # The server writes its log in the background; wait for both calls.
+        deadline = time.monotonic() + 60
+        while (
+            sum(line["event"] == "mcp.tool_result" for line in read_logs(home)) < 2
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
         process.stdin.close()
         rest = process.stdout.read()
         stderr = process.stderr.read() if process.stderr else ""
@@ -1123,7 +1339,7 @@ def test_sai_mcp_serve_logs_tool_calls_and_keeps_stdout_protocol_only(home):
     assert json.loads(prices["content"][0]["text"])["code"] == "NOT_SENT"
     lines = read_logs(home)
     assert {line["surface"] for line in lines} == {"mcp"}
-    assert [(line["event"], line.get("tool")) for line in lines] == [
+    expected = [
         ("command.start", None),
         ("mcp.server_start", None),
         ("mcp.tool_call", "mcp_info"),
@@ -1133,7 +1349,12 @@ def test_sai_mcp_serve_logs_tool_calls_and_keeps_stdout_protocol_only(home):
         ("mcp.tool_result", "market_prices"),
         ("command.end", None),
     ]
-    assert lines[0]["command"] == "mcp serve" and lines[-1]["exitCode"] == 0
+    found = [(line["event"], line.get("tool")) for line in lines]
+    # The last line is written in the 0.3 s the server waits at exit, which
+    # a loaded machine can miss.
+    assert found in (expected, expected[:-1])
+    assert lines[0]["command"] == "mcp serve"
+    assert lines[-1].get("exitCode", 0) == 0
     assert lines[1]["keeper"] == "http://127.0.0.1:9"
     assert lines[1]["websocket"] == "ws://127.0.0.1:9"
     assert lines[5]["status"] == "not_sent" and lines[6]["code"] == "NOT_SENT"
@@ -1236,6 +1457,60 @@ def test_logs_tail_reads_from_the_end_of_large_files(home):
     assert log.tail(0) == []
 
 
+def test_logs_tail_orders_by_time_before_it_cuts(home):
+    """An older event appended after a newer one, by another process or a
+    slow writer, must not push the newer one out of `tail -n 1`."""
+    root = home / "logs"
+    root.mkdir(mode=0o700)
+    today = datetime.now(UTC).date()
+
+    def row(stamp: str, name: str, seq: int = 1) -> str:
+        return json.dumps({"ts": stamp, "event": name, "seq": seq}) + "\n"
+
+    log.file_path("cli", today, root).write_text(
+        row("2026-01-01T00:00:01.000Z", "first")
+        + row("2026-01-01T00:00:09.000Z", "newest")
+        + row("2026-01-01T00:00:05.000Z", "late.append")
+    )
+    log.file_path("mcp", today, root).write_text(
+        row("2026-01-01T00:00:08.000Z", "mcp.newest")
+        + row("2026-01-01T00:00:02.000Z", "mcp.late.append")
+    )
+    assert [line["event"] for line in log.tail(1)] == ["newest"]
+    assert [line["event"] for line in log.tail(2)] == ["mcp.newest", "newest"]
+    assert [line["event"] for line in log.tail(1, "mcp")] == ["mcp.newest"]
+    assert [line["event"] for line in log.tail(5)] == [
+        "first",
+        "mcp.late.append",
+        "late.append",
+        "mcp.newest",
+        "newest",
+    ]
+    assert run_cli("--json", "logs", "tail", "-n", "1")[1].count("newest") == 1
+
+
+def test_a_line_goes_in_the_file_for_its_own_day(home, monkeypatch):
+    """An event made just before midnight and written just after belongs to
+    the day it happened."""
+    root = home / "logs"
+    before = datetime(2026, 3, 1, 23, 59, 59, 900_000, tzinfo=UTC)
+    after = datetime(2026, 3, 2, 0, 0, 0, 100_000, tzinfo=UTC)
+    monkeypatch.setattr(log, "now", lambda: before)
+    with log._io_lock:
+        log.event("before.midnight")
+        monkeypatch.setattr(log, "now", lambda: after)
+    log.event("after.midnight")
+    assert log.flush(60)
+    first = log.file_path("cli", before.date(), root).read_text()
+    second = log.file_path("cli", after.date(), root).read_text()
+    assert "before.midnight" in first and "after.midnight" not in first
+    assert "after.midnight" in second and "before.midnight" not in second
+    assert [line["event"] for line in log.tail(2)] == [
+        "before.midnight",
+        "after.midnight",
+    ]
+
+
 def test_logs_tail_reads_only_the_end_of_a_file(home, monkeypatch):
     root = home / "logs"
     root.mkdir(mode=0o700)
@@ -1309,6 +1584,51 @@ def test_doctor_does_not_follow_a_symlinked_logs_directory(home):
     check = doctor.check_logs(doctor.context(settings.load({}), "", fix=True))
     assert check.status == "fail" and "symlink" in check.summary
     assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o755
+
+
+@posix_only
+def test_doctor_fails_on_an_entry_the_writer_refuses(home):
+    """A stale symlink or a FIFO at a daily filename blocks that surface's
+    lines, so doctor must not report a pass."""
+    root = home / "logs"
+    root.mkdir(mode=0o700)
+    today = datetime.now(UTC).date()
+    stale = log.file_path("cli", today, root)
+    stale.symlink_to(home / "missing-target")
+    context = doctor.context(settings.load({}), "", fix=True)
+    check = doctor.check_logs(context)
+    assert check.status == "fail" and "a symlink" in check.summary
+    assert str(stale) in (check.fix or "") and check.details["refused"] == [str(stale)]
+    stale.unlink()
+    fifo = log.file_path("mcp", today, root)
+    os.mkfifo(fifo)
+    outside = home / "outside.jsonl"
+    outside.write_text("")
+    linked = log.file_path("update", today, root)
+    os.link(outside, linked)
+    check = doctor.check_logs(context)
+    assert check.status == "fail"
+    assert "not a regular file" in check.summary and "hard-linked" in check.summary
+    assert check.details["refused"] == [str(fifo), str(linked)]
+    fifo.unlink()
+    linked.unlink()
+    (root / "notes.txt").symlink_to(outside)  # Not sai's name: not sai's business.
+    assert doctor.check_logs(context).status == "pass"
+
+
+@posix_only
+def test_a_file_name_with_a_trailing_newline_is_not_a_log_file(home):
+    root = home / "logs"
+    root.mkdir(mode=0o700)
+    old = datetime.now(UTC).date() - timedelta(days=400)
+    odd = root / f"cli-{old.isoformat()}.jsonl\n"
+    odd.write_text("keep me")
+    expired = old_file(root, "cli", 400)
+    assert log.parse_name(odd.name) is None
+    assert log.parse_name(expired.name) == (old, "cli")
+    log.event("first")
+    assert log.flush(60)
+    assert odd.read_text() == "keep me" and not expired.exists()
 
 
 def test_doctor_fails_when_a_file_is_in_the_way_of_the_logs_directory(home):

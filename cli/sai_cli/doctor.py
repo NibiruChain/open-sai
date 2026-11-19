@@ -355,6 +355,16 @@ def check_logs(ctx: Context) -> Check:
             SYMLINK_FIX,
             {**details, "symlinks": [str(path) for path in links]},
         )
+    blocked = log.refused_files(root)
+    if blocked:
+        listed = ", ".join(f"{path} ({reason})" for path, reason in blocked)
+        return Check(
+            "logs",
+            "fail",
+            f"sai will not write to {listed}",
+            "Move or remove: " + " ".join(str(path) for path, _ in blocked),
+            {**details, "refused": [str(path) for path, _ in blocked]},
+        )
     off = "" if on else "; logging is off (logs.enabled)"
     if root.exists() and not root.is_dir():
         return Check(
