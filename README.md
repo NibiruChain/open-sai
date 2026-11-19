@@ -20,14 +20,9 @@ sai --help
 
 The [install script](scripts/install.py) finds the newest `sai-cli` release,
 downloads its wheel, checks it against the release's `SHA256SUMS`, and runs
-<<<<<<< HEAD
-`uv tool install` on that file. Until the first release is published, the script says so and
-=======
 `uv tool install` on that file. It keeps the wheel in a cache only you can
 write to, and does not defend against other local users who can write to the
-directories above `~/.sai`. Run the same command again to move to
-a newer release. Until the first release is published, the script says so and
->>>>>>> ud/sai-release-tags
+directories above `~/.sai`. Until the first release is published, the script says so and
 installs from `main`.
 
 To build from source instead, install from Git:
