@@ -9,6 +9,11 @@ its wheel and SHA256SUMS, checks the hash, and runs `uv tool install` on the
 downloaded file. `--source` builds that release's tag from Git instead.
 Before the first release exists, it installs from `main` and says so.
 
+What it checks: the wheel it downloads must match the release's SHA256SUMS,
+and the cache it keeps the wheel in must be private to you. It does not defend
+against other local users who can write to the directories above SAI_HOME;
+they can already replace your tools.
+
 It needs only uv and the standard library, so it runs straight from GitHub:
 
     uv run https://raw.githubusercontent.com/SaiDotFun/open-sai/main/scripts/install.py
