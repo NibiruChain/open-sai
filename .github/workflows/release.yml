@@ -3,7 +3,7 @@ name: "Release"
 # `just release X.Y.Z --run` pushes the tag that starts this workflow.
 on:
   push:
-    tags: ["v*"]
+    tags: ["sai-cli/v*"]
 
 permissions:
   contents: read
@@ -20,6 +20,7 @@ jobs:
       # Create the GitHub Release and upload its files.
       contents: write
     env:
+      # The tag contains a slash (sai-cli/vX.Y.Z); every step quotes it.
       TAG: ${{ github.ref_name }}
     steps:
       # Full history so the tag can be checked against origin/main.
@@ -54,15 +55,26 @@ jobs:
       - name: Write SHA256SUMS
         run: (cd dist && sha256sum -- *) > SHA256SUMS
 
-      # A tag with a hyphen, such as v0.2.0-rc.1, is a pre-release and never
-      # becomes the latest release.
+      # `gh release create --verify-tag` only checks that the tag exists. A
+      # tag moved after checkout must not get this build's files.
+      - name: Check that the remote tag is still the built commit
+        run: |
+          uv run --no-project python scripts/check_release.py "$TAG" \
+            --built "$(git rev-parse HEAD)" \
+            --remote "https://github.com/$GITHUB_REPOSITORY"
+
+      # A version with a hyphen, such as sai-cli/v0.2.0-rc.1, is a pre-release.
+      # `sai update` picks the highest sai-cli/v* release that is not one, and
+      # does not use GitHub's single "latest" release.
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          version="${TAG#sai-cli/}"
           flags=()
-          if [[ "$TAG" == *-* ]]; then
+          if [[ "$version" == *-* ]]; then
             flags+=(--prerelease)
           fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --generate-notes "${flags[@]}" dist/* SHA256SUMS
+            --title "sai-cli $version" --generate-notes "${flags[@]}" \
+            dist/* SHA256SUMS

@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
 import shlex
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import click
 
@@ -20,11 +22,13 @@ from . import mcp_install, skill
 from .core import (
     clipboard,
     keeper,
+    log,
     reconcile,
     storage,
     stream,
     trading,
     update,
+    updater,
 )
 from .core import session as sessions
 from .core import settings as sai_settings
@@ -78,7 +82,127 @@ def session(ctx: click.Context) -> dict[str, str]:
     return sessions.load_active_session(keeper_url(ctx), ctx.obj["as_addr"])
 
 
-@click.group(invoke_without_command=True)
+def command_path(group: click.Group, args: list[str]) -> list[str]:
+    """The command names in ARGS, such as ["market", "prices"], found by
+    walking GROUP's commands past options and their values."""
+    names: list[str] = []
+    current: click.Command = group
+    skip = False
+    for token in args:
+        if skip:
+            skip = False
+            continue
+        if not isinstance(current, click.Group):
+            break
+        if token.startswith("-"):
+            option = next(
+                (
+                    param
+                    for param in current.params
+                    if isinstance(param, click.Option) and token in param.opts
+                ),
+                None,
+            )
+            skip = option is not None and not option.is_flag and not option.count
+            continue
+        found = current.commands.get(token)
+        if found is None:
+            break
+        names.append(token)
+        current = found
+    return names
+
+
+# Options that print something and exit before any command runs.
+INFO_FLAGS = ("--help", "--version", "--skill")
+
+
+def unlogged(names: list[str], argv: list[str]) -> bool:
+    """True for runs that write no log lines: reading the log, which should
+    not add to it; `sai doctor --no-fix`, which promises to change nothing
+    under $SAI_HOME; and help, version, and skill output, as `--skill` or
+    as `sai skill show`."""
+    return (
+        names[:1] == ["logs"]
+        or names[:2] == ["skill", "show"]
+        or (names == ["doctor"] and "--no-fix" in argv)
+        or any(flag in argv for flag in INFO_FLAGS)
+    )
+
+
+class LoggedGroup(click.Group):
+    """The root group: logs `command.start` and `command.end` for each run.
+
+    Events written while the command runs carry its `command`. `sai mcp
+    serve` logs to the `mcp` surface and `sai update` to `update`.
+    """
+
+    # One entry per `main` in progress; the REPL runs commands inside one.
+    runs: ClassVar[list[dict[str, Any]]] = []
+
+    def main(self, args: Any = None, *rest: Any, **extra: Any) -> Any:
+        # Nothing here may fail the command: argv is logged as given, and
+        # the log writer removes credentials later.
+        try:
+            argv = [str(a) for a in (sys.argv[1:] if args is None else args)]
+            names = command_path(self, argv)
+            quiet = unlogged(names, argv)
+        except Exception:  # noqa: BLE001 - logging must not fail a command
+            argv, names, quiet = [], [], True
+        if quiet:
+            with log.silenced():
+                return super().main(args, *rest, **extra)
+        command = " ".join(names) or ("repl" if not argv else None)
+        surface = {"mcp serve": "mcp", "update": "update"}.get(command or "", "cli")
+        run: dict[str, Any] = {"exitCode": 0}
+        started = time.monotonic()
+        with log.bind(surface=surface, command=command):
+            log.event("command.start", argv=log.argv(argv[:64]))
+            self.runs.append(run)
+            try:
+                return super().main(args, *rest, **extra)
+            except SystemExit as exc:
+                code = exc.code
+                run["exitCode"] = code if isinstance(code, int) else int(bool(code))
+                raise
+            except click.exceptions.Exit as exc:
+                run["exitCode"] = exc.exit_code
+                raise
+            except click.ClickException as exc:
+                run.update(exitCode=exc.exit_code, error=exc.format_message())
+                raise
+            except BaseException as exc:
+                run.update(exitCode=1)
+                run.setdefault("error", type(exc).__name__)
+                raise
+            finally:
+                self.runs.pop()
+                # The message can quote what the person typed.
+                if isinstance(run.get("error"), str):
+                    run["error"] = log.untrusted(run["error"])
+                log.event(
+                    "command.end",
+                    "info" if run["exitCode"] == 0 else "warn",
+                    durationMs=round((time.monotonic() - started) * 1000),
+                    **run,
+                )
+
+    def invoke(self, ctx: click.Context) -> Any:
+        """Keep the error message: in standalone mode click prints it and
+        exits before `main` can see it."""
+        try:
+            return super().invoke(ctx)
+        except click.ClickException as exc:
+            if self.runs:
+                self.runs[-1]["error"] = exc.format_message()
+            raise
+        except click.Abort:
+            if self.runs:
+                self.runs[-1]["error"] = "Aborted"
+            raise
+
+
+@click.group(cls=LoggedGroup, invoke_without_command=True)
 @click.version_option(package_name=PACKAGE, prog_name="sai")
 @click.option(
     "--skill",
@@ -130,8 +254,32 @@ def main(
     passed = (endpoint, ws_endpoint, lcd_endpoint)
     flags = {key: value for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)}
     ctx.obj.update(flags=flags, settings=None, json=json_output, as_addr=as_addr)
+    if auto_update_applies(ctx.invoked_subcommand, json_output):
+        updater.tick(warn)
     if ctx.invoked_subcommand is None:
         repl(ctx)
+
+
+# Commands that never start or announce an automatic update. `mcp` serves
+# agents over stdio; `update` and `doctor` report on updates themselves;
+# `config` must be able to turn updates off before one starts; `logs` and
+# `skill` only print.
+NO_AUTO_UPDATE = frozenset({"mcp", "update", "doctor", "config", "logs", "skill"})
+
+
+def auto_update_applies(
+    subcommand: str | None,
+    json_output: bool,
+    environ: Mapping[str, str] | None = None,
+    terminal: bool | None = None,
+) -> bool:
+    """True for a command a person runs at a terminal, outside CI."""
+    env = os.environ if environ is None else environ
+    if json_output or subcommand in NO_AUTO_UPDATE or env.get("CI"):
+        return False
+    if terminal is None:
+        terminal = sys.stdin.isatty() and sys.stderr.isatty()
+    return terminal
 
 
 def forwarded_flags(obj: dict[str, Any]) -> list[str]:
@@ -924,8 +1072,8 @@ def doctor_command(
     """Check the install, session, intent ledger, and endpoints, and fix what
     is safe to fix.
 
-    Fixes: create $SAI_HOME/trader, make it and its files private, migrate
-    the intent ledger, and reconcile unknown intents for the signed-in
+    Fixes: create $SAI_HOME/trader, make it, $SAI_HOME/logs, and their files
+    private, migrate the intent ledger, and reconcile unknown intents for the signed-in
     account with Keeper (a read; no trade is placed or cancelled). It never
     deletes or rewrites the session, and never prints its token. Each check
     prints pass, fixed, warn, fail, or skipped, with a fix for the rest. Exits
@@ -939,6 +1087,14 @@ def doctor_command(
         lcd_endpoint=lcd_url(ctx, lcd_endpoint),
     )
     checks = doctor.run_checks(doctor.context(config, fix=not no_fix, offline=offline))
+    log.event(
+        "doctor.result",
+        "info" if doctor.overall(checks) == "pass" else "warn",
+        overall=doctor.overall(checks),
+        fix=not no_fix,
+        offline=offline,
+        checks=[doctor.log_entry(check) for check in checks],
+    )
     if ctx.obj["json"]:
         click.echo(doctor.render_json(doctor.report(checks)))
     else:
@@ -1451,27 +1607,113 @@ def mcp_uninstall(
     finish(ctx, results)
 
 
+@main.group("logs")
+def logs_group() -> None:
+    """Read the JSON-lines logs that sai and its MCP server keep.
+
+    sai records each command, MCP tool call, Keeper request, and intent
+    status change under $SAI_HOME/logs, one file per surface (cli, mcp,
+    update) and UTC day. The session token is never written. Turn logging
+    off with `sai config set logs.enabled false` or SAI_LOG=0; files older
+    than logs.keep_days are deleted.
+    """
+
+
+@logs_group.command("path")
+@click.pass_context
+def logs_path(ctx: click.Context) -> None:
+    """Print the logs directory. With --json, also whether logging is on,
+    how many days are kept, and the files there."""
+    root = log.directory()
+    if not ctx.obj["json"]:
+        click.echo(root)
+        return
+    log.flush(1.0)
+    on, keep_days = log.config()
+    emit(
+        ctx,
+        {
+            "dir": str(root),
+            "enabled": on,
+            "keepDays": keep_days,
+            "files": [path.name for _day, _surface, path in log.log_files(root)],
+        },
+    )
+
+
+@logs_group.command("tail")
+@click.option(
+    "-n",
+    "count",
+    type=click.IntRange(min=1),
+    default=20,
+    show_default=True,
+    help="How many events to show.",
+)
+@click.option(
+    "--surface",
+    type=click.Choice(log.SURFACES),
+    help="Only events from the CLI, the MCP server, or the updater.",
+)
+@click.option(
+    "--event",
+    "name",
+    metavar="EVENT",
+    help="Only this event, such as keeper.request, or a family by its"
+    " prefix: `intent` matches intent.reserved and intent.status.",
+)
+@click.pass_context
+def logs_tail(
+    ctx: click.Context, count: int, surface: str | None, name: str | None
+) -> None:
+    """Show the most recent events, oldest first.
+
+    Plain output is one line per event: time (UTC), surface, level, event,
+    then its fields. With --json, each line is the stored JSON object.
+
+    \b
+    Examples:
+      sai logs tail
+      sai logs tail -n 50 --surface mcp
+      sai logs tail --event intent
+      sai --json logs tail --event keeper.request
+    """
+    for line in log.tail(count, surface, name):
+        if ctx.obj["json"]:
+            click.echo(json.dumps(line, separators=(",", ":"), default=str))
+        else:
+            click.echo(log.render(line))
+
+
 # Exit code for an install `sai update` cannot change in place.
-EXIT_UNSUPPORTED = 3
+EXIT_UNSUPPORTED = updater.EXIT_UNSUPPORTED
 
 
 def update_report(
-    installed: str, latest: str, install: update.Install
+    installed: str, latest: update.Release | None, install: update.Install
 ) -> dict[str, Any]:
-    newer = update.is_newer(latest, installed)
+    """Describe the installed version next to LATEST, or next to no release
+    when LATEST is None."""
+    newer = latest is not None and update.is_newer(latest.tag, installed)
     return {
         "installed": installed,
-        "latest": latest.removeprefix("v"),
-        "latestTag": latest,
+        "latest": latest.version if latest else None,
+        "latestTag": latest.tag if latest else None,
+        "wheelUrl": latest.wheel_url if latest else None,
+        "sha256sumsUrl": latest.sums_url if latest else None,
         "updateAvailable": newer,
         "install": install.to_json(),
-        "update": asdict(update.guidance(install, latest)) if newer else None,
+        "update": asdict(update.guidance(install)) if newer else None,
     }
 
 
 def print_update_report(report: dict[str, Any]) -> None:
     kind = report["install"]["kind"]
     click.echo(f"installed  {report['installed']} ({kind})")
+    if report["latest"] is None:
+        click.echo("latest     none")
+        click.echo("No sai-cli release is published yet; nothing to update to.")
+        return
     click.echo(f"latest     {report['latest']}")
     if not report["updateAvailable"]:
         click.echo("sai is up to date.")
@@ -1565,41 +1807,128 @@ def skill_install(ctx: click.Context, target: Path | None, force: bool) -> None:
         click.echo(skill.render_installed(result))
 
 
-@main.command("update")
-@click.option("--check", is_flag=True, help="Report the latest version only.")
-@click.option("--api-base", default=update.API_BASE, hidden=True)
-@click.option("--web-base", default=update.WEB_BASE, hidden=True)
-@click.pass_context
-def update_command(
-    ctx: click.Context, check: bool, api_base: str, web_base: str
-) -> None:
-    """Compare the installed version with the latest GitHub release.
+def log_update(outcome: updater.Outcome, *, background: bool) -> None:
+    """Record what an update run did in the log's `update` surface."""
+    log.event(
+        "update.result",
+        "warn" if outcome.status == updater.FAILED else "info",
+        status=outcome.status,
+        installed=outcome.installed,
+        target=outcome.target,
+        rolledBack=outcome.rolled_back,
+        background=background,
+        message=log.untrusted(outcome.message),
+    )
 
-    `--check` reports the installed and latest versions, how sai was
-    installed, and how to update it. Installing updates comes in a later
-    release.
-    """
-    if not check:
-        click.echo(
-            "`sai update` cannot install updates yet; that comes in a later"
-            " release. Run `sai update --check` to see the latest version and"
-            " how to update this install.",
-            err=True,
-        )
-        ctx.exit(EXIT_UNSUPPORTED)
+
+def check_update(ctx: click.Context, api_base: str, web_base: str) -> None:
+    latest: update.Release | None
     try:
         latest = update.fetch_latest(api_base=api_base, web_base=web_base)
+    except update.NoRelease:
+        latest = None
     except update.UpdateError as exc:
+        log.event("update.check", "warn", ok=False, error=log.untrusted(str(exc)))
         raise click.ClickException(f"update check failed: {exc}") from exc
-    try:
-        update.write_cache(update.Cache(latest, update.now()))
-    except OSError as exc:
-        warn(f"Warning: could not save the update check: {exc}")
-    report = update_report(package_version(), latest, update.install_kind())
+    # No release is a result too: it replaces a cached, withdrawn one.
+    changes = {"latest": latest.tag if latest else None, "checkedAt": update.now()}
+    if not updater.save_state(changes):
+        warn("Warning: could not save the update check.")
+    install = update.install_kind(web_base=web_base)
+    report = update_report(package_version(), latest, install)
+    log.event(
+        "update.check",
+        ok=True,
+        installed=report["installed"],
+        latest=report["latest"],
+        updateAvailable=report["updateAvailable"],
+        installKind=report["install"]["kind"],
+    )
     if ctx.obj["json"]:
         emit(ctx, report)
     else:
         print_update_report(report)
+
+
+@main.command("update")
+@click.option("--check", is_flag=True, help="Report the latest version only.")
+@click.option(
+    "--to",
+    "to_version",
+    metavar="X.Y.Z",
+    help="Install this release instead of the latest; the only way to go back.",
+)
+@click.option(
+    "--source",
+    is_flag=True,
+    help="Build the release from Git instead of installing its wheel.",
+)
+@click.option("--background", is_flag=True, hidden=True)
+@click.option("--api-base", default=update.API_BASE, hidden=True)
+@click.option("--web-base", default=update.WEB_BASE, hidden=True)
+@click.pass_context
+def update_command(
+    ctx: click.Context,
+    check: bool,
+    to_version: str | None,
+    source: bool,
+    background: bool,
+    api_base: str,
+    web_base: str,
+) -> None:
+    """Install the latest sai-cli release over this install.
+
+    Downloads the release wheel, checks it against the release's SHA256SUMS,
+    installs it with `uv tool install`, and then runs the new version. If any
+    step fails, the previous version stays or is put back. The `sai` path and
+    everything under $SAI_HOME stay as they are, so registered MCP clients
+    keep working; restart them to load the new version.
+
+    Only a `uv tool install` of a release or of the official Git source is
+    updated; a checkout, uvx, or other install gets a note and exit code 3.
+    sai never moves to an older version unless `--to` names one.
+
+    `--check` only reports the installed and latest versions. sai also
+    updates by itself about once a day; `sai config set update.auto false`
+    makes that notify only.
+    """
+    if check:
+        if to_version or source or background:
+            raise click.UsageError("--check takes no other update option.")
+        check_update(ctx, api_base, web_base)
+        return
+    flags = ctx.find_root().obj["flags"]
+
+    def auto() -> bool:
+        """The update.auto setting, read when the install is about to start,
+        so an opt-out made after this run began still holds. Windows locks
+        the running sai.exe, so there the background run only notifies."""
+        try:
+            return sai_settings.load(flags).update_auto and os.name != "nt"
+        except sai_settings.SettingsError:
+            return False
+
+    options = updater.Options(
+        api_base=api_base,
+        web_base=web_base,
+        to=to_version,
+        source=source,
+        allowed=auto if background else None,
+        background=background,
+    )
+    if background:
+        # The detached worker has no terminal: its record is the log's
+        # `update` surface and update.json, never stdout.
+        with contextlib.suppress(KeyboardInterrupt):
+            log_update(updater.update_now(options), background=True)
+        return
+    outcome = updater.update_now(options)
+    log_update(outcome, background=False)
+    if ctx.obj["json"]:
+        emit(ctx, outcome.to_json())
+    else:
+        click.echo(outcome.message, err=outcome.exit_code != 0)
+    ctx.exit(outcome.exit_code)
 
 
 if __name__ == "__main__":

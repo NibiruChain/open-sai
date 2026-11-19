@@ -7,12 +7,15 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+from . import log
 
 MAINNET_HTTP = "https://sai-keeper.nibiru.fi/query"
 MAINNET_WS = "wss://sai-keeper.nibiru.fi/query"
@@ -28,6 +31,20 @@ INTENTS = """query($user:String!, $key:String) { userIntents(where:{user:$user, 
 CHALLENGE = """mutation($address:String!) { createUserIntentAuthChallenge(evmAddress:$address) { nonce evmAddress expiresAt chainId typedData } }"""
 SESSION = """mutation($signature:String!, $challenge:String!) { createUserIntentSession(signature:$signature, challenge:$challenge) { token evmAddress expiresAt } }"""
 SUBMIT = """mutation($input:RecordUserIntentInput!) { recordUserIntent(input:$input) { intentKey kind lifecycleStep execActor evmAddress txHash errorCode errorMsg } }"""
+# Names for the log; a query not listed here is logged as `custom`.
+OPERATIONS = {
+    MARKETS: "markets",
+    MARKET: "market",
+    PRICES: "prices",
+    POSITIONS: "positions",
+    POSITION: "position",
+    ROUTE: "route",
+    HISTORY: "history",
+    INTENTS: "intents",
+    CHALLENGE: "challenge",
+    SESSION: "session",
+    SUBMIT: "submit",
+}
 
 
 class KeeperError(Exception):
@@ -96,7 +113,96 @@ def request(
     token: str | None = None,
     timeout: float = 20,
 ) -> dict[str, Any]:
-    """Send one GraphQL request; TIMEOUT applies to each phase in seconds."""
+    """Send one GraphQL request; TIMEOUT applies to each phase in seconds.
+
+    Logs one `keeper.request` event with the operation, the endpoint's
+    origin, the outcome, and the duration. The variables, the token,
+    and the response data are never logged.
+    """
+    started = time.monotonic()
+    outcome: dict[str, Any] = {"status": "error"}
+    try:
+        data = _request(endpoint, query, variables, token, timeout, outcome)
+        outcome["status"] = "ok"
+        return data
+    except NotSent:
+        outcome["status"] = "not_sent"
+        raise
+    except AdmissionRejected:
+        outcome["status"] = "rejected"
+        raise
+    except KeeperError as exc:
+        outcome["error"] = str(exc)
+        raise
+    finally:
+        _log_request(endpoint, query, variables, token, started, outcome)
+
+
+def _log_request(
+    endpoint: str,
+    query: str,
+    variables: dict[str, Any] | None,
+    token: str | None,
+    started: float,
+    outcome: dict[str, Any],
+) -> None:
+    """Log one request. Never raises, so it cannot replace the request's
+    own error, and parses nothing: the log writer reduces the endpoint to
+    its origin later."""
+    try:
+        account = next(
+            (
+                value
+                for name in ("trader", "user", "address")
+                if is_address(value := (variables or {}).get(name))
+            ),
+            None,
+        )
+        log.event(
+            "keeper.request",
+            "info" if outcome.get("status") == "ok" else "warn",
+            operation=OPERATIONS.get(query, "custom"),
+            endpoint=log.endpoint(endpoint),
+            addr=account,
+            authenticated=bool(token),
+            durationMs=round((time.monotonic() - started) * 1000),
+            **outcome,
+        )
+    except Exception:  # noqa: BLE001, S110 - logging must not change the outcome
+        pass
+
+
+def _graphql_errors(errors: Any) -> list[dict[str, Any]]:
+    """The code and message of the first few GraphQL errors, for the log.
+
+    Keeper's message can echo input, such as the signature sent to the
+    session mutation, so it is marked untrusted: the log writer cuts it
+    short and removes long hex strings and tokens.
+    """
+    found: list[dict[str, Any]] = []
+    for item in errors[:3] if isinstance(errors, list) else []:
+        if not isinstance(item, dict):
+            continue
+        extensions = item.get("extensions")
+        code = extensions.get("code") if isinstance(extensions, dict) else None
+        found.append(
+            {
+                "code": log.untrusted(str(code)) if code is not None else None,
+                "message": log.untrusted(str(item.get("message", ""))),
+            }
+        )
+    return found
+
+
+def _request(
+    endpoint: str,
+    query: str,
+    variables: dict[str, Any] | None,
+    token: str | None,
+    timeout: float,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
+    """Send the request and record what Keeper answered in OUTCOME."""
     try:
         check_url(endpoint, "Keeper")
     except ValueError as exc:
@@ -109,6 +215,7 @@ def request(
             headers=headers,
             timeout=timeout,
         )
+        outcome["httpStatus"] = response.status_code
         response.raise_for_status()
         result = response.json()
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -119,6 +226,7 @@ def request(
         raise KeeperError("Keeper returned an invalid response")
     if result.get("errors"):
         errors = result["errors"]
+        outcome["keeperErrors"] = _graphql_errors(errors)
         if (
             query == SUBMIT
             and not result.get("data")

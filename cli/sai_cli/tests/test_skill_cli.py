@@ -25,6 +25,11 @@ import check_dist
 PAGES = ("cli", "mcp", "trading-safety", "references/contracts")
 
 
+# Directories the fixture puts beside the install target: HOME, and
+# SAI_HOME, where the commands under test write their log.
+OTHER_DIRS = ("home", "sai-home")
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch) -> Path:
     """A throwaway HOME, so no test touches the real ~/.agents."""
@@ -355,7 +360,7 @@ def test_install_relative_dir_stages_beside_the_destination(
     result = invoke("skill", "install", "--dir", "sai", "--force")
     assert result.exit_code == 0, result.output
     assert tree(tmp_path / "sai") == repo_files()
-    assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
+    assert [p.name for p in tmp_path.iterdir() if p.name not in OTHER_DIRS] == ["sai"]
 
 
 def test_failed_replacement_keeps_the_previous_copy(home, tmp_path, monkeypatch):
@@ -377,7 +382,7 @@ def test_failed_replacement_keeps_the_previous_copy(home, tmp_path, monkeypatch)
         skill.install(skill.packaged_files(), target, force=True)
     monkeypatch.undo()
     assert snapshot(target) == before
-    assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
+    assert [p.name for p in tmp_path.iterdir() if p.name not in OTHER_DIRS] == ["sai"]
 
 
 def interrupt_publish(monkeypatch, target: Path) -> None:
@@ -403,7 +408,7 @@ def test_interrupted_replacement_puts_the_directory_back(home, tmp_path, monkeyp
         skill.install(skill.packaged_files(), target, force=True)
     monkeypatch.undo()
     assert snapshot(target) == before
-    assert [p.name for p in tmp_path.iterdir() if p.name != "home"] == ["sai"]
+    assert [p.name for p in tmp_path.iterdir() if p.name not in OTHER_DIRS] == ["sai"]
 
 
 def test_interrupted_replacement_puts_the_symlink_back(home, tmp_path, monkeypatch):

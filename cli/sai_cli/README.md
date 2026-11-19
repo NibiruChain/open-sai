@@ -10,12 +10,14 @@ The CLI connects to mainnet Keeper by default.
 the CLI and `sai mcp serve`. Each setting comes from the first of these that sets
 it: a flag, an environment variable, the file, the mainnet default.
 
-| Key                  | Flag             | Variable           | Default                 |
-| -------------------- | ---------------- | ------------------ | ----------------------- |
-| `keeper.endpoint`    | `--endpoint`     | `SAI_ENDPOINT`     | mainnet Keeper GraphQL  |
-| `keeper.ws_endpoint` | `--ws-endpoint`  | `SAI_WS_ENDPOINT`  | derived from the above  |
-| `lcd.endpoint`       | `--lcd-endpoint` | `SAI_LCD_ENDPOINT` | `https://lcd.nibiru.fi` |
-| `update.auto`        |                  | `SAI_UPDATE_AUTO`  | `true`                  |
+| Key                  | Flag             | Variable            | Default                 |
+| -------------------- | ---------------- | ------------------- | ----------------------- |
+| `keeper.endpoint`    | `--endpoint`     | `SAI_ENDPOINT`      | mainnet Keeper GraphQL  |
+| `keeper.ws_endpoint` | `--ws-endpoint`  | `SAI_WS_ENDPOINT`   | derived from the above  |
+| `lcd.endpoint`       | `--lcd-endpoint` | `SAI_LCD_ENDPOINT`  | `https://lcd.nibiru.fi` |
+| `update.auto`        |                  | `SAI_UPDATE_AUTO`   | `true`                  |
+| `logs.enabled`       |                  | `SAI_LOG`           | `true`                  |
+| `logs.keep_days`     |                  | `SAI_LOG_KEEP_DAYS` | `14`                    |
 
 ```bash
 sai config list                      # every key, its value, and its source
@@ -26,7 +28,8 @@ sai config unset keeper.endpoint
 
 `config list --json` returns `{"path", "settings": {KEY: {"value",
 "source", "env", "default"}}}`, where `source` is `flag`, `env`, `file`,
-`default`, or `derived`. `list` drops credentials from URLs; `get` prints the
+`default`, `derived`, or `invalid` (a `logs.*` value sai could not read,
+which turns logging off). `list` drops credentials from URLs; `get` prints the
 exact value. An unknown key or invalid value exits 2 and lists the valid keys.
 
 The first `set`, or an `unset` that removes a value, writes the whole file
@@ -44,6 +47,77 @@ and the CLI derives the WebSocket from the Keeper endpoint instead. So
 `sai --endpoint URL` never pairs `URL` with the WebSocket of the Keeper in the
 file. The per-command `--ws-endpoint` and `--lcd-endpoint` options still
 work and override the setting for that command.
+
+## Updates
+
+```bash
+sai update                # install the latest release
+sai update --check        # report the installed and latest versions only
+sai update --to 0.2.0     # install that release; the only way to go back
+sai update --source       # build the release from Git instead of its wheel
+```
+
+`sai update` works in this order, so a release that cannot start never
+replaces a working `sai`:
+
+1. Download the release wheel and `SHA256SUMS` and check the hash.
+2. Install the wheel into a throwaway environment, run its `sai --version`,
+   and import the CLI and the MCP server there.
+3. Copy the tool's environment beside it, to roll back to. As a spare, keep
+   a verified wheel of the current version: the one in
+   `$SAI_HOME/cache/wheels` if its hash still matches, or the current release
+   downloaded and checked again. With neither, stop and leave the install
+   alone.
+4. Install the wheel with `uv tool install --force`.
+5. Run the installed `sai --version` and the imports again. If that fails, or
+   on Ctrl-C, swap the copy back, which needs no network and no package
+   index. Only if that fails is the spare wheel reinstalled.
+
+It exits 0 when sai is updated or already current and 1 on a failure. uv and
+the checks run in a neutral directory with an isolated Python, so nothing is
+read from the directory you are in.
+
+Only a `uv tool install` of a release, or of this repository's Git source, is
+updated. A checkout, a `uvx` run, a fork, or any other install gets a note and
+exit code 3; `sai doctor` warns about those in its `install` check. sai never
+moves to an older version by itself. `sai update` also stops with exit code 3,
+before changing anything, when uv's current tool or executable directory is
+not where this `sai` is installed, or when the `sai` on your `PATH` now
+belongs to another install.
+
+The update does not move `~/.local/bin/sai` or change anything else under
+`$SAI_HOME`, so MCP registrations keep working. A running `sai mcp serve`
+keeps the old code until its client restarts; `mcp_info` reports
+`restartNeeded`.
+
+With `update.auto` on, which is the default, sai also updates by itself. A
+command run in a terminal starts `sai update --background` detached, at most
+once a day, and does not wait for it. A later command prints one line on
+stderr when the update finished or failed. With `update.auto` off, the
+background run only checks, and the notice says a release is available.
+Nothing is started or printed under `--json`, when `CI` is set, without a
+terminal, or by `sai mcp`, `sai update`, `sai doctor`, `sai config`,
+`sai logs`, and `sai skill`. So `sai config set update.auto false` never
+starts an update, and a background run reads the setting again right before
+it installs. On Windows the background run only notifies.
+
+`$SAI_HOME/update.json` holds the last check and the last update result, and
+`update.lock` guards it. `update-cache.lock` is held for a whole install, so
+two tools that share one `SAI_HOME` do not prune each other's wheels; the
+cache is pruned only after a new version is verified. `$SAI_HOME`, `cache`,
+and `cache/wheels` must belong to you and not be writable by others; sai
+tightens its own and refuses anyone else's. `sai doctor` reads it for its `version` check, which
+warns when sai is behind or the last update failed. Two files sit beside the
+tool's environment in uv's tool directory, shared by every `SAI_HOME` that
+uses the same `sai`: `.sai-cli-update.lock`, held for a whole install, and
+`.sai-cli-release.json`, which records the release, the wheel's SHA-256, and
+a hash of the installed files. An install from a local wheel counts as a
+release install only while that record matches what is installed.
+
+These checks guard against a bad release, a failed network, two commands
+racing, and mistakes such as uv pointed at another directory. They are not a
+defense against someone who can already write to uv's tool directory or to
+`$SAI_HOME`; that person can replace `sai` outright.
 
 ## Connecting
 
@@ -234,11 +308,13 @@ marks it `absent` and trading resumes. A connection that fails before the
 request is sent marks the intent `not_sent`, which does not block. Keeper
 admission does not establish execution or finality.
 
-`sai doctor` checks the install, `$SAI_HOME/trader`, the session, the intent
-ledger, and the Keeper HTTP, WebSocket, and LCD endpoints, and fixes what it
-safely can. It creates `$SAI_HOME/trader`, removes group and other access
-from it and the files sai keeps there (the connected accounts, the ledger and its
-journals, and the shell history), migrates the intent ledger, and reconciles
+`sai doctor` checks the install, the version, `$SAI_HOME/trader`,
+`$SAI_HOME/logs`, the session, the intent ledger, and the Keeper HTTP,
+WebSocket, and LCD endpoints, and fixes what it safely can. It creates
+`$SAI_HOME/trader`, removes group and other access from it and the files sai
+keeps there (the connected accounts, the ledger and its journals, and the
+shell history) and from the logs directory and its log files, migrates the
+intent ledger, and reconciles
 unknown intents for the signed-in account the way `sai intent status` does
 (a Keeper read; it never places or cancels a trade). It never deletes or
 rewrites the session, never writes through a symlink in `$SAI_HOME/trader`,
@@ -248,7 +324,7 @@ temporary copy, so it writes nothing at all.
 Each check prints pass, fixed, warn, fail, or skipped, with what changed or
 the command that fixes it. Doctor exits 1 if any check still fails;
 `sai --json doctor` prints the same report as JSON. `--no-fix` reports
-without changing anything, and `--offline` skips the network checks, which
+without changing anything, log lines included, and `--offline` skips the network checks, which
 otherwise run in parallel and stop after 7 seconds in total. The
 endpoints come from [Settings](#settings); `sai doctor --ws-endpoint` and
 `--lcd-endpoint` override them for one run.
@@ -288,6 +364,136 @@ directory or link aside, moves the new one into place, and only then deletes
 the old one; if anything stops the move, Ctrl-C included, the old one is put
 back. It refuses to replace
 `DIR` while the current directory is inside it.
+
+## Logs
+
+The CLI and the MCP server append what they do to `$SAI_HOME/logs` (default
+`~/.sai/logs`), one JSON object per line. Each surface has one file per UTC
+day: `cli-YYYY-MM-DD.jsonl`, `mcp-YYYY-MM-DD.jsonl` for `sai mcp serve`, and
+`update-YYYY-MM-DD.jsonl` for `sai update`. The directory has mode 0700 and
+the files 0600.
+
+```bash
+sai logs path                        # the directory
+sai logs tail                        # the last 20 events, oldest first
+sai logs tail -n 50 --surface mcp    # cli, mcp, or update
+sai logs tail --event keeper.request
+sai logs tail --event intent         # a prefix matches intent.reserved, intent.status, intent.keeper
+sai --json logs tail                 # the stored JSON objects, one per line
+```
+
+Plain `tail` output is one line per event: UTC time, surface, level, event,
+then `key=value` fields. `sai --json logs path` returns `{"dir", "enabled",
+"keepDays", "files"}`.
+
+Every line has these fields:
+
+| Field     | Meaning                                                        |
+| --------- | -------------------------------------------------------------- |
+| `ts`      | UTC time with milliseconds, such as `2026-11-18T14:03:07.412Z` |
+| `level`   | `info`, `warn`, or `error`                                     |
+| `event`   | The event name, below                                          |
+| `surface` | `cli`, `mcp`, or `update`; also the file the line is in        |
+| `pid`     | Process id                                                     |
+| `version` | The `sai` version that wrote the line                          |
+| `runId`   | One id per process; it ties a command's lines together         |
+| `seq`     | The line's number within the run                               |
+
+Lines written while a CLI command runs also carry `command`, such as `market
+prices`. Lines written during an MCP tool call carry `tool` and `callId`.
+
+| Event              | When                                    | Fields                                                                                               |
+| ------------------ | --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `command.start`    | A CLI command starts                    | `command`, `argv`                                                                                    |
+| `command.end`      | It ends                                 | `exitCode`, `durationMs`, `error`                                                                    |
+| `mcp.server_start` | `sai mcp serve` starts                  | `keeper`, `websocket`, `lcd`                                                                         |
+| `mcp.tool_call`    | An agent calls a tool                   | `tool`, `callId`, `arguments`, `unknownArguments`                                                    |
+| `mcp.tool_result`  | The tool returns                        | `ok`, `code`, `error`, `errorType`, `account`, `status`, `intentKey`, `previewDigest`, `durationMs`  |
+| `keeper.request`   | Each Keeper GraphQL request             | `operation`, `endpoint`, `status`, `httpStatus`, `keeperErrors`, `error`, `addr`, `authenticated`, `durationMs` |
+| `intent.reserved`  | A trade intent gets its key             | `intentKey`, `kind`, `status`, `addr`, `tradeId`, `endpoint`                                         |
+| `intent.status`    | Its local status changes                | `intentKey`, `kind`, `previous`, `status`, `addr`, `endpoint`                                        |
+| `intent.keeper`    | Keeper reports its record of the intent | `intentKey`, `kind`, `lifecycleStep`, `execActor`, `errorCode`, `errorMsg`, `txHash`, `found`, `addr` |
+| `session.saved`    | Sign-in stores a session                | `addr`, `expiresAt`, `endpoint`, `connectedAccounts`                                                 |
+| `session.active`   | `auth use` switches account             | `addr`                                                                                               |
+| `session.removed`  | `auth logout` removes one               | `addr`, `connectedAccounts`                                                                          |
+| `session.expired`  | A command finds the session expired     | `addr`, `expiresAt`                                                                                  |
+| `doctor.result`    | `sai doctor` finishes                   | `overall`, `fix`, `offline`, `checks`                                                                |
+| `update.check`     | `sai update --check` finishes           | `ok`, `installed`, `latest`, `updateAvailable`, `installKind`, `error`                               |
+| `update.scheduled` | A command starts the daily background update | none                                                                                            |
+| `update.result`    | `sai update` or the background update finishes | `status`, `installed`, `target`, `rolledBack`, `background`, `message`                        |
+| `log.dropped`      | Events were lost because the disk was slow | `count`                                                                                           |
+
+A `keeper.request` has `status` `ok`, `error`, `rejected` (Keeper refused
+admission), or `not_sent` (the connection failed first). Its `operation` is
+`markets`, `prices`, `positions`, `history`, `intents`, `submit`, and so on.
+To follow one trade, filter on its `intentKey`: `intent.reserved` (status
+`unknown`), then `keeper.request` with operation `submit`, then
+`intent.status` as it becomes `accepted`, `rejected`, `not_sent`, `terminal`,
+or `absent`, with `intent.keeper` lines for each time `intent status` asked
+Keeper.
+
+The logs never hold the session token, a signature, clipboard text, request
+variables, or response data. sai passes none of these to the logger, and the
+logger also treats every string as untrusted:
+
+- A URL anywhere, including in `argv` and `endpoint`, is cut to its scheme,
+  host, and port, so an API key in a path or query is not written. In
+  running text a URL runs to the next space; in a command-line token or a
+  tool argument it runs to the end of the value.
+- Session tokens this process has seen are replaced when the event is
+  made, so signing out afterwards cannot leave one in a line that was
+  still waiting to be written. The background writer rereads the session
+  store and replaces its tokens again. Anything shaped like a JWT, and hex
+  strings of 100 digits or more, such as a signature, are replaced too.
+- Text Keeper or a tool returned, and error messages that can quote what
+  was typed (`keeperErrors`, `errorMsg`, `error`), are cut to 300
+  characters, lose hex strings of 64 digits or more, and end at the first
+  URL.
+- `mcp.tool_call` logs only the parameters the tool defines.
+  `unknownArguments` counts the rest, and a call to a tool the server does
+  not have is logged as tool `unknown` with no arguments.
+- Other strings are cut at 2000 characters, lists and objects at 64 items,
+  and one event at 512 values and about 12,000 characters. A list or object
+  passed where a tool takes a single value is logged as its type and length.
+
+Known limit: if another process stores a session token and removes it again
+before this process's writer reaches a line that quotes it, only the token's
+shape can catch it. Sai session tokens are JWTs, which are always removed by
+shape. A token of some other form in that window would be written.
+
+Logging never slows a command or a trade. Events go on an in-memory queue of
+at most 2048 events and 4 MB, and one background thread scrubs and writes
+them, so a slow disk cannot delay an MCP reply or the step between reserving
+an intent and submitting it. If the queue fills, sai drops events and later
+writes one `log.dropped` line with the count. At exit sai waits up to 0.3
+seconds for the queue to empty and drops the rest.
+
+sai writes only inside a real `$SAI_HOME/logs` directory that you own. It
+does not follow a symlink at that path, or on Windows a junction or other
+reparse point, and it does not append to a symlink,
+a FIFO, a file with other hard links, or a file someone else owns. It
+removes group and other access from the directory and from a log file before
+appending. A logs directory that cannot be written never fails a command;
+the lines are lost. `sai doctor` reports a symlink or a file at the logs
+path.
+
+Files older than `logs.keep_days` days, counting today, are deleted once per
+UTC day. A long-running MCP server checks again when the day changes. Only
+files named `cli-`, `mcp-`, or `update-YYYY-MM-DD.jsonl` are deleted; other
+files in the directory are left alone.
+
+`sai config set logs.enabled false` or `SAI_LOG=0` turns logging off;
+nothing is then written or created. A logs setting sai cannot read, such as
+`SAI_LOG_KEEP_DAYS=two` or a `logs` entry that is not a table, also turns
+logging off and prints a warning; it never stops a command or `sai mcp
+serve`. `sai config list` shows its source
+as `invalid`. `sai logs`, `sai doctor --no-fix`, `--help`, `--version`, and
+`--skill` never write log lines.
+
+Each line is appended with a single write, so concurrent `sai` processes and
+MCP servers never interleave within a line. A line goes in the file for the
+UTC day in its `ts`. `sai logs tail` reads each file from its end, so it
+stays fast on a large file, and orders events by `ts` across files.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.
