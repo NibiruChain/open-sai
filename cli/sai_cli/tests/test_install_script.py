@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -175,6 +176,50 @@ def test_a_relative_sai_home_still_gives_uv_an_absolute_wheel(fake_uv, tmp_path)
     wheel = Path(installs(fake_uv)[0][2])
     assert wheel.is_absolute()
     assert wheel.parent == tmp_path / "relative-home" / "cache" / "wheels"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_a_loose_wheel_cache_is_made_private_before_uv_reads_it(fake_uv, tmp_path):
+    """An existing cache that other users can write to would let them swap
+    the verified wheel. Ours is tightened to 0700 first."""
+    home = tmp_path / "sai-home"
+    wheels = home / "cache" / "wheels"
+    wheels.mkdir(parents=True)
+    for directory in (home, home / "cache", wheels):
+        directory.chmod(0o777)
+    with Stub(release_routes(WHEELS)) as stub:
+        result = run(fake_uv, stub)
+    assert result.returncode == 0, result.stderr
+    for directory in (home, home / "cache", wheels):
+        assert directory.stat().st_mode & 0o777 == 0o700, directory
+    assert len(installs(fake_uv)) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership")
+def test_a_cache_owned_by_someone_else_is_refused(tmp_path, monkeypatch):
+    home = tmp_path / "sai-home"
+    (home / "cache" / "wheels").mkdir(parents=True)
+    monkeypatch.setenv("SAI_HOME", str(home))
+    assert install.private_cache() == home / "cache" / "wheels"
+    # The same directories, seen by a different user.
+    other = os.getuid() + 1
+    monkeypatch.setattr(install.os, "getuid", lambda: other)
+    with pytest.raises(install.LookupFailed, match="belongs to another user"):
+        install.private_cache()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership")
+def test_a_cache_that_is_not_ours_stops_the_install(fake_uv, tmp_path):
+    """Run as a person would: a cache that cannot be made private means
+    exit 1 before uv runs."""
+    home = tmp_path / "sai-home"
+    home.mkdir()
+    (home / "cache").write_text("not a directory")
+    with Stub(release_routes(WHEELS)) as stub:
+        result = run(fake_uv, stub)
+    assert result.returncode == 1
+    assert "could not keep the wheel" in result.stderr
+    assert calls(fake_uv) == []
 
 
 def test_a_symlinked_wheel_cache_is_refused(fake_uv, tmp_path):
