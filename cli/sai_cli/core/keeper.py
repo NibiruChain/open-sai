@@ -299,10 +299,18 @@ def parse_wallet(output: str) -> UdWallet | None:
     return None
 
 
-# How `ud evm wallet show` says it has no wallet by that name.
-UD_UNKNOWN_WALLET = re.compile(
-    r"is not in pass entry|unknown wallet|no such wallet", re.IGNORECASE
-)
+def ud_says_unknown(wallet: str, stderr: str) -> bool:
+    """Whether `ud evm wallet show` reported exactly "no wallet by that name".
+
+    The whole final line must be ud's missing-wallet message for this name.
+    Any other text, even one that mentions an unknown wallet, is a failed
+    lookup, so a broken ud never looks like a confirmed absence.
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return False
+    pattern = rf"(Error: )?wallet {re.escape(wallet)} is not in pass entry \S+"
+    return re.fullmatch(pattern, lines[-1]) is not None
 
 
 def ud_wallet(wallet: str) -> UdWallet | None:
@@ -330,7 +338,7 @@ def ud_wallet(wallet: str) -> UdWallet | None:
     except (OSError, subprocess.SubprocessError) as exc:
         raise UdUnavailable(f"`ud evm wallet show {wallet}` did not run") from exc
     if proc.returncode != 0:
-        if UD_UNKNOWN_WALLET.search(proc.stderr):
+        if ud_says_unknown(wallet, proc.stderr):
             return None
         raise UdUnavailable(f"`ud evm wallet show {wallet}` failed")
     found = parse_wallet(proc.stdout)

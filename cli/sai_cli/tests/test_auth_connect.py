@@ -1055,3 +1055,25 @@ def test_login_stops_when_ud_fails_and_there_is_no_keystore(
     assert result.returncode != 0
     assert "check that ud works" in result.stderr
     assert keeper_auth["signatures"] == []
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("Error: wallet dev is not in pass entry evm/wallets\n", True),
+        ("wallet dev is not in pass entry evm/wallets", True),
+        ("warning: slow\nError: wallet dev is not in pass entry evm/wallets\n", True),
+        # Another wallet's name, or other text that mentions an unknown wallet,
+        # is a failed lookup and must not look like a confirmed absence.
+        ("Error: wallet other is not in pass entry evm/wallets\n", False),
+        ("Error: invalid table `unknown wallet` in evm/wallets\n", False),
+        ("Error: no such wallet store\n", False),
+        (
+            "Error: wallet dev is not in pass entry evm/wallets\nError: gpg failed\n",
+            False,
+        ),
+        ("", False),
+    ],
+)
+def test_ud_says_unknown_matches_only_the_exact_message(stderr, expected) -> None:
+    assert keeper.ud_says_unknown("dev", stderr) is expected
