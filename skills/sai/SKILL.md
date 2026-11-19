@@ -19,8 +19,9 @@ Settings live in `~/.sai/config.toml` (under `$SAI_HOME` when set), shared
 with the MCP server. Change them with `sai config set KEY VALUE` and `sai
 config unset KEY`, not by editing the file or MCP client config. `sai --json
 config list` shows each key's value and source (`flag`, `env`, `file`,
-`default`, `derived`). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
-derives it from the Keeper endpoint), `lcd.endpoint`, `update.auto`. A flag
+`default`, `derived`, or `invalid` for an unreadable `logs.*` value). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
+derives it from the Keeper endpoint), `lcd.endpoint`, `update.auto`,
+`logs.enabled`, `logs.keep_days`. A flag
 such as `--endpoint` or a variable such as `SAI_ENDPOINT` overrides the file
 for one run.
 
@@ -35,6 +36,20 @@ with Keeper, and lists each change under `changes`; it never trades. Each
 check has a `status` (pass, fixed, warn, fail, or skipped) and a `fix`
 command. Show the person what doctor changed, then the checks that still fail
 and their fixes. Use `--no-fix` to look without changing anything.
+
+To see what happened, read the logs with `sai --json logs tail -n 50`. sai
+and its MCP server record each command, MCP tool call, Keeper request, and
+intent status change as one JSON object per line in `~/.sai/logs`; the
+session token is never there. Narrow with `--surface cli|mcp|update` and
+`--event NAME`, where a prefix such as `intent`, `keeper`, or `mcp` matches
+the family. Useful fields: `command.end` has `exitCode` and `error`;
+`mcp.tool_result` has `code`, `account`, and `durationMs`; `keeper.request`
+has `operation`, `status`, `httpStatus`, and `keeperErrors`; `intent.status`
+has `intentKey`, `previous`, and `status`. `runId` ties one process's lines
+together and `callId` one MCP tool call's. Check here first after a timeout,
+an `OUTCOME_UNKNOWN`, or an error the person reports from an earlier run.
+`sai logs path` prints the directory, and `mcp_info` reports it as
+`logs.dir`.
 
 `sai --json update --check` reports the installed and latest versions.
 `sai update` installs the latest release and keeps the same `sai` path; ask

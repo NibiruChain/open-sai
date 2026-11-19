@@ -44,7 +44,7 @@ from typing import Any
 
 import httpx
 
-from . import update
+from . import log, update
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -1160,5 +1160,6 @@ def tick(
                 write_state(changes)
         if launch:
             start(background_command())
+            log.event("update.scheduled")
     except Exception:  # noqa: BLE001 - an update problem must not break a command
         return

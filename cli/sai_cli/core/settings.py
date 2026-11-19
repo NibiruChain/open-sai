@@ -31,7 +31,10 @@ from . import keeper, margin, stream
 
 FILE_NAME = "config.toml"
 LOCK_NAME = ".config.lock"
-SOURCES = ("flag", "env", "file", "default", "derived")
+SOURCES = ("flag", "env", "file", "default", "derived", "invalid")
+# Settings that only switch a side feature. A bad value for one of these
+# turns that feature off instead of stopping the command.
+LENIENT_SECTIONS = frozenset({"logs"})
 # Lower rank wins.
 _RANK = {"flag": 0, "env": 1, "file": 2, "default": 3}
 _TRUE = ("true", "1", "yes", "on")
@@ -40,6 +43,14 @@ _FALSE = ("false", "0", "no", "off")
 
 class SettingsError(ValueError):
     """A setting, its value, or the config file is invalid."""
+
+
+@dataclass(frozen=True)
+class Invalid:
+    """A value in the config file that failed its check, kept so `resolve`
+    can turn the feature off instead of failing. MESSAGE says why."""
+
+    message: str
 
 
 class UneditableSection(SettingsError):
@@ -52,8 +63,8 @@ class Setting:
 
     key: str
     env: str
-    kind: str  # "url" or "bool"
-    default: str | bool | None
+    kind: str  # "url", "bool", or "int"
+    default: str | bool | int | None
     help: str
     flag: str | None = None
     schemes: tuple[str, ...] = ()
@@ -110,6 +121,27 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help=("Install newer sai releases automatically. false means notify only."),
     ),
+    Setting(
+        key="logs.enabled",
+        env="SAI_LOG",
+        kind="bool",
+        default=True,
+        help=(
+            "Record commands, MCP tool calls, Keeper requests, and intent"
+            " status changes as JSON lines under $SAI_HOME/logs. The session"
+            " token is never written. false writes nothing."
+        ),
+    ),
+    Setting(
+        key="logs.keep_days",
+        env="SAI_LOG_KEEP_DAYS",
+        kind="int",
+        default=14,
+        help=(
+            "Days of log files to keep, counting today. Older files are"
+            " deleted, at most once a day."
+        ),
+    ),
 )
 BY_KEY: Mapping[str, Setting] = MappingProxyType({s.key: s for s in SETTINGS})
 KEYS = tuple(BY_KEY)
@@ -125,13 +157,17 @@ class Settings:
     lcd_endpoint: str
     update_auto: bool
     sources: Mapping[str, str]
+    logs_enabled: bool = True
+    logs_keep_days: int = 14
 
-    def value(self, key: str) -> str | bool:
+    def value(self, key: str) -> str | bool | int:
         return {
             "keeper.endpoint": self.endpoint,
             "keeper.ws_endpoint": self.ws_endpoint,
             "lcd.endpoint": self.lcd_endpoint,
             "update.auto": self.update_auto,
+            "logs.enabled": self.logs_enabled,
+            "logs.keep_days": self.logs_keep_days,
         }[setting(key).key]
 
 
@@ -145,7 +181,7 @@ def setting(key: str) -> Setting:
         ) from None
 
 
-def parse_value(key: str, raw: str) -> str | bool:
+def parse_value(key: str, raw: str) -> str | bool | int:
     """Parse RAW, as typed in a flag, variable, or `sai config set`."""
     spec = setting(key)
     text = raw.strip()
@@ -155,15 +191,27 @@ def parse_value(key: str, raw: str) -> str | bool:
         if text.lower() in _FALSE:
             return False
         raise SettingsError(f"Invalid value {raw!r} for {key}: expected true or false")
+    if spec.kind == "int":
+        if not text.isascii() or not text.isdigit():
+            raise SettingsError(
+                f"Invalid value {raw!r} for {key}: expected a whole number, 1 or more"
+            )
+        return check_value(key, int(text))
     return check_value(key, text)
 
 
-def check_value(key: str, value: Any) -> str | bool:
+def check_value(key: str, value: Any) -> str | bool | int:
     """Return VALUE when it has the right type and form for KEY."""
     spec = setting(key)
     if spec.kind == "bool":
         if not isinstance(value, bool):
             raise SettingsError(f"Invalid value for {key}: expected true or false")
+        return value
+    if spec.kind == "int":
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise SettingsError(
+                f"Invalid value for {key}: expected a whole number, 1 or more"
+            )
         return value
     if not isinstance(value, str):
         raise SettingsError(f"Invalid value for {key}: expected a URL string")
@@ -190,7 +238,8 @@ def parse_file(text: str, path: Path | str) -> tuple[dict[str, Any], list[str]]:
 
     A file that is not TOML, or a known key with a bad value, is an error
     naming PATH. Unknown keys are only warned about, so an older sai keeps
-    working with a file a newer one wrote.
+    working with a file a newer one wrote. A bad `logs.*` value is a warning
+    too: it comes back as `Invalid`, and `resolve` turns logging off.
     """
     try:
         data = tomllib.loads(text)
@@ -200,6 +249,14 @@ def parse_file(text: str, path: Path | str) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     for section, table in data.items():
         if not isinstance(table, dict):
+            if section in LENIENT_SECTIONS:
+                # Not worth stopping a trade for: the feature goes off.
+                message = f"{section!r} must be a table, such as [{section}]"
+                for spec in SETTINGS:
+                    if spec.section == section:
+                        values[spec.key] = Invalid(message)
+                warnings.append(f"{path}: {message}; logging is off until it is fixed")
+                continue
             if section in SECTIONS:
                 # A known section that is not a table would otherwise fall back
                 # to the default and quietly select another Keeper.
@@ -216,7 +273,10 @@ def parse_file(text: str, path: Path | str) -> tuple[dict[str, Any], list[str]]:
             try:
                 values[key] = check_value(key, value)
             except SettingsError as exc:
-                raise SettingsError(f"{path}: {exc}") from None
+                if section not in LENIENT_SECTIONS:
+                    raise SettingsError(f"{path}: {exc}") from None
+                values[key] = Invalid(str(exc))
+                warnings.append(f"{path}: {exc}; logging is off until it is fixed")
     return values, warnings
 
 
@@ -243,8 +303,13 @@ def resolve(
     `read_file`. A WebSocket endpoint from a lower layer than keeper.endpoint
     is ignored and derived, so `--endpoint X` never pairs X with the
     configured Keeper's WebSocket.
+
+    A bad `logs.*` value never fails: its source becomes `invalid` and
+    logging resolves to off, so a typo in a logging setting cannot stop a
+    command or the MCP server from starting. With logging already turned
+    off, `logs.keep_days` is not validated at all.
     """
-    values: dict[str, str | bool | None] = {}
+    values: dict[str, str | bool | int | None] = {}
     sources: dict[str, str] = {}
     for spec in SETTINGS:
         raw_flag = flags.get(spec.key)
@@ -261,6 +326,8 @@ def resolve(
                     "env",
                 )
             elif spec.key in file:
+                if isinstance(file[spec.key], Invalid):
+                    raise SettingsError(file[spec.key].message)
                 values[spec.key], sources[spec.key] = (
                     check_value(spec.key, file[spec.key]),
                     "file",
@@ -268,8 +335,17 @@ def resolve(
             else:
                 values[spec.key], sources[spec.key] = spec.default, "default"
         except SettingsError as exc:
+            if spec.section in LENIENT_SECTIONS:
+                # With logging turned off by a valid setting, the other
+                # logs values are not validated: they change nothing.
+                off = values.get("logs.enabled") is False
+                layer = "env" if raw_env.strip() else "file"
+                values[spec.key] = spec.default
+                sources[spec.key] = layer if off else "invalid"
+                continue
             origin = spec.flag or spec.key if raw_flag is not None else spec.env
             raise SettingsError(f"{origin}: {exc}") from None
+    logs_valid = "invalid" not in (sources["logs.enabled"], sources["logs.keep_days"])
     ws_key, http_key = "keeper.ws_endpoint", "keeper.endpoint"
     ws_rank = _RANK[sources[ws_key]]
     if values[ws_key] is None or ws_rank > _RANK[sources[http_key]]:
@@ -281,6 +357,8 @@ def resolve(
         lcd_endpoint=str(values["lcd.endpoint"]),
         update_auto=bool(values["update.auto"]),
         sources=MappingProxyType(sources),
+        logs_enabled=bool(values["logs.enabled"]) and logs_valid,
+        logs_keep_days=int(values["logs.keep_days"] or 14),
     )
 
 
@@ -292,10 +370,18 @@ def load(
     """Read the config file named by ENV (default: os.environ) and resolve."""
     values = os.environ if env is None else env
     file, warnings = read_file(config_path(values))
+    resolved = resolve(flags or {}, values, file)
+    for spec in SETTINGS:
+        from_env = values.get(spec.env, "").strip()
+        if resolved.sources[spec.key] == "invalid" and from_env:
+            warnings.append(
+                f"{spec.env}: invalid value for {spec.key}; logging is off"
+                " until it is fixed"
+            )
     for message in warnings:
         if warn is not None:
             warn(message)
-    return resolve(flags or {}, values, file)
+    return resolved
 
 
 # Redacted output
@@ -351,7 +437,7 @@ def _wrap(text: str, width: int = 78) -> list[str]:
     return lines
 
 
-def _toml_value(value: str | bool) -> str:
+def _toml_value(value: str | bool | int) -> str:
     return tomlkit.item(value).as_string()
 
 
@@ -456,7 +542,7 @@ def _placeholder_note(item: Any, spec: Setting) -> str | None:
 
 def set_value(
     text: str | None, key: str, raw: str, path: Path | str = FILE_NAME
-) -> tuple[str, str | bool]:
+) -> tuple[str, str | bool | int]:
     """Return config TEXT with KEY set to RAW, and the parsed value.
 
     TEXT None starts from `template()`. The key takes the place of its

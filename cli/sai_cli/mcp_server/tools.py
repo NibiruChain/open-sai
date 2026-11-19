@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..core import intents, keeper, reconcile, storage, stream, trading
+from ..core import log as sai_log
 from ..core import session as sessions
 from ..core.settings import Settings, public_url
 
@@ -159,19 +160,12 @@ def describe(exc: Exception) -> dict[str, Any]:
     return error(INTERNAL, "INTERNAL_ERROR")
 
 
-REDACTED = "[redacted session token]"
+REDACTED = sai_log.REDACTED
 
 
 def redact(text: str) -> str:
     """Remove every connected account's session token from TEXT."""
-    try:
-        stored = storage.load_accounts()["sessions"].values()
-    except (ValueError, KeyError):
-        return text
-    for result in stored:
-        if token := result.get("token"):
-            text = text.replace(token, REDACTED)
-    return text
+    return sai_log.redact(text)
 
 
 def run(action: Callable[[], Any]) -> str:

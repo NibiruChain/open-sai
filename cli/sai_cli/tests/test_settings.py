@@ -167,7 +167,7 @@ def test_unknown_keys_warn_and_are_ignored(tmp_path):
 
 def test_template_lists_every_key_unset_and_explained():
     text = settings.template()
-    assert tomllib.loads(text) == {"keeper": {}, "lcd": {}, "update": {}}
+    assert tomllib.loads(text) == {"keeper": {}, "lcd": {}, "update": {}, "logs": {}}
     for spec in settings.SETTINGS:
         assert f"# {spec.name} = " in text
         assert spec.env in text

@@ -3,8 +3,8 @@ fix the rest.
 
 Each check returns pass, warn, fail, skipped, or fixed. A fixed check lists
 what it changed in `changes`. Doctor fixes only what it can from inspection:
-it creates `$SAI_HOME/trader`, tightens file modes, migrates the intent
-ledger, and reconciles unknown intents for the signed-in account with Keeper
+it creates `$SAI_HOME/trader`, tightens file modes there and under
+`$SAI_HOME/logs`, migrates the intent ledger, and reconciles unknown intents for the signed-in account with Keeper
 (a read; no trade is placed or cancelled). It never deletes or rewrites the
 session. `--no-fix` reports without changing anything.
 
@@ -35,7 +35,16 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from .core import keeper, margin, reconcile, storage, stream, update, updater
+from .core import (
+    keeper,
+    log,
+    margin,
+    reconcile,
+    storage,
+    stream,
+    update,
+    updater,
+)
 from .core.settings import Settings, public_url
 from .mcp_server import info, tools
 
@@ -89,6 +98,20 @@ class Context:
 
 
 CheckFn = Callable[[Context], "Check | Sequence[Check]"]
+
+
+def log_entry(check: Check) -> dict[str, Any]:
+    """CHECK for the log: a passing check needs no summary."""
+    entry: dict[str, Any] = {
+        "id": check.id,
+        "status": check.status,
+        "durationMs": check.duration_ms,
+    }
+    if check.status not in ("pass", "skipped"):
+        entry["summary"] = check.summary
+    if check.changes:
+        entry["changes"] = check.changes
+    return entry
 
 
 def short(addr: str) -> str:
@@ -388,6 +411,87 @@ def check_home(ctx: Context) -> Check:
         return Check("home", "pass", f"{root} is private", None, details)
     return Check(
         "home",
+        "fixed",
+        f"Made {plural(len(changes), 'path')} under {root} private",
+        None,
+        details,
+        changes=changes,
+    )
+
+
+def check_logs(ctx: Context) -> Check:
+    """Only the owner can read `$SAI_HOME/logs` and the log files in it."""
+    log.flush(1.0)
+    root = log.directory()
+    on, keep_days = log.config()
+    names = [path.name for _day, _surface, path in log.log_files(root)]
+    names += [log.PRUNE_MARKER] if (root / log.PRUNE_MARKER).exists() else []
+    details: dict[str, Any] = {
+        "path": str(root),
+        "enabled": on,
+        "keepDays": keep_days,
+        "files": len(names) - (log.PRUNE_MARKER in names),
+    }
+    links = [path for path in [root, *(root / n for n in names)] if path.is_symlink()]
+    if links:
+        return Check(
+            "logs",
+            "fail",
+            f"{', '.join(map(str, links))}: logs path is a symlink; doctor"
+            " changes nothing there",
+            SYMLINK_FIX,
+            {**details, "symlinks": [str(path) for path in links]},
+        )
+    blocked = log.refused_files(root)
+    if blocked:
+        listed = ", ".join(f"{path} ({reason})" for path, reason in blocked)
+        return Check(
+            "logs",
+            "fail",
+            f"sai will not write to {listed}",
+            "Move or remove: " + " ".join(str(path) for path, _ in blocked),
+            {**details, "refused": [str(path) for path, _ in blocked]},
+        )
+    off = "" if on else "; logging is off (logs.enabled)"
+    if root.exists() and not root.is_dir():
+        return Check(
+            "logs",
+            "fail",
+            f"{root} is not a directory, so sai cannot write logs",
+            f"Move or remove {root}; sai creates the directory on its next run",
+            details,
+        )
+    if not root.is_dir():
+        return Check("logs", "pass", f"No logs yet at {root}{off}", None, details)
+    loose = loose_modes([root, *(root / name for name in names)])
+    details["looseModes"] = [
+        {"path": str(path), "mode": f"{mode:o}"} for path, mode, _ in loose
+    ]
+    private = Check("logs", "pass", f"{root} is private{off}", None, details)
+    if not loose:
+        return private
+    if not ctx.fix:
+        return Check(
+            "logs",
+            "warn",
+            f"{plural(len(loose), 'path')} under {root} readable by other users",
+            "; ".join(f"chmod go-rwx {path}" for path, _, _ in loose),
+            details,
+        )
+    changes, failed = tighten(root, names)
+    if failed:
+        return Check(
+            "logs",
+            "fail",
+            f"Could not make {plural(len(failed), 'path')} private",
+            "; ".join(failed),
+            details,
+            changes=changes,
+        )
+    if not changes:
+        return private
+    return Check(
+        "logs",
         "fixed",
         f"Made {plural(len(changes), 'path')} under {root} private",
         None,
@@ -942,6 +1046,7 @@ LOCAL_CHECKS: list[tuple[str, CheckFn]] = [
     ("install", check_install),
     ("version", check_version),
     ("home", check_home),
+    ("logs", check_logs),
     ("session", check_session),
     ("intents", check_intents),
 ]

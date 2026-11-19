@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import sys
+import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Any, Literal
@@ -24,6 +26,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ContentBlock, TextContent, ToolAnnotations
 from pydantic import ConfigDict
 
+from ..core import log as sai_log
 from ..core import settings as sai_settings
 from ..core.settings import Settings
 from . import info, tools
@@ -669,6 +672,75 @@ class SaiMCP(FastMCP):
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> Sequence[ContentBlock] | dict[str, Any]:
+        """Run the tool, logging `mcp.tool_call` before and
+        `mcp.tool_result` after. Events the tool writes meanwhile, such as
+        Keeper requests, carry the same `tool` and `callId`."""
+        started = time.monotonic()
+        with sai_log.bind(surface="mcp"):
+            logging = sai_log.active()
+        if not logging:
+            return await self.checked_call(name, arguments)
+        known, unknown = self.loggable(name, arguments)
+        tool = name if known is not None else "unknown"
+        with sai_log.bind(surface="mcp", tool=tool, callId=uuid.uuid4().hex[:12]):
+            sai_log.event(
+                "mcp.tool_call", arguments=known or {}, unknownArguments=unknown or None
+            )
+            try:
+                result = await self.checked_call(name, arguments)
+            except Exception as exc:
+                # The message can quote the rejected input, so only its
+                # first line is kept, as untrusted text, and nothing for an
+                # unknown tool, whose message is the name the client sent.
+                first = str(exc).partition("\n")[0] if known is not None else None
+                sai_log.event(
+                    "mcp.tool_result",
+                    "error",
+                    ok=False,
+                    code="TOOL_ERROR",
+                    errorType=type(exc).__name__,
+                    error=sai_log.untrusted(first),
+                    durationMs=round((time.monotonic() - started) * 1000),
+                )
+                raise
+            # A large result is decoded off the event loop.
+            text = result_text(result)
+            if text is not None and len(text) > INLINE_RESULT_CHARS:
+                summary = await asyncio.to_thread(result_summary, text)
+            else:
+                summary = result_summary(text)
+            sai_log.event(
+                "mcp.tool_result",
+                "info" if summary["ok"] else "warn",
+                durationMs=round((time.monotonic() - started) * 1000),
+                **summary,
+            )
+            return result
+
+    def loggable(self, name: str, arguments: Any) -> tuple[dict[str, Any] | None, int]:
+        """The arguments to log for tool NAME, and how many were left out.
+
+        Arguments are logged before the tool validates them, so only the
+        parameters the tool defines are kept, and a call to a tool this
+        server does not have logs none (the first value is then None). A
+        string is marked as one whole value, so a URL in it is cut to its
+        origin through to its end. Every parameter is a single value, so a
+        list or object in its place is logged as its type and length only.
+        """
+        try:
+            tool = self._tool_manager.get_tool(name)
+            given = arguments if isinstance(arguments, dict) else {}
+            if tool is None:
+                return None, len(given)
+            names = tool.parameters.get("properties", {})
+            known = {key: loggable_value(given[key]) for key in names if key in given}
+            return known, len(given) - len(known)
+        except Exception:  # noqa: BLE001 - logging must not fail a call
+            return None, 0
+
+    async def checked_call(
+        self, name: str, arguments: dict[str, Any]
+    ) -> Sequence[ContentBlock] | dict[str, Any]:
         if name in TRADE_TOOL_NAMES:
             addr = arguments.get("addr")
             refusal = await asyncio.to_thread(
@@ -683,6 +755,64 @@ class SaiMCP(FastMCP):
                 result = (content, {"result": refusal})
                 return result  # ty: ignore[invalid-explicit-return]
         return await super().call_tool(name, arguments)
+
+
+def loggable_value(value: Any) -> Any:
+    """One tool argument for the log: a string as one whole value, a
+    number or flag as it is, and anything else as its type and length."""
+    if isinstance(value, str):
+        return sai_log.Arg(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    size = len(value) if isinstance(value, (dict, list)) else 1
+    return f"[{type(value).__name__} of {size}]"
+
+
+# Result fields copied into `mcp.tool_result`: enough to follow a call
+# without storing what the tool returned.
+RESULT_FIELDS = ("code", "error", "status", "intentKey", "previewDigest")
+
+
+# A result longer than this is decoded on a worker thread.
+INLINE_RESULT_CHARS = 16 * 1024
+
+
+def result_text(result: Any) -> str | None:
+    """The JSON text a tool returned, or None."""
+    content = result[0] if isinstance(result, tuple) else result
+    return next(
+        (
+            block.text
+            for block in (content if isinstance(content, Sequence) else ())
+            if isinstance(block, TextContent)
+        ),
+        None,
+    )
+
+
+def result_summary(text: str | None) -> dict[str, Any]:
+    """What to log about a tool's result TEXT: whether it worked, its error
+    `code`, the account it acted on, and an intent key or status."""
+    try:
+        value = json.loads(text) if text is not None else None
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        return {"ok": True}
+    summary: dict[str, Any] = {"ok": "error" not in value}
+    # A result can echo an argument, so each string is one whole value to
+    # the logger, and the error text is untrusted.
+    for name in RESULT_FIELDS:
+        if isinstance(value.get(name), str):
+            summary[name] = sai_log.Arg(value[name])
+        elif isinstance(value.get(name), (bool, int, float)):
+            summary[name] = value[name]
+    if isinstance(summary.get("error"), str):
+        summary["error"] = sai_log.untrusted(summary["error"])
+    account = value.get("account", value.get("addr"))
+    if isinstance(account, str):
+        summary["account"] = sai_log.Arg(account)
+    return summary
 
 
 def session_refusal(addr: str | None = None) -> str | None:
@@ -710,7 +840,11 @@ def create_server(settings: Settings | None = None) -> FastMCP:
 
     async def mcp_info() -> str:
         """Report this server's versions, provenance, endpoints, tools,
-        session state, and whether trading is available. Call this first.
+        session state, log directory, and whether trading is available. Call
+        this first.
+
+        `logs.dir` holds JSON-lines logs of every tool call, Keeper request,
+        and intent status change; `sai logs tail` in a terminal reads them.
 
         `restartNeeded` is true when a newer sai was installed after this
         server started; restart the MCP client to load it.
@@ -733,6 +867,10 @@ def create_server(settings: Settings | None = None) -> FastMCP:
                     "lcd": sai_settings.public_url(config.lcd_endpoint),
                 },
                 "configFile": str(sai_settings.config_path(os.environ)),
+                "logs": {
+                    "dir": str(sai_log.directory()),
+                    "enabled": sai_log.enabled(),
+                },
                 "tools": names,
                 "trading": tools.trading_state(config),
                 "session": tools.session_state(config),
@@ -779,4 +917,11 @@ def serve(flags: Mapping[str, str | None] | None = None) -> None:
         settings = sai_settings.load(flags, warn=log.warning)
     except sai_settings.SettingsError as exc:
         raise SystemExit(f"sai mcp serve: {exc}") from None
-    create_server(settings).run()
+    with sai_log.bind(surface="mcp"):
+        sai_log.event(
+            "mcp.server_start",
+            keeper=sai_log.endpoint(settings.endpoint),
+            websocket=sai_log.endpoint(settings.ws_endpoint),
+            lcd=sai_log.endpoint(settings.lcd_endpoint),
+        )
+        create_server(settings).run()

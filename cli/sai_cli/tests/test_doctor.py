@@ -799,6 +799,7 @@ def test_network_checks_pass_against_stubs(http_stub):
         "install",
         "version",
         "home",
+        "logs",
         "session",
         "intents",
         "keeper",
@@ -953,7 +954,9 @@ def test_silent_websocket_fails_within_the_timeout():
         check = one(doctor.check_websocket, ctx(ws_override=ws))
     finally:
         stop()
-    assert time.monotonic() - start < 6
+    # The handshake gives up after NETWORK_TIMEOUT, well before the stub
+    # lets go at 10 s; the rest is slack for a loaded machine.
+    assert time.monotonic() - start < doctor.NETWORK_TIMEOUT + 4
     assert check.status == "fail"
     assert "connection_ack" in check.summary
 
@@ -1228,6 +1231,8 @@ def test_request_and_get_json_pass_the_timeout(monkeypatch):
     seen: list[float] = []
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             return None
 
