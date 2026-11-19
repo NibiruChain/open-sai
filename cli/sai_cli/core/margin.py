@@ -42,7 +42,7 @@ def smart(lcd: str, contract: str, message: dict[str, Any]) -> dict[str, Any]:
 
 
 def snapshot(
-    endpoint: str, lcd: str, address: str, trade_id: int
+    endpoint: str, lcd: str, addr: str, trade_id: int
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     route = keeper.request(endpoint, keeper.ROUTE)["oneClickTrading"]
     node = _get_json(f"{lcd.rstrip('/')}/cosmos/base/tendermint/v1beta1/node_info")
@@ -52,7 +52,7 @@ def snapshot(
     ):
         raise ValueError("Keeper trading route and LCD network do not match")
     position = keeper.request(
-        endpoint, keeper.POSITION, {"trader": address, "id": trade_id}
+        endpoint, keeper.POSITION, {"trader": addr, "id": trade_id}
     )["perp"]["trade"]
     if not position or not position["isOpen"] or position["tradeType"] != "trade":
         raise ValueError("Open position not found")

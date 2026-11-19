@@ -17,6 +17,7 @@ from click.testing import CliRunner
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import TextContent
 from sai_cli.core import keeper, margin, settings, storage, stream, update
@@ -25,7 +26,7 @@ from sai_cli.mcp_server import info as sai_info
 from sai_cli.mcp_server import server, tools
 from sai_cli.sai_cli import main
 
-ADDRESS = "0x" + "b" * 40
+ADDR = "0x" + "b" * 40
 OTHER = "0x" + "c" * 40
 ENDPOINT = keeper.MAINNET_HTTP
 TOKEN = "header.secret-session-token-value.signature"
@@ -77,7 +78,7 @@ def isolated_env(tmp_path, monkeypatch):
 def stored_session(hours: float = 1, endpoint: str = ENDPOINT) -> dict[str, str]:
     return {
         "token": TOKEN,
-        "evmAddress": ADDRESS,
+        "evmAddress": ADDR,
         "endpoint": endpoint,
         "expiresAt": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(),
     }
@@ -128,7 +129,7 @@ class FakeKeeper:
                     "intentKey": envelope["intentKey"],
                     "lifecycleStep": "jwt_pass",
                     "execActor": "server",
-                    "evmAddress": ADDRESS,
+                    "evmAddress": ADDR,
                 }
             }
         return json.loads(json.dumps(self.answers[query]))
@@ -199,7 +200,7 @@ def test_every_tool_is_listed_signed_in_or_out(mcp):
     assert info["trading"] == {
         "available": False,
         "reason": "signed-out",
-        "account": None,
+        "addr": None,
     }
     assert "exposedTools" not in info
 
@@ -209,7 +210,7 @@ def test_every_tool_is_listed_signed_in_or_out(mcp):
     assert info["trading"] == {
         "available": True,
         "reason": "signed-in",
-        "account": ADDRESS,
+        "addr": ADDR,
     }
     assert info["tools"] == sorted(signed_in)
 
@@ -243,7 +244,7 @@ def test_trade_without_a_usable_session_submits_nothing(
         assert "sai auth login" in error["error"], name
         assert "sai auth import" in error["error"], name
     assert fake.calls == []
-    assert storage.list_pending(ENDPOINT, ADDRESS) == []
+    assert storage.list_pending(ENDPOINT, ADDR) == []
 
 
 MALFORMED = ({}, {"trade_id": "seven"}, {"preview_digest": 5, "extra": True})
@@ -414,39 +415,39 @@ def test_market_prices_returns_keeper_data(mcp, monkeypatch):
     assert invoke(mcp, "market_prices") == prices
 
 
-def test_account_positions_defaults_to_the_session_address(mcp, monkeypatch):
+def test_account_positions_defaults_to_the_session_addr(mcp, monkeypatch):
     fake = FakeKeeper({keeper.POSITIONS: {"perp": {"trades": []}}})
     monkeypatch.setattr(keeper, "request", fake)
     error = invoke(mcp, "account_positions")
     assert error["code"] == "SESSION_UNAVAILABLE"
-    assert "Pass address" in error["error"]
+    assert "Pass addr" in error["error"]
     assert fake.calls == []
 
     storage.save_session(stored_session())
     assert invoke(mcp, "account_positions") == {
-        "address": ADDRESS,
-        "addressSource": "session",
+        "addr": ADDR,
+        "addrSource": "session",
         "sessionExpired": False,
         "endpointMatches": True,
         "perp": {"trades": []},
     }
-    assert fake.calls[-1] == (keeper.POSITIONS, {"trader": ADDRESS})
+    assert fake.calls[-1] == (keeper.POSITIONS, {"trader": ADDR})
     other = "0x" + "c" * 40
-    assert invoke(mcp, "account_positions", {"address": other}) == {
-        "address": other,
-        "addressSource": "argument",
+    assert invoke(mcp, "account_positions", {"addr": other}) == {
+        "addr": other,
+        "addrSource": "argument",
         "perp": {"trades": []},
     }
     assert fake.calls[-1] == (keeper.POSITIONS, {"trader": other})
 
 
-def test_expired_session_still_supplies_the_address_flagged(mcp, monkeypatch):
+def test_expired_session_still_supplies_the_addr_flagged(mcp, monkeypatch):
     storage.save_session(stored_session(hours=-1))
     fake = FakeKeeper({keeper.HISTORY: {"perp": {"tradeHistory": []}}})
     monkeypatch.setattr(keeper, "request", fake)
     result = invoke(mcp, "account_history")
-    assert result["address"] == ADDRESS
-    assert result["addressSource"] == "session"
+    assert result["addr"] == ADDR
+    assert result["addrSource"] == "session"
     assert result["sessionExpired"] is True
 
 
@@ -460,7 +461,7 @@ def test_expired_session_still_supplies_the_address_flagged(mcp, monkeypatch):
         "intent_status",
     ],
 )
-def test_session_for_another_endpoint_is_refused_for_the_default_address(
+def test_session_for_another_endpoint_is_refused_for_the_default_addr(
     mcp, monkeypatch, name
 ):
     storage.save_session(stored_session(endpoint="http://127.0.0.1:1/query"))
@@ -469,7 +470,7 @@ def test_session_for_another_endpoint_is_refused_for_the_default_address(
     monkeypatch.setattr(stream, "snapshot", fake)
     error = invoke(mcp, name)
     assert error["code"] == "SESSION_UNAVAILABLE"
-    assert "Pass address explicitly" in error["error"]
+    assert "Pass addr explicitly" in error["error"]
     assert fake.calls == []
 
 
@@ -482,13 +483,13 @@ def test_account_balances_reads_one_snapshot(mcp, monkeypatch):
         return {"data": {"userBalances": []}}
 
     monkeypatch.setattr(stream, "snapshot", snapshot)
-    result = invoke(mcp, "account_balances", {"address": ADDRESS})
+    result = invoke(mcp, "account_balances", {"addr": ADDR})
     assert result == {
-        "address": ADDRESS,
-        "addressSource": "argument",
+        "addr": ADDR,
+        "addrSource": "argument",
         "data": {"userBalances": []},
     }
-    assert seen == [(keeper.MAINNET_WS, {"user": ADDRESS})]
+    assert seen == [(keeper.MAINNET_WS, {"user": ADDR})]
 
 
 # Previews and trades
@@ -565,7 +566,7 @@ def test_preview_open_is_exactly_what_trade_open_submits(mcp, monkeypatch):
 def test_digest_binds_account_and_reference_not_market_intent_price():
     def market(intent_price: str, reference: str, account: str) -> dict:
         return {
-            "account": account,
+            "addr": account,
             "referencePrice": reference,
             "intent": {
                 "kind": "OPEN_TRADE",
@@ -573,11 +574,11 @@ def test_digest_binds_account_and_reference_not_market_intent_price():
             },
         }
 
-    base = tools.preview_digest(market("5", "100", ADDRESS))
-    # The refreshed intent price, reference spelling, and address case don't
+    base = tools.preview_digest(market("5", "100", ADDR))
+    # The refreshed intent price, reference spelling, and addr case don't
     # change what the user confirmed.
-    assert tools.preview_digest(market("6", "100.0", ADDRESS.upper())) == base
-    assert tools.preview_digest(market("5", "101", ADDRESS)) != base
+    assert tools.preview_digest(market("6", "100.0", ADDR.upper())) == base
+    assert tools.preview_digest(market("5", "101", ADDR)) != base
     assert tools.preview_digest(market("5", "100", OTHER)) != base
     limit = {"intent": {"kind": "OPEN_TRADE", "body": {"orderType": "limit"}}}
     assert tools.preview_digest(limit) != tools.preview_digest(
@@ -638,7 +639,7 @@ def test_previews_never_submit(mcp, monkeypatch, name, arguments):
     assert preview["dryRun"] is True
     assert len(preview["previewDigest"]) == 64
     assert all(query != keeper.SUBMIT for query, _ in fake.calls)
-    assert storage.list_pending(ENDPOINT, ADDRESS) == []
+    assert storage.list_pending(ENDPOINT, ADDR) == []
 
 
 @pytest.mark.parametrize(
@@ -672,7 +673,7 @@ def test_trade_that_differs_from_its_preview_is_refused(
     fresh = invoke(mcp, f"preview_{name}", trade_args)
     assert error["preview"] == fresh
     assert fake.submitted == []
-    assert storage.list_pending(ENDPOINT, ADDRESS) == []
+    assert storage.list_pending(ENDPOINT, ADDR) == []
 
 
 MARKET_ARGS = {**OPEN_ARGS, "order_type": "market", "price": None}
@@ -762,7 +763,7 @@ def test_preview_is_bound_to_the_signed_in_account(mcp, monkeypatch, name, argum
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
     preview = invoke(mcp, f"preview_{name}", arguments)
-    assert preview["account"] == ADDRESS
+    assert preview["addr"] == ADDR
     # The person signs in to another account before confirming.
     storage.save_session({**stored_session(), "evmAddress": OTHER})
     error = invoke(
@@ -771,7 +772,7 @@ def test_preview_is_bound_to_the_signed_in_account(mcp, monkeypatch, name, argum
         {**arguments, "preview_digest": preview["previewDigest"]},
     )
     assert error["code"] == "PREVIEW_MISMATCH"
-    assert error["preview"]["account"] == OTHER
+    assert error["preview"]["addr"] == OTHER
     assert fake.submitted == []
     assert storage.list_pending(ENDPOINT, OTHER) == []
 
@@ -780,7 +781,7 @@ OTHER_TOKEN = "header.other-account-session-token.signature"
 
 
 def connect_two_accounts() -> None:
-    """Connect ADDRESS, then OTHER, which becomes active."""
+    """Connect ADDR, then OTHER, which becomes active."""
     storage.save_session(stored_session())
     storage.save_session(
         {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
@@ -791,24 +792,24 @@ def test_auth_list_and_auth_use_switch_accounts(mcp):
     connect_two_accounts()
     listed = invoke(mcp, "auth_list")
     assert OTHER_TOKEN not in json.dumps(listed)
-    assert {r["address"]: r["active"] for r in listed["accounts"]} == {
-        ADDRESS: False,
+    assert {r["addr"]: r["active"] for r in listed["accounts"]} == {
+        ADDR: False,
         OTHER: True,
     }
     assert all(r["usable"] for r in listed["accounts"])
-    assert invoke(mcp, "auth_status")["address"] == OTHER
-    assert invoke(mcp, "auth_status", {"address": ADDRESS})["address"] == ADDRESS
+    assert invoke(mcp, "auth_status")["addr"] == OTHER
+    assert invoke(mcp, "auth_status", {"addr": ADDR})["addr"] == ADDR
 
-    switched = invoke(mcp, "auth_use", {"address": ADDRESS.upper().replace("0X", "0x")})
-    assert {r["address"]: r["active"] for r in switched["accounts"]} == {
-        ADDRESS: True,
+    switched = invoke(mcp, "auth_use", {"addr": ADDR.upper().replace("0X", "0x")})
+    assert {r["addr"]: r["active"] for r in switched["accounts"]} == {
+        ADDR: True,
         OTHER: False,
     }
-    assert storage.load_session()["evmAddress"] == ADDRESS
+    assert storage.load_session()["evmAddress"] == ADDR
     info = invoke(mcp, "mcp_info")["session"]
-    assert (info["address"], info["connectedAccounts"]) == (ADDRESS, 2)
+    assert (info["addr"], info["connectedAccounts"]) == (ADDR, 2)
 
-    missing = invoke(mcp, "auth_use", {"address": "0x" + "d" * 40})
+    missing = invoke(mcp, "auth_use", {"addr": "0x" + "d" * 40})
     assert missing["code"] == "INVALID_REQUEST"
     assert "is not connected" in missing["error"]
 
@@ -817,16 +818,16 @@ def test_trade_acts_as_the_requested_connected_account(mcp, monkeypatch):
     connect_two_accounts()
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
-    args = {"trade_id": 7, "address": ADDRESS}
+    args = {"trade_id": 7, "addr": ADDR}
     preview = invoke(mcp, "preview_close", args)
-    assert preview["account"] == ADDRESS
+    assert preview["addr"] == ADDR
     result = invoke(
         mcp, "trade_close", {**args, "preview_digest": preview["previewDigest"]}
     )
-    # FakeKeeper checks that the submission carries ADDRESS's token, not the
+    # FakeKeeper checks that the submission carries ADDR's token, not the
     # active account's.
     assert result["status"] == "accepted", result
-    assert result["account"] == ADDRESS
+    assert result["addr"] == ADDR
     assert storage.load_session()["evmAddress"] == OTHER
 
 
@@ -844,16 +845,31 @@ def test_trade_checks_sign_in_for_the_requested_account(mcp, monkeypatch):
     expired = invoke(
         mcp,
         "trade_close",
-        {"trade_id": 7, "preview_digest": "0" * 64, "address": ADDRESS},
+        {"trade_id": 7, "preview_digest": "0" * 64, "addr": ADDR},
     )
     assert expired["code"] == "SESSION_EXPIRED"
     missing = invoke(
         mcp,
         "trade_close",
-        {"trade_id": 7, "preview_digest": "0" * 64, "address": "0x" + "d" * 40},
+        {"trade_id": 7, "preview_digest": "0" * 64, "addr": "0x" + "d" * 40},
     )
     assert missing["code"] == "SESSION_UNAVAILABLE"
     assert "is not connected" in missing["error"]
+    assert fake.calls == []
+
+
+def test_sign_in_for_the_requested_account_comes_before_validation(mcp, monkeypatch):
+    """The gate ahead of argument validation reads `addr`: a malformed trade
+    for an expired account is refused for the session, not the arguments,
+    even while the active account is signed in."""
+    storage.save_session(stored_session(hours=-1))
+    storage.save_session(
+        {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
+    )
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    error = invoke(mcp, "trade_close", {"trade_id": "not-a-number", "addr": ADDR})
+    assert error["code"] == "SESSION_EXPIRED"
     assert fake.calls == []
 
 
@@ -862,32 +878,32 @@ def test_switching_accounts_after_a_preview_refuses_the_trade(mcp, monkeypatch):
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
     preview = invoke(mcp, "preview_close", {"trade_id": 7})
-    assert preview["account"] == OTHER
-    invoke(mcp, "auth_use", {"address": ADDRESS})
+    assert preview["addr"] == OTHER
+    invoke(mcp, "auth_use", {"addr": ADDR})
     error = invoke(
         mcp,
         "trade_close",
         {"trade_id": 7, "preview_digest": preview["previewDigest"]},
     )
     assert error["code"] == "PREVIEW_MISMATCH"
-    assert error["preview"]["account"] == ADDRESS
+    assert error["preview"]["addr"] == ADDR
     assert fake.submitted == []
 
 
 def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch):
-    # ADDRESS is active; the user confirmed a preview for OTHER.
+    # ADDR is active; the user confirmed a preview for OTHER.
     storage.save_session(
         {**stored_session(), "evmAddress": OTHER, "token": OTHER_TOKEN}
     )
     storage.save_session(stored_session())
     fake = FakeKeeper()
     monkeypatch.setattr(keeper, "request", fake)
-    preview = invoke(mcp, "preview_close", {"trade_id": 7, "address": OTHER})
-    # Another process switches to OTHER right after the trade loads ADDRESS.
+    preview = invoke(mcp, "preview_close", {"trade_id": 7, "addr": OTHER})
+    # Another process switches to OTHER right after the trade loads ADDR.
     real = sessions.load_active_session
 
-    def switch_after_load(endpoint, address=None):
-        result = real(endpoint, address)
+    def switch_after_load(endpoint, addr=None):
+        result = real(endpoint, addr)
         storage.use_session(OTHER)
         return result
 
@@ -896,7 +912,20 @@ def test_switch_during_submission_cannot_borrow_another_preview(mcp, monkeypatch
         mcp, "trade_close", {"trade_id": 7, "preview_digest": preview["previewDigest"]}
     )
     assert error["code"] == "PREVIEW_MISMATCH"
-    assert error["preview"]["account"] == ADDRESS
+    assert error["preview"]["addr"] == ADDR
+    assert fake.submitted == []
+
+
+def test_unknown_arguments_are_rejected(mcp, monkeypatch):
+    connect_two_accounts()
+    fake = FakeKeeper()
+    monkeypatch.setattr(keeper, "request", fake)
+    for tool in mcp._tool_manager.list_tools():
+        assert tool.parameters.get("additionalProperties") is False, tool.name
+    # A client still using the old name must not fall back to the active
+    # account.
+    with pytest.raises(ToolError, match="address"):
+        asyncio.run(mcp.call_tool("preview_close", {"trade_id": 7, "address": ADDR}))
     assert fake.submitted == []
 
 
@@ -907,7 +936,7 @@ def test_preview_with_no_account_never_authorizes_a_trade(mcp, monkeypatch):
     fake = FakeKeeper({keeper.MARKETS: markets()})
     monkeypatch.setattr(keeper, "request", fake)
     preview = invoke(mcp, "preview_open", MARKET_OPEN)
-    assert preview["account"] is None
+    assert preview["addr"] is None
     storage.save_session(stored_session())
     error = invoke(
         mcp,
@@ -920,7 +949,7 @@ def test_preview_with_no_account_never_authorizes_a_trade(mcp, monkeypatch):
         },
     )
     assert error["code"] == "PREVIEW_MISMATCH"
-    assert error["preview"]["account"] == ADDRESS
+    assert error["preview"]["addr"] == ADDR
     assert fake.submitted == []
 
 
@@ -931,7 +960,7 @@ def test_logout_during_the_price_refresh_refuses_the_trade(mcp, monkeypatch):
     fake = FakeKeeper({keeper.MARKETS: markets()})
     monkeypatch.setattr(keeper, "request", fake)
     preview = invoke(mcp, "preview_open", MARKET_OPEN)
-    assert preview["account"] is None
+    assert preview["addr"] is None
     storage.save_session(stored_session())
 
     def logout_on_refresh(endpoint, query, variables=None, token=None):
@@ -963,7 +992,7 @@ def test_logout_during_the_refresh_refuses_a_confirmed_signed_in_trade(
     fake = FakeKeeper({keeper.MARKETS: markets()})
     monkeypatch.setattr(keeper, "request", fake)
     preview = invoke(mcp, "preview_open", MARKET_OPEN)
-    assert preview["account"] == ADDRESS
+    assert preview["addr"] == ADDR
 
     def logout_on_refresh(endpoint, query, variables=None, token=None):
         if query == keeper.MARKETS:
@@ -988,7 +1017,7 @@ def test_logout_during_the_refresh_refuses_a_confirmed_signed_in_trade(
 def test_preview_for_an_unconnected_account_fails(mcp, monkeypatch):
     connect_two_accounts()
     monkeypatch.setattr(keeper, "request", FakeKeeper())
-    error = invoke(mcp, "preview_close", {"trade_id": 7, "address": "0x" + "d" * 40})
+    error = invoke(mcp, "preview_close", {"trade_id": 7, "addr": "0x" + "d" * 40})
     assert error["code"] == "SESSION_UNAVAILABLE"
     assert "is not connected" in error["error"]
 
@@ -1002,7 +1031,7 @@ def test_errors_redact_every_connected_token():
 def test_preview_without_a_session_names_no_account(mcp, monkeypatch):
     monkeypatch.setattr(keeper, "request", FakeKeeper())
     preview = invoke(mcp, "preview_close", {"trade_id": 7})
-    assert preview["account"] is None
+    assert preview["addr"] is None
 
 
 def test_reference_price_is_only_for_market_orders(mcp, monkeypatch):
@@ -1099,16 +1128,16 @@ def test_unknown_open_after_a_timeout_blocks_with_its_key(mcp, monkeypatch):
 
 def test_only_recent_unresolved_opens_count():
     key = "20260101T000000000Z_AAAAAAAAAAAAAAAA"
-    storage.pending(key, ENDPOINT, ADDRESS, "OPEN_TRADE", "")
-    storage.set_status(key, ENDPOINT, ADDRESS, "accepted")
-    assert tools.recent_opens(ENDPOINT, ADDRESS) == [
+    storage.pending(key, ENDPOINT, ADDR, "OPEN_TRADE", "")
+    storage.set_status(key, ENDPOINT, ADDR, "accepted")
+    assert tools.recent_opens(ENDPOINT, ADDR) == [
         {"intentKey": key, "status": "accepted"}
     ]
     later = datetime.now(UTC).timestamp() + tools.RECENT_OPEN_SECONDS + 1
-    assert tools.recent_opens(ENDPOINT, ADDRESS, now=later) == []
-    assert tools.recent_opens("http://127.0.0.1:1/query", ADDRESS) == []
-    storage.set_status(key, ENDPOINT, ADDRESS, "terminal")
-    assert tools.recent_opens(ENDPOINT, ADDRESS) == []
+    assert tools.recent_opens(ENDPOINT, ADDR, now=later) == []
+    assert tools.recent_opens("http://127.0.0.1:1/query", ADDR) == []
+    storage.set_status(key, ENDPOINT, ADDR, "terminal")
+    assert tools.recent_opens(ENDPOINT, ADDR) == []
 
 
 def test_sign_in_comes_before_validation(mcp):
@@ -1135,7 +1164,7 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
     assert error["intentKey"] == key
     assert "intent_status" in error["next"]
     local = invoke(mcp, "intent_local")
-    assert local["address"] == ADDRESS and local["addressSource"] == "session"
+    assert local["addr"] == ADDR and local["addrSource"] == "session"
     assert local["intents"] == [
         {"intentKey": key, "kind": "CLOSE_POSITION", "status": "unknown"}
     ]
@@ -1148,7 +1177,7 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
         "intentKey": key,
         "lifecycleStep": "exec_pass",
         "execActor": "server",
-        "evmAddress": ADDRESS,
+        "evmAddress": ADDR,
     }
     trade = {"intentKey": key, "trade": {"id": 7}}
     fake.answers = {
@@ -1157,8 +1186,8 @@ def test_lost_ack_reports_unknown_then_intent_status_reconciles(mcp, monkeypatch
     }
     status = invoke(mcp, "intent_status", {"key": key})
     assert status["matchedTradeHistory"] == [trade]
-    assert fake.calls[-2] == (keeper.INTENTS, {"user": ADDRESS, "key": key})
-    assert status["address"] == ADDRESS
+    assert fake.calls[-2] == (keeper.INTENTS, {"user": ADDR, "key": key})
+    assert status["addr"] == ADDR
     assert invoke(mcp, "intent_local")["intents"][0]["status"] == "terminal"
 
 
@@ -1179,9 +1208,7 @@ def test_passphrase_session_is_refused_without_a_prompt(mcp, monkeypatch):
         assert "passphrase-encrypted" in error["error"]
         assert "sai auth login" in error["error"]
     assert invoke(mcp, "account_positions")["code"] == "SESSION_UNAVAILABLE"
-    assert invoke(mcp, "account_positions", {"address": ADDRESS})["perp"] == {
-        "trades": []
-    }
+    assert invoke(mcp, "account_positions", {"addr": ADDR})["perp"] == {"trades": []}
     info = invoke(mcp, "mcp_info")["session"]
     assert info["signedIn"] is False and "passphrase-encrypted" in info["error"]
     assert fake.submitted == []
@@ -1286,10 +1313,10 @@ def test_mcp_info_reports_versions_without_network(mcp, monkeypatch):
 def test_session_reports_never_include_the_token(mcp):
     storage.save_session(stored_session())
     status = invoke(mcp, "auth_status")
-    assert set(status) == {"address", "expiresAt", "endpoint"}
-    assert (status["address"], status["endpoint"]) == (ADDRESS, ENDPOINT)
+    assert set(status) == {"addr", "expiresAt", "endpoint"}
+    assert (status["addr"], status["endpoint"]) == (ADDR, ENDPOINT)
     info = invoke(mcp, "mcp_info")
-    assert info["session"]["address"] == ADDRESS
+    assert info["session"]["addr"] == ADDR
     assert info["session"]["usable"] is True
     assert info["provenance"]["kind"] in ("source-checkout", "installed")
     assert info["endpoints"]["keeper"] == ENDPOINT
@@ -1385,7 +1412,7 @@ def test_stdio_client_lists_every_tool_from_sai_mcp_serve(tmp_path):
         assert info["trading"] == {
             "available": True,
             "reason": "signed-in",
-            "account": ADDRESS,
+            "addr": ADDR,
         }
 
 
