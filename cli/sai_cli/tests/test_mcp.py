@@ -288,7 +288,7 @@ def test_session_check_comes_before_argument_validation(
     for is_error, error, structured in asyncio.run(calls()):
         assert is_error is False
         assert error["code"] == code
-        assert "`sai auth login` or `sai auth import`" in error["error"]
+        assert "`sai auth login NAME` or `sai auth import`" in error["error"]
         assert structured == {"result": json.dumps(error)}
     assert fake.calls == []
 
@@ -322,7 +322,7 @@ def test_signed_out_trade_close_over_the_client_returns_signed_out(mcp, monkeypa
 
     error = asyncio.run(close())
     assert error["code"] == "SIGNED_OUT"
-    assert "`sai auth login` or `sai auth import`" in error["error"]
+    assert "`sai auth login NAME` or `sai auth import`" in error["error"]
     assert fake.calls == [] and fake.submitted == []
 
 
@@ -980,7 +980,7 @@ def test_logout_during_the_price_refresh_refuses_the_trade(mcp, monkeypatch):
         },
     )
     assert error["code"] == "SIGNED_OUT"
-    assert "`sai auth login` or `sai auth import`" in error["error"]
+    assert "`sai auth login NAME` or `sai auth import`" in error["error"]
     assert any(query == keeper.MARKETS for query, _ in fake.calls[1:])
     assert fake.submitted == []
 

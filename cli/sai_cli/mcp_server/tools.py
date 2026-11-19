@@ -32,7 +32,7 @@ log = logging.getLogger("sai_cli.mcp_server")
 
 NO_ADDR = (
     "No addr given and no stored Sai session. Pass addr, or sign in with"
-    " `sai auth login` or `sai auth import` in a terminal."
+    " `sai auth login NAME` or `sai auth import` in a terminal."
 )
 OTHER_ENDPOINT = (
     "No addr given, and the stored session belongs to a different Keeper"
@@ -40,7 +40,7 @@ OTHER_ENDPOINT = (
     " account meant here. Pass addr explicitly."
 )
 SIGN_IN = (
-    " Ask the user to sign in by running `sai auth login` or `sai auth"
+    " Ask the user to sign in by running `sai auth login NAME` or `sai auth"
     " import` in a terminal, then retry. Reads and most previews work without it."
 )
 NOT_SIGNED_IN = {
