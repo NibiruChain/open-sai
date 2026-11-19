@@ -60,7 +60,8 @@ def test_skill_is_named_sai(path):
     assert text.startswith("---\nname: sai\n")
 
 
-def test_packaged_skill_matches_repository_skill():
+def test_packaged_skill_is_a_link_to_the_repository_skill():
+    assert PACKAGE_SKILL.parent.is_symlink()
     assert PACKAGE_SKILL.read_bytes() == REPO_SKILL.read_bytes()
 
 

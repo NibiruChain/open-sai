@@ -51,9 +51,21 @@ To be told about updates without installing them, run
 The package is `sai-cli` and is not on PyPI yet, so `uv tool install sai`
 installs an unrelated PyPI package.
 
-Agents: run `sai --skill` to print the agent skill that matches the installed
-version. Agents that load skills ahead of time can install it with
-`npx skills add SaiDotFun/open-sai --skill sai`.
+Agents: run `sai skill show` (or `sai --skill`) to print the agent skill that
+ships with the installed version, and `sai skill show --page NAME` for one of
+its pages, such as `cli`, `mcp`, or `trading-safety`. To load the skill ahead
+of time, copy it to where agents look for skills:
+
+```bash
+sai skill install                               # ~/.agents/skills/sai
+sai skill install --dir ~/.claude/skills/sai    # another agent's directory
+npx skills add SaiDotFun/open-sai --skill sai   # without the CLI installed
+```
+
+`sai skill install` refuses to replace a symlink or a copy that differs
+unless you pass `--force`, and never replaces a directory that is not a `sai`
+skill. `sai skill source` prints where the packaged skill
+lives and which commit it came from.
 
 To work from a checkout, run `uv sync`, then `uv run sai --help`.
 
@@ -200,10 +212,25 @@ their fields.
 
 Run `just install`, `just test`, and `just check`.
 
-The repository copy at `skills/sai/SKILL.md` is the source of the agent skill;
-the package ships it through the symlink `cli/sai_cli/skills/SKILL.md`, and
-`sai --skill` prints it. When you bump the version in `pyproject.toml`, update
-`metadata.cli-version` in the skill to match; a test checks this.
+### The Agent Skill
+
+The `sai` agent skill is edited in
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai)
+and copied into `skills/sai/`. Do not edit `skills/sai/` here; the next sync
+replaces the whole directory. To pull the latest:
+
+```bash
+just sync-skill                  # dry run: files that change, commit message
+just sync-skill --run --commit   # write skills/sai and commit it
+just sync-skill --from ~/jiyuu --ref my-branch --run   # a local checkout
+```
+
+The sync records the jiyuu commit in `skills/sai/.source.json`, and its commit
+message lists the jiyuu commits pulled since the last committed sync. Running
+`--run` first and `--run --commit` later commits the files already written. The package ships
+the directory through the symlink `cli/sai_cli/skills`. `setup.py` walks it
+and lists every file, hidden directories included, and `just build-check`
+fails if the wheel or sdist misses a file of it or holds a link instead.
 
 ### Releases
 

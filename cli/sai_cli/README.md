@@ -329,6 +329,42 @@ otherwise run in parallel and stop after 7 seconds in total. The
 endpoints come from [Settings](#settings); `sai doctor --ws-endpoint` and
 `--lcd-endpoint` override them for one run.
 
+## Agent Skill
+
+The CLI ships the `sai` agent skill as a directory: `SKILL.md`, which routes
+to child pages `cli`, `mcp`, and `trading-safety`, and protocol references
+under `references/`.
+
+- `sai skill show` prints `SKILL.md`. `sai --skill` is the same command.
+  `--page NAME` prints one child page; `NAME` is a path without `.md`, such
+  as `references/contracts`, or a file name only one page has, such as
+  `vaults`. Output is raw Markdown, under `--json` too.
+- `sai skill source` prints the packaged path, the page names, the CLI and
+  skill repositories, the jiyuu commit the skill was synced from, and the
+  install commands. `sai --json skill source` prints the same as JSON.
+- `sai skill install [--dir DIR] [--force]` copies the directory into
+  `~/.agents/skills/sai`, or into `DIR` itself. It reports `installed`,
+  `unchanged`, or `replaced`.
+
+`install` deletes nothing without `--force`. It fills a `DIR` that is missing
+or has no entries at all, and otherwise:
+
+| `DIR` | Without `--force` | With `--force` |
+| --- | --- | --- |
+| Same files as the packaged skill | `unchanged` | `unchanged` |
+| A symlink, which another tool manages | refused | The link is replaced by a copy. Its target is untouched. |
+| A `sai` skill whose files differ | refused, naming the files | The directory is replaced. |
+| A `sai` skill that holds a symlink or special file | refused | refused |
+| Anything else, such as a folder of links to other skills | refused | refused |
+
+A directory counts as a `sai` skill only when its own `SKILL.md` is a regular
+file that starts with `name: sai`, so a mistyped `--dir` cannot delete other
+files or links. `install` writes the new copy beside `DIR`, moves the old
+directory or link aside, moves the new one into place, and only then deletes
+the old one; if anything stops the move, Ctrl-C included, the old one is put
+back. It refuses to replace
+`DIR` while the current directory is inside it.
+
 ## Logs
 
 The CLI and the MCP server append what they do to `$SAI_HOME/logs` (default

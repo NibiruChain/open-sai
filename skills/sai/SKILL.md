@@ -1,182 +1,134 @@
 ---
 name: sai
-description: Inspect Sai markets and positions, follow live updates, and submit authenticated trading intents using the Sai CLI.
-metadata:
-  cli-version: "0.1.0"
+description: >-
+  Trade and inspect Sai perpetuals on Nibiru with the open-source `sai` CLI
+  and its MCP server, and query or reconcile Sai Perps data from live
+  contracts, Sai Keeper GraphQL, and DexPal REST. Use for Sai markets, prices,
+  positions, balances, trade history, live watches, connecting a Sai account,
+  previewing or submitting trades, checking intents, installing or
+  configuring the Sai MCP server, `sai config`, `sai doctor`, `sai update`,
+  `sai logs`,
+  fees, open interest, SLP vaults, referrals, or disagreements between
+  on-chain and indexed data. Use agent skill `sai-ops` for contract and
+  operator mutations.
 ---
 
-# Sai CLI
+# Sai
 
-Always run `sai --skill` first and follow its output over any other copy of
-this file. It prints the skill shipped with the installed CLI, works offline,
-and stays correct when two builds report the same `sai --version`. The
-installed `sai --help` is the authority for commands and options.
+Sai is a perpetual futures exchange on Nibiru. Traders deposit USDC, and Sai
+Keeper turns each signed trading request, called an intent, into a contract
+transaction. The `sai` CLI from
+[SaiDotFun/open-sai](https://github.com/SaiDotFun/open-sai) reads markets and
+accounts, streams updates, submits intents, and runs an MCP server with the
+same reads and trades.
 
-Use `sai --help` to inspect commands. Add `--json` before the
-command for machine-readable output. Mainnet is the default.
+This skill covers two kinds of work: operating Sai through the CLI or MCP
+tools, and reading protocol data directly from contracts and APIs. Read only
+the pages the task needs.
 
-Settings live in `~/.sai/config.toml` (under `$SAI_HOME` when set), shared
-with the MCP server. Change them with `sai config set KEY VALUE` and `sai
-config unset KEY`, not by editing the file or MCP client config. `sai --json
-config list` shows each key's value and source (`flag`, `env`, `file`,
-`default`, `derived`, or `invalid` for an unreadable `logs.*` value). Keys: `keeper.endpoint`, `keeper.ws_endpoint` (unset
-derives it from the Keeper endpoint), `lcd.endpoint`, `update.auto`,
-`logs.enabled`, `logs.keep_days`. A flag
-such as `--endpoint` or a variable such as `SAI_ENDPOINT` overrides the file
-for one run.
+## Install
 
-Use `market list`, `market prices`, `account positions ADDR`, `account
-balances ADDR`, and `account history ADDR` for data. Use `watch price
-TOKEN_ID`, `watch positions ADDR`, or `watch balances ADDR` for streams.
-Streams reconnect after transport interruptions and emit a new snapshot.
-
-When a command fails in a way you cannot explain, run `sai --json doctor`.
-It fixes file modes, the ledger schema, and unknown intents it can settle
-with Keeper, and lists each change under `changes`; it never trades. Each
-check has a `status` (pass, fixed, warn, fail, or skipped) and a `fix`
-command. Show the person what doctor changed, then the checks that still fail
-and their fixes. Use `--no-fix` to look without changing anything.
-
-To see what happened, read the logs with `sai --json logs tail -n 50`. sai
-and its MCP server record each command, MCP tool call, Keeper request, and
-intent status change as one JSON object per line in `~/.sai/logs`; the
-session token is never there. Narrow with `--surface cli|mcp|update` and
-`--event NAME`, where a prefix such as `intent`, `keeper`, or `mcp` matches
-the family. Useful fields: `command.end` has `exitCode` and `error`;
-`mcp.tool_result` has `code`, `account`, and `durationMs`; `keeper.request`
-has `operation`, `status`, `httpStatus`, and `keeperErrors`; `intent.status`
-has `intentKey`, `previous`, and `status`. `runId` ties one process's lines
-together and `callId` one MCP tool call's. Check here first after a timeout,
-an `OUTCOME_UNKNOWN`, or an error the person reports from an earlier run.
-`sai logs path` prints the directory, and `mcp_info` reports it as
-`logs.dir`.
-
-`sai --json update --check` reports the installed and latest versions.
-`sai update` installs the latest release and keeps the same `sai` path; ask
-the person to restart their agent client afterwards so the MCP server loads
-it. Commands run with `--json` or without a terminal never update sai by
-themselves.
-
-## Connect Sai
-
-When the person asks you to connect Sai:
-
-1. Ask them to copy their session token with the **Connect Sai CLI / MCP**
-   button in Sai Web. If their Sai Web has no such button yet, ask them to
-   run `sai auth login NAME` in their own terminal instead
-   (below).
-2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
-   stores the token, clears the clipboard, and prints `addr`,
-   `expiresAt`, and `endpoint`.
-3. If your commands run in a pseudo-terminal, `auth import` shows a hidden
-   prompt instead. Send only an empty line (Enter), which makes it read the
-   clipboard. Never type, paste, or echo the token yourself.
-4. If it says no clipboard command works (for example over SSH), ask the
-   person to run `sai auth import` in their own terminal, then continue.
-
-Never ask the person to paste the token into the chat, and never pass it as an
-argument, environment variable, or piped input. `auth import` does not accept
-those.
-
-People with a Foundry keystore can instead run `sai auth login NAME` in their
-own terminal, where `NAME` is the keystore. `cast` prompts them for the
-keystore password, unless the `ud` tool has a wallet of that name, which
-signs without a prompt.
-
-`--addr` is an optional cross-check; leave it out unless the person gives
-one.
-
-Once connected, commands need no prompt until the session expires. `auth
-status` shows the active account's addr and expiry without revealing the
-token.
-
-The person can connect several accounts; each sign-in adds one and makes it
-active. `auth list` shows them and which is active. `auth use ADDR`
-switches the active account; switch only when the person asks. To act on
-another connected account for one command, put `--as ADDR` before the
-command instead. Before a trade, say which account it will use. `auth logout
-[ADDR]` removes one account, by default the active one; it does not revoke
-the token. Tell the
-person what the token is if they ask: it is their Sai Web browser session
-token, lasts as long as Keeper issues it (30 days in production), authorizes
-all trading on their deposited funds, and cannot be revoked yet. Signing out
-of Sai Web does not sign out the CLI.
-
-The CLI encrypts the stored session with a key built into the CLI and never
-prompts for a passphrase. If it reports a passphrase-encrypted session from an
-older version, ask the person to sign in again with `sai auth import` or `sai
-auth login NAME`.
-
-## MCP Server
-
-If Sai tools such as `mcp_info` and `market_prices` are available, prefer
-them over shell commands. To register them, run `sai mcp install claude`
-(or `codex`, `cursor`, `--all`); `sai mcp list --json` shows where Sai is
-registered, and `sai mcp uninstall CLIENT` removes it. A client needs a
-restart or reconnect to load the change. If `install` returns code
-`UNSTABLE_PATH`, `sai` is running from the uv cache: run `uv tool install
-git+https://github.com/SaiDotFun/open-sai` first. `sai mcp serve` is meant for
-an agent client to launch, not for a person to run. Call `mcp_info` first. Every tool is listed
-at all times, but trades submit only while someone is signed in:
-`mcp_info.trading.available` says whether they can, and its `reason` is
-`signed-in`, `signed-out`, `expired`, or `other-endpoint`. A signed-out
-`trade_*` call returns `SIGNED_OUT` (or `SESSION_EXPIRED`, or
-`SESSION_UNAVAILABLE`) and submits nothing; ask the person to run `sai auth
-login` or `sai auth import` in their own terminal. Before any trade, call the
-matching `preview_*` tool, show the person the result, and wait for explicit
-confirmation. Then call the `trade_*` tool with the preview's `previewDigest`
-(and `referencePrice` for a market open). On `PREVIEW_MISMATCH` or
-`PRICE_MOVED`, show the fresh preview and confirm again. After a timeout or
-unknown outcome, call `intent_local` and `intent_status`; never resubmit
-blindly.
-
-`auth_list` shows the connected accounts and which is active. Preview and
-trade tools act on the active account, or on another connected account
-passed as `addr`. Name the account when you show a preview. Call
-`auth_use` only when the person asks to switch; it also changes the CLI's
-active account.
-
-## Trading
-
-Trade commands are `trade open`, `trade close`, `trade partial-close`, and
-`trade tpsl`, `trade leverage`, and `trade margin`. Use each command's `--help` for parameters. `--dry-run` prints
-the local request without submitting an intent. Accepted means Keeper admitted
-the request; it does not mean the trade executed. Use `intent local ADDR`
-and `intent status ADDR --key KEY` to inspect and reconcile. If the outcome
-is unknown, retain its intent key and do not blindly submit again. An unknown
-intent blocks new trades until `intent status --key` resolves it; when Keeper
-has no record five minutes after submission, the CLI marks it `absent` and
-trading resumes.
-
-## Examples
-
-These examples use placeholders for the public account addr and an
-existing trade ID. They do not fund an account or send a trade.
+Check for the CLI with `sai --version`. If it is missing, install the newest
+release with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-sai --json market list
-sai --json account positions 0xYOUR_ADDR
-sai --json account balances 0xYOUR_ADDR
-sai auth import
-sai --json trade open --market 0 --side long --type market \
-  --amount 2 --leverage 2 --slippage 1 --dry-run
-sai --json trade open --market 0 --side long --type limit \
-  --amount 2 --leverage 2 --price 60000 --slippage 1 --dry-run
-sai --json trade partial-close 42 --percent 50 --dry-run
-sai --json trade leverage 42 --leverage 5 --dry-run
-sai --json trade margin 42 --direction add --amount 5 --dry-run
-sai --json trade close 42 --dry-run
-sai --json intent status 0xYOUR_ADDR --key INTENT_KEY
-sai --json watch price 3
+uv run https://raw.githubusercontent.com/SaiDotFun/open-sai/main/scripts/install.py
 ```
 
-For a live market order, the CLI refreshes the market price before admission
-and includes the reference price in the accepted response. A dry run reports
-that price refresh is still required. Partial close reads live position,
-contract, and market data, including in dry-run mode, and refuses while Keeper's
-index lags the contract. A successful execution remains pending
-locally until the CLI observes matching indexed trade history.
+The script finds the newest `sai-cli` release, checks its wheel against the
+release's checksums, and installs it with `uv tool install`. To build from
+source instead:
 
-Margin commands quote from live contract state even in dry-run mode. They
-submit a target leverage rather than an amount cap, so the actual margin delta
-may differ if the position changes between the last check and execution.
+```bash
+uv tool install git+https://github.com/SaiDotFun/open-sai
+```
+
+To try it without installing:
+
+```bash
+uvx --from git+https://github.com/SaiDotFun/open-sai sai --json market prices
+```
+
+The package is `sai-cli`. `uv tool install sai` installs an unrelated PyPI
+package.
+
+## Which Page to Read
+
+| Task | Page |
+| --- | --- |
+| Run `sai` commands: markets, accounts, watches, connecting an account, settings, `sai doctor`, `sai update` | [cli.md](cli.md) |
+| Find out what a command, MCP tool call, or trade did, from `sai logs` | [cli.md](cli.md#logs) |
+| Register the MCP server with an agent client, or use Sai MCP tools | [mcp.md](mcp.md) |
+| Anything that previews, submits, or follows a trade, through the CLI or MCP | [trading-safety.md](trading-safety.md) |
+| Live Perp and Oracle contract state: markets, collaterals, OI limits, fees, deposits, credits | [references/contracts.md](references/contracts.md) |
+| SLP Vault health, share price, deposit caps, epochs, raw vault state | [references/vaults.md](references/vaults.md) |
+| Sai Keeper GraphQL: indexed trades, LP history, prices, referrals, subscriptions | [references/graphql.md](references/graphql.md) |
+| DexPal REST: public stats, markets, yield, health checks | [references/rest.md](references/rest.md) |
+| Referral code ownership, redemptions, testnet balance and credit checks | [references/referrals.md](references/referrals.md) |
+| Why contract state, GraphQL, and REST disagree | [references/reconciliation.md](references/reconciliation.md) |
+
+Read [trading-safety.md](trading-safety.md) before the first trade of a
+session, even when the person asks for one quick order.
+
+## Rules for Every Task
+
+- If Sai MCP tools such as `mcp_info` and `market_prices` are available,
+  prefer them over shell commands.
+- Command `sai --help` and each command's `--help` are the authority for
+  options. Put `--json` before the command for machine-readable output:
+  `sai --json market list`.
+- Mainnet is the default network.
+- Never ask the person for a session token, and never type, paste, or echo
+  one. The person signs in with `sai auth import` or `sai auth login NAME`.
+- Say which account a trade uses before the person confirms it, and pin
+  that account on both the preview and the trade.
+- Keeper accepting an intent does not mean the trade executed.
+
+## Copies of This Skill
+
+This skill is edited in
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai)
+and packaged with the CLI. Command `sai --skill` prints the packaged
+`SKILL.md`. A CLI that lists `skill` in `sai --help` also has `sai skill show
+--page NAME` for one child page and `sai skill source` for the commit the
+copy came from; [cli.md](cli.md) has the details. When this page and the
+installed CLI disagree about a command, follow `sai --help`.
+
+## Outside This Skill
+
+- Contract uploads, migrations, admin messages, creating referral codes,
+  issuing trading credits, and other operator changes belong to agent skill
+  `sai-ops`.
+- The Sai Keeper Postgres schema and direct database access belong to private
+  agent skill `sai-db`. This skill needs no database access or credentials.
+- Heart Monitor GraphQL for chain transactions and Wasm events belongs to
+  agent skill `nibiru-gql`. `nibiru` CLI mechanics belong to agent skill
+  `nibiru-cli`.
+
+## Reading Protocol Data
+
+For a question that spans several sources:
+
+1. Identify the network and the entity: contract address, market index, token
+   index, trader, vault, referral code, REST endpoint, or GraphQL field.
+2. Read live contract state when the fact controls protocol behavior.
+3. Read GraphQL or REST when the fact is about what the app or API shows.
+4. Compare sources explicitly. Say which one owns each fact and which is
+   stale, derived, or human-maintained.
+
+Common mistakes:
+
+- Contract query JSON uses CosmWasm `snake_case`. GraphQL fields use
+  camelCase.
+- On-chain amounts and GraphQL `Int` amounts are base units. REST responses
+  often return human or USD values.
+- `TokenIndex(0)` is the USD quote placeholder, not collateral. Mainnet
+  collateral is `TokenIndex(1)` for USDC and `TokenIndex(2)` for stNIBI.
+- Some contract queries take wrapped string indices such as
+  `"MarketIndex(0)"`, and others take plain integers. Check
+  [references/contracts.md](references/contracts.md) before guessing.
+- REST 24-hour windows differ. `GET /dexpal/v1/stats` and
+  `GET /dexpal/v1/markets/details` can use different time anchors.
+
+[examples/prompts.md](examples/prompts.md) lists protocol-data prompts that
+should and should not use this skill.

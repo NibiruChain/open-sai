@@ -46,7 +46,7 @@ jobs:
       - run: uv run pytest
 
       # Same command as "just build-check".
-      - name: Check that the wheel and sdist ship SKILL.md
+      - name: Check that the wheel and sdist ship the skill directory
         run: uv run python scripts/check_dist.py
 
       - name: Build the wheel and sdist

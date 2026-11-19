@@ -1,0 +1,327 @@
+"""scripts/sync_skill.py against two throwaway Git repositories."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+import sync_skill
+
+URL = "https://example.com/jiyuu"
+SKILL = "---\nname: sai\ndescription: Test skill.\n---\n\n# Sai\n"
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def init(path: Path) -> Path:
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    git(path, "config", "user.email", "test@example.com")
+    git(path, "config", "user.name", "Test")
+    git(path, "config", "commit.gpgsign", "false")
+    return path
+
+
+def commit(repo: Path, message: str, files: dict[str, str | None]) -> str:
+    """Write FILES (None deletes), commit them, and return the commit."""
+    for name, text in files.items():
+        path = repo / name
+        if text is None:
+            path.unlink()
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    git(repo, "add", "--all")
+    git(repo, "commit", "-q", "-m", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def jiyuu(tmp_path) -> Path:
+    repo = init(tmp_path / "jiyuu")
+    commit(
+        repo,
+        "skills: Add sai",
+        {
+            "ai-skills/sai/SKILL.md": SKILL,
+            "ai-skills/sai/cli.md": "# CLI\n",
+            "ai-skills/sai/references/rest.md": "# REST\n",
+            "ai-skills/other/SKILL.md": "---\nname: other\n---\n",
+        },
+    )
+    return repo
+
+
+@pytest.fixture
+def open_sai(tmp_path) -> Path:
+    repo = init(tmp_path / "open-sai")
+    commit(
+        repo,
+        "init",
+        {"skills/sai/SKILL.md": "---\nname: sai\n---\nold\n", "README.md": "x\n"},
+    )
+    return repo
+
+
+def run(jiyuu: Path, open_sai: Path, **flags: bool) -> int:
+    return sync_skill.sync(jiyuu, "HEAD", URL, open_sai, **flags)
+
+
+def tree(root: Path) -> set[str]:
+    dest = root / "skills" / "sai"
+    return {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
+
+
+def test_dry_run_prints_the_plan_and_writes_nothing(jiyuu, open_sai, capsys):
+    assert run(jiyuu, open_sai) == 0
+    out = capsys.readouterr().out
+    assert "add    cli.md" in out
+    assert "change SKILL.md" in out
+    assert "skills: Sync sai from jiyuu" in out
+    assert "Dry run" in out
+    assert tree(open_sai) == {"SKILL.md"}
+    assert git(open_sai, "status", "--porcelain") == ""
+
+
+def test_run_replaces_the_directory_and_records_the_commit(jiyuu, open_sai):
+    stale = open_sai / "skills" / "sai" / "stale.md"
+    stale.write_text("gone after sync\n")
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert tree(open_sai) == {
+        "SKILL.md",
+        "cli.md",
+        "references/rest.md",
+        ".source.json",
+    }
+    dest = open_sai / "skills" / "sai"
+    assert (dest / "SKILL.md").read_text() == SKILL
+    assert json.loads((dest / ".source.json").read_text()) == {
+        "repository": URL,
+        "path": "ai-skills/sai",
+        "ref": "HEAD",
+        "commit": git(jiyuu, "rev-parse", "HEAD"),
+    }
+    # Only the skill directory changed, and nothing was committed.
+    assert git(open_sai, "log", "--oneline").count("\n") == 0
+
+
+def test_commit_lists_jiyuu_commits_since_the_last_sync(jiyuu, open_sai, capsys):
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    first = git(open_sai, "log", "-1", "--format=%B")
+    assert "Previous sync: none" in first
+    assert "skills: Add sai" in first
+
+    commit(jiyuu, "skills: Explain doctor", {"ai-skills/sai/cli.md": "# CLI\ndoc\n"})
+    commit(jiyuu, "other: Unrelated", {"ai-skills/other/SKILL.md": "changed\n"})
+    head = commit(
+        jiyuu,
+        "skills: Drop REST page",
+        {"ai-skills/sai/references/rest.md": None},
+    )
+    (open_sai / "untracked.txt").write_text("left alone\n")
+    capsys.readouterr()
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    out = capsys.readouterr().out
+    assert "remove references/rest.md" in out
+
+    message = git(open_sai, "log", "-1", "--format=%B")
+    assert message.startswith(f"skills: Sync sai from jiyuu {head[:7]}\n")
+    assert "jiyuu commits since the previous sync:" in message
+    assert "skills: Explain doctor" in message
+    assert "skills: Drop REST page" in message
+    assert "Unrelated" not in message
+    assert "skills: Add sai" not in message
+    assert tree(open_sai) == {"SKILL.md", "cli.md", ".source.json"}
+    assert git(open_sai, "status", "--porcelain") == "?? untracked.txt"
+
+
+def test_second_sync_of_the_same_commit_does_nothing(jiyuu, open_sai, capsys):
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    before = git(open_sai, "rev-parse", "HEAD")
+    capsys.readouterr()
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    assert "already matches" in capsys.readouterr().out
+    assert git(open_sai, "rev-parse", "HEAD") == before
+
+
+def test_unknown_previous_commit_falls_back_to_recent_history(jiyuu, open_sai):
+    record = json.dumps({"commit": "0" * 40})
+    commit(open_sai, "record", {"skills/sai/.source.json": record})
+    planned = sync_skill.plan(jiyuu, "HEAD", URL, open_sai)
+    assert "previous sync not in this history" in planned.message
+    assert "skills: Add sai" in planned.message
+
+
+def test_syncs_a_branch_from_a_url(jiyuu, open_sai, tmp_path, monkeypatch, capsys):
+    git(jiyuu, "checkout", "-q", "-b", "next")
+    head = commit(jiyuu, "skills: Next", {"ai-skills/sai/mcp.md": "# MCP\n"})
+    git(jiyuu, "checkout", "-q", "main")
+    monkeypatch.setattr(sync_skill, "ROOT", open_sai)
+    assert sync_skill.main(["--url", str(jiyuu), "--ref", "next", "--run"]) == 0
+    record = json.loads((open_sai / "skills/sai/.source.json").read_text())
+    assert record["commit"] == head
+    assert record["ref"] == "next"
+    assert "mcp.md" in tree(open_sai)
+
+
+def test_refuses_a_source_without_the_skill(jiyuu, open_sai, tmp_path, capsys):
+    empty = init(tmp_path / "empty")
+    commit(empty, "init", {"README.md": "x\n"})
+    with pytest.raises(sync_skill.SyncError, match="does not exist"):
+        run(empty, open_sai, run=True)
+    assert tree(open_sai) == {"SKILL.md"}
+
+    commit(jiyuu, "break", {"ai-skills/sai/SKILL.md": "no frontmatter\n"})
+    with pytest.raises(sync_skill.SyncError, match="frontmatter"):
+        run(jiyuu, open_sai, run=True)
+    assert tree(open_sai) == {"SKILL.md"}
+
+
+def test_commit_after_an_earlier_run_still_commits(jiyuu, open_sai, capsys):
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    commit(jiyuu, "skills: Explain doctor", {"ai-skills/sai/cli.md": "# CLI\ndoc\n"})
+    head = commit(jiyuu, "skills: Add MCP page", {"ai-skills/sai/mcp.md": "# MCP\n"})
+
+    # Write first to look at the changes, then commit in a second call.
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert git(open_sai, "status", "--porcelain") != ""
+    capsys.readouterr()
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert "already matches" in capsys.readouterr().out
+
+    before = git(open_sai, "rev-parse", "HEAD")
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    out = capsys.readouterr().out
+    assert "uncommitted" in out and "Committed." in out
+    assert git(open_sai, "rev-parse", "HEAD") != before
+    assert git(open_sai, "status", "--porcelain") == ""
+    message = git(open_sai, "log", "-1", "--format=%B")
+    assert message.startswith(f"skills: Sync sai from jiyuu {head[:7]}\n")
+    assert "jiyuu commits since the previous sync:" in message
+    assert "skills: Explain doctor" in message
+    assert "skills: Add MCP page" in message
+    assert "skills: Add sai" not in message
+
+
+def test_commit_can_be_retried_after_a_hook_rejects_it(jiyuu, open_sai):
+    hooks = open_sai / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    git(open_sai, "config", "core.hooksPath", str(hooks))
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    with pytest.raises(sync_skill.SyncError, match="commit"):
+        run(jiyuu, open_sai, run=True, commit=True)
+    assert "cli.md" in tree(open_sai)
+    hook.unlink()
+    assert run(jiyuu, open_sai, run=True, commit=True) == 0
+    assert git(open_sai, "status", "--porcelain") == ""
+    assert "skills: Add sai" in git(open_sai, "log", "-1", "--format=%B")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["a\\b.md", "c:x.md", "../x.md", "/abs.md", "a//b.md", "a/./b.md", "a/..", ""],
+)
+def test_unsafe_names_are_refused(name):
+    with pytest.raises(sync_skill.SyncError, match="unsafe path"):
+        sync_skill.check_name(name)
+
+
+def test_safe_names_pass():
+    for name in ("SKILL.md", ".source.json", "references/deep/x.json", "a b.md"):
+        sync_skill.check_name(name)
+
+
+def test_source_with_a_windows_path_name_changes_nothing(jiyuu, open_sai):
+    # Ordinary file names on Unix; path syntax on Windows.
+    commit(jiyuu, "odd", {"ai-skills/sai/..\\..\\escape.md": "x\n"})
+    with pytest.raises(sync_skill.SyncError, match="unsafe path"):
+        run(jiyuu, open_sai, run=True)
+    assert tree(open_sai) == {"SKILL.md"}
+    assert not (open_sai / "escape.md").exists()
+
+
+def test_write_checks_every_path_before_deleting(open_sai):
+    dest = open_sai / "skills" / "sai"
+    with pytest.raises(sync_skill.SyncError):
+        sync_skill.write(dest, {"SKILL.md": b"new", "../../outside.md": b"x"})
+    assert (dest / "SKILL.md").read_text() == "---\nname: sai\n---\nold\n"
+    assert not (open_sai / "outside.md").exists()
+
+
+def test_old_symlink_in_the_skill_cannot_redirect_writes(jiyuu, open_sai):
+    # skills/sai/references is a link to a sibling directory in the old tree.
+    dest = open_sai / "skills" / "sai"
+    old = dest / "old-references"
+    old.mkdir()
+    (old / "keep.md").write_text("old\n")
+    (dest / "references").symlink_to("old-references")
+    outside = open_sai / "outside"
+    outside.mkdir()
+    (dest / "examples").symlink_to(outside)
+    commit(jiyuu, "examples", {"ai-skills/sai/examples/prompts.md": "# P\n"})
+
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert not (dest / "references").is_symlink()
+    assert (dest / "references" / "rest.md").read_text() == "# REST\n"
+    assert not (dest / "old-references").exists()
+    assert not (dest / "examples").is_symlink()
+    assert list(outside.iterdir()) == []
+    assert tree(open_sai) == {
+        "SKILL.md",
+        "cli.md",
+        "references/rest.md",
+        "examples/prompts.md",
+        ".source.json",
+    }
+    # No staging or backup directory is left behind.
+    assert [p.name for p in (open_sai / "skills").iterdir()] == ["sai"]
+
+
+def test_interrupted_write_keeps_the_old_tree(jiyuu, open_sai, monkeypatch):
+    dest = open_sai / "skills" / "sai"
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst) == dest and "-new-" in Path(src).name:
+            raise KeyboardInterrupt
+        real_replace(src, dst)
+
+    monkeypatch.setattr(sync_skill.os, "replace", replace)
+    with pytest.raises(KeyboardInterrupt):
+        run(jiyuu, open_sai, run=True)
+    monkeypatch.undo()
+    assert tree(open_sai) == {"SKILL.md"}
+    assert (dest / "SKILL.md").read_text() == "---\nname: sai\n---\nold\n"
+    assert [p.name for p in (open_sai / "skills").iterdir()] == ["sai"]
+
+
+def test_nested_files_of_any_type_are_synced(jiyuu, open_sai):
+    commit(
+        jiyuu,
+        "nested",
+        {
+            "ai-skills/sai/references/data/x.json": "{}\n",
+            "ai-skills/sai/references/deep/er/page.md": "# P\n",
+        },
+    )
+    assert run(jiyuu, open_sai, run=True) == 0
+    assert {"references/data/x.json", "references/deep/er/page.md"} <= tree(open_sai)
+
+
+def test_commit_flag_needs_run(capsys):
+    with pytest.raises(SystemExit):
+        sync_skill.main(["--commit"])
+    assert "--commit needs --run" in capsys.readouterr().err

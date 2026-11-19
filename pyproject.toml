@@ -29,8 +29,8 @@ where = ["cli"]
 namespaces = true
 include = ["sai_cli*"]
 
-[tool.setuptools.package-data]
-"sai_cli" = ["skills/SKILL.md"]
+# Package data is set in setup.py, which walks cli/sai_cli/skills. A glob
+# here would skip hidden directories.
 
 [tool.pytest.ini_options]
 testpaths = ["cli/sai_cli/tests"]
