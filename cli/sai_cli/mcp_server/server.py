@@ -724,8 +724,8 @@ class SaiMCP(FastMCP):
         parameters the tool defines are kept, and a call to a tool this
         server does not have logs none (the first value is then None). A
         string is marked as one whole value, so a URL in it is cut to its
-        origin through to its end. The logger bounds how much of a large
-        value it copies.
+        origin through to its end. Every parameter is a single value, so a
+        list or object in its place is logged as its type and length only.
         """
         try:
             tool = self._tool_manager.get_tool(name)
@@ -733,13 +733,7 @@ class SaiMCP(FastMCP):
             if tool is None:
                 return None, len(given)
             names = tool.parameters.get("properties", {})
-            known = {
-                key: sai_log.Arg(given[key])
-                if isinstance(given[key], str)
-                else given[key]
-                for key in names
-                if key in given
-            }
+            known = {key: loggable_value(given[key]) for key in names if key in given}
             return known, len(given) - len(known)
         except Exception:  # noqa: BLE001 - logging must not fail a call
             return None, 0
@@ -761,6 +755,17 @@ class SaiMCP(FastMCP):
                 result = (content, {"result": refusal})
                 return result  # ty: ignore[invalid-explicit-return]
         return await super().call_tool(name, arguments)
+
+
+def loggable_value(value: Any) -> Any:
+    """One tool argument for the log: a string as one whole value, a
+    number or flag as it is, and anything else as its type and length."""
+    if isinstance(value, str):
+        return sai_log.Arg(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    size = len(value) if isinstance(value, (dict, list)) else 1
+    return f"[{type(value).__name__} of {size}]"
 
 
 # Result fields copied into `mcp.tool_result`: enough to follow a call

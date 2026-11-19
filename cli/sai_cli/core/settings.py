@@ -249,6 +249,14 @@ def parse_file(text: str, path: Path | str) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     for section, table in data.items():
         if not isinstance(table, dict):
+            if section in LENIENT_SECTIONS:
+                # Not worth stopping a trade for: the feature goes off.
+                message = f"{section!r} must be a table, such as [{section}]"
+                for spec in SETTINGS:
+                    if spec.section == section:
+                        values[spec.key] = Invalid(message)
+                warnings.append(f"{path}: {message}; logging is off until it is fixed")
+                continue
             if section in SECTIONS:
                 # A known section that is not a table would otherwise fall back
                 # to the default and quietly select another Keeper.

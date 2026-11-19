@@ -330,10 +330,11 @@ logger also treats every string as untrusted:
   host, and port, so an API key in a path or query is not written. In
   running text a URL runs to the next space; in a command-line token or a
   tool argument it runs to the end of the value.
-- Session tokens are replaced when the event is made, so signing out
-  afterwards cannot leave one in a line that was still waiting to be
-  written. Anything shaped like a JWT, and hex strings of 100 digits or
-  more, such as a signature, are replaced too.
+- Session tokens this process has seen are replaced when the event is
+  made, so signing out afterwards cannot leave one in a line that was
+  still waiting to be written. The background writer rereads the session
+  store and replaces its tokens again. Anything shaped like a JWT, and hex
+  strings of 100 digits or more, such as a signature, are replaced too.
 - Text Keeper or a tool returned, and error messages that can quote what
   was typed (`keeperErrors`, `errorMsg`, `error`), are cut to 300
   characters, lose hex strings of 64 digits or more, and end at the first
@@ -342,7 +343,13 @@ logger also treats every string as untrusted:
   `unknownArguments` counts the rest, and a call to a tool the server does
   not have is logged as tool `unknown` with no arguments.
 - Other strings are cut at 2000 characters, lists and objects at 64 items,
-  and one event at about 12,000 characters.
+  and one event at 512 values and about 12,000 characters. A list or object
+  passed where a tool takes a single value is logged as its type and length.
+
+Known limit: if another process stores a session token and removes it again
+before this process's writer reaches a line that quotes it, only the token's
+shape can catch it. Sai session tokens are JWTs, which are always removed by
+shape. A token of some other form in that window would be written.
 
 Logging never slows a command or a trade. Events go on an in-memory queue of
 at most 2048 events and 4 MB, and one background thread scrubs and writes
@@ -352,7 +359,8 @@ writes one `log.dropped` line with the count. At exit sai waits up to 0.3
 seconds for the queue to empty and drops the rest.
 
 sai writes only inside a real `$SAI_HOME/logs` directory that you own. It
-does not follow a symlink at that path, and it does not append to a symlink,
+does not follow a symlink at that path, or on Windows a junction or other
+reparse point, and it does not append to a symlink,
 a FIFO, a file with other hard links, or a file someone else owns. It
 removes group and other access from the directory and from a log file before
 appending. A logs directory that cannot be written never fails a command;
@@ -366,8 +374,9 @@ files in the directory are left alone.
 
 `sai config set logs.enabled false` or `SAI_LOG=0` turns logging off;
 nothing is then written or created. A logs setting sai cannot read, such as
-`SAI_LOG_KEEP_DAYS=two`, also turns logging off and prints a warning; it
-never stops a command or `sai mcp serve`. `sai config list` shows its source
+`SAI_LOG_KEEP_DAYS=two` or a `logs` entry that is not a table, also turns
+logging off and prints a warning; it never stops a command or `sai mcp
+serve`. `sai config list` shows its source
 as `invalid`. `sai logs`, `sai doctor --no-fix`, `--help`, `--version`, and
 `--skill` never write log lines.
 

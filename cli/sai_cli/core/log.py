@@ -9,10 +9,9 @@ Every line carries `ts`, `level`, `event`, `surface`, `pid`, `version`,
 which orders events that share a millisecond), then the fields bound with
 `bind`, then the event's own fields.
 
-`event` never blocks and never touches the logs directory: it stamps the
-line, copies its fields, and puts it on a bounded queue. Its one file access
-is a look at the session file at most once a second, to learn the tokens. One daemon thread drains the queue and does everything that
-can wait on a disk: reading the configuration, scrubbing, opening, writing,
+`event` does no I/O and never blocks: it stamps the line, copies its fields
+within a fixed budget, and puts it on a bounded queue. One daemon thread
+drains the queue and does everything that can wait on a disk: reading the configuration, scrubbing, opening, writing,
 and deleting old files. The queue is bounded by count and by size, and each
 event's fields are cut to a fixed budget as they are copied. When the queue
 is full the event is dropped and counted, and a later `log.dropped` line
@@ -23,10 +22,16 @@ intent and submitting it.
 
 Callers pass only values that are safe to store: never the session token, a
 signature, or clipboard text. Every string is still treated as untrusted.
-`event` removes each session token this process knows of as it copies the
-fields, so a later sign-out cannot leave a queued token unredacted. The
-writer then reduces URLs to their origin, and removes anything shaped like a
-JWT and long hex strings such as signatures.
+`event` removes each session token this process has already seen as it
+copies the fields, so a later sign-out here cannot leave a queued token
+unredacted. The writer rereads the session store, removes its tokens again,
+reduces URLs to their origin, and removes anything shaped like a JWT and
+long hex strings such as signatures.
+
+Known limit: a token that only another process ever stored, and removed
+again before this process's writer reached the queued line, is caught by
+its shape alone. Sai session tokens are JWTs, which that always removes; an
+opaque token in that window would be written.
 Text from outside sai, wrapped in `untrusted`, is cut shorter and loses hex
 strings of 64 digits or more.
 
@@ -82,6 +87,10 @@ MAX_LINE = 16 * 1024
 # What `event` copies from one call: characters of text in all, items of
 # any one list or mapping, and nesting depth. The rest is cut.
 EVENT_CHARS = 12 * 1024
+# Values copied from one call, counting every number, flag, string, list,
+# and mapping, and what each costs against EVENT_CHARS besides its text.
+EVENT_NODES = 512
+NODE_CHARS = 16
 MAX_ITEMS = 64
 MAX_DEPTH = 6
 CUT = "[cut]"
@@ -91,8 +100,6 @@ QUEUE_SIZE = 2048
 QUEUE_CHARS = 4 * 1024 * 1024
 # How long the process waits at exit for the queue to drain.
 EXIT_FLUSH_SECONDS = 0.3
-# How often `event` checks whether the session file changed.
-TOKEN_CHECK_SECONDS = 1.0
 # Extra lines `tail` reads from each file, so an event that was appended
 # after newer ones still sorts into place.
 TAIL_SLACK = 256
@@ -303,7 +310,6 @@ def origin(value: str) -> str:
 _known: set[str] = set()
 _token_lock = threading.Lock()
 _token_key: Any = None
-_token_checked = 0.0
 
 
 def remember(tokens: Any) -> None:
@@ -317,14 +323,14 @@ def remember(tokens: Any) -> None:
 def known_tokens(*, check: bool = False) -> tuple[str, ...]:
     """The session tokens to remove, longest first.
 
-    Rereads the session store when its file changed, looking at most once
-    every TOKEN_CHECK_SECONDS unless CHECK is set. A failed read is retried
-    at the next look instead of being taken for "no tokens".
+    Without CHECK this reads nothing: it returns what this process already
+    saw. `event` uses it that way, so making an event never waits on the
+    session store. With CHECK, as the writer thread and `redact` call it,
+    the session store is reread first when its file changed. A failed read
+    is retried at the next check instead of being taken for "no tokens".
     """
-    global _token_key, _token_checked
-    current = time.monotonic()
-    if check or current - _token_checked >= TOKEN_CHECK_SECONDS:
-        _token_checked = current
+    global _token_key
+    if check:
         try:
             from . import storage
 
@@ -334,7 +340,7 @@ def known_tokens(*, check: bool = False) -> tuple[str, ...]:
                 # load_accounts calls remember().
                 storage.load_accounts()
                 _token_key = key
-        except Exception:  # noqa: BLE001 - retried at the next look
+        except Exception:  # noqa: BLE001 - retried at the next check
             _token_key = None
     with _token_lock:
         return tuple(sorted(_known, key=len, reverse=True))
@@ -412,13 +418,20 @@ def _snapshot(
 
     Strings lose the session tokens known now, are cut to MAX_TEXT, and
     keep their `Untrusted`, `Endpoint`, or `Arg` type. Lists and mappings
-    keep MAX_ITEMS items to MAX_DEPTH levels. BUDGET[0] is the characters
-    of text left for this event; past it, values become a marker.
+    keep MAX_ITEMS items to MAX_DEPTH levels. BUDGET is the characters and
+    the values left for this event. Every value is charged, numbers and
+    containers included, before it is copied; past either limit a value
+    becomes a marker.
     """
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if budget[0] <= 0:
+    budget[0] -= NODE_CHARS
+    budget[1] -= 1
+    if budget[0] < 0 or budget[1] < 0:
         return CUT
+    if value is None or isinstance(value, (bool, float)):
+        return value
+    if isinstance(value, int):
+        # An integer of any size is legal JSON; one this long is not a count.
+        return value if value.bit_length() <= 64 else CUT
     if isinstance(value, str):
         # Look a little past the cut, so a token that straddles it goes.
         text = value[: MAX_TEXT + 4096]
@@ -437,7 +450,7 @@ def _snapshot(
     if isinstance(value, Mapping):
         copied: dict[str, Any] = {}
         for index, (key, item) in enumerate(value.items()):
-            if index >= MAX_ITEMS or budget[0] <= 0:
+            if index >= MAX_ITEMS or budget[0] <= 0 or budget[1] <= 0:
                 copied[CUT] = len(value) - index
                 break
             name = _snapshot(str(key)[: MAX_UNTRUSTED + 1], budget, tokens, depth + 1)
@@ -446,11 +459,13 @@ def _snapshot(
     if isinstance(value, (list, tuple, set, frozenset)):
         items: list[Any] = []
         for index, item in enumerate(value):
-            if index >= MAX_ITEMS or budget[0] <= 0:
+            if index >= MAX_ITEMS or budget[0] <= 0 or budget[1] <= 0:
                 items.append(f"{CUT} {len(value) - index} more items")
                 break
             items.append(_snapshot(item, budget, tokens, depth + 1))
         return items
+    budget[0] += NODE_CHARS
+    budget[1] += 1
     return _snapshot(str(value), budget, tokens, depth)
 
 
@@ -487,13 +502,33 @@ def bound(name: str) -> Any:
 # The logs directory
 
 
+def redirected(path: Path) -> bool:
+    """True when PATH is a symlink, a Windows junction, or any other
+    reparse point, so that writing "inside" it would land somewhere else.
+    Also true on Windows when that cannot be checked: without directory
+    descriptors, the path is all there is to go on."""
+    try:
+        if path.is_symlink():
+            return True
+        junction = getattr(path, "is_junction", None)
+        if junction is not None and junction():
+            return True
+        attributes = getattr(os.lstat(path), "st_file_attributes", None)
+    except OSError:
+        return os.name == "nt"
+    if attributes is None:
+        return os.name == "nt"
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 class LogDir:
     """The logs directory, opened without following a symlink.
 
     Files are opened, checked, and deleted relative to the directory's
     descriptor, so replacing the directory with a symlink after it was
     opened redirects nothing. Where the platform has no directory
-    descriptors, paths are used and symlinks are refused by name.
+    descriptors, as on Windows, paths are used, and a directory that is a
+    symlink, a junction, or another reparse point is refused.
     """
 
     def __init__(self, root: Path, fd: int | None) -> None:
@@ -511,7 +546,7 @@ class LogDir:
                 with suppress(FileExistsError):
                     root.mkdir(mode=DIR_MODE)
             if not _DIR_FD:
-                if root.is_symlink() or not root.is_dir():
+                if redirected(root) or not root.is_dir():
                     return None
                 return cls(root, None)
             fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW)
@@ -862,10 +897,9 @@ def event(name: str, level: str = "info", /, **fields: Any) -> None:
     """Queue one event for the writer. Never blocks and never raises; with
     logging off it returns before looking at FIELDS.
 
-    The work is bounded: FIELDS are copied within a fixed budget, cleared
-    of the session tokens known at this moment. The only file access is a
-    look at the session file at most once a second, and a read of it when
-    it changed.
+    The work is bounded and does no I/O: FIELDS are copied within a fixed
+    budget and cleared of the session tokens this process has seen. The
+    writer thread reads the session store and scrubs again.
     """
     global _dropped, _queued_chars
     try:
@@ -875,7 +909,7 @@ def event(name: str, level: str = "info", /, **fields: Any) -> None:
         context = dict(_context.get())
         surface = context.pop("surface", "cli")
         extra = {k: v for k, v in {**context, **fields}.items() if v is not None}
-        budget = [EVENT_CHARS]
+        budget = [EVENT_CHARS, EVENT_NODES]
         line = {
             "ts": stamp(now()),
             "level": level if level in LEVELS else "info",
@@ -928,12 +962,11 @@ def reset() -> None:
     """Write what is queued, then forget cached state, so the next event
     rereads the configuration and retries a directory that failed. For
     tests."""
-    global _token_key, _token_checked, _silenced, _dropped
+    global _token_key, _silenced, _dropped
     flush()
     _silenced = 0
     _dropped = 0
     _token_key = None
-    _token_checked = 0.0
     with _token_lock:
         _known.clear()
     _config_cache.clear()

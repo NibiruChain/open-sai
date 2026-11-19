@@ -252,7 +252,7 @@ def test_a_copy_of_a_huge_value_takes_bounded_time():
     huge = ["z" * 1_000_000 for _ in range(2000)]
     start = time.monotonic()
     for _ in range(200):
-        log._snapshot({"addr": huge}, [log.EVENT_CHARS], ())
+        log._snapshot({"addr": huge}, [log.EVENT_CHARS, log.EVENT_NODES], ())
     assert time.monotonic() - start < 5
 
 
@@ -1236,29 +1236,158 @@ def test_a_token_queued_before_sign_out_is_still_redacted(home):
     assert log.redact(f"x {OPAQUE_TOKEN}") == f"x {log.REDACTED}"
 
 
-def test_a_token_another_process_stored_is_redacted_when_the_event_is_made(home):
-    """This process never signed in: it learns the tokens from the session
-    file, looking again at most once a second."""
-    script = (
-        "import sys;from sai_cli.core import storage;"
-        "storage.save_session({'token':sys.argv[1],'evmAddress':sys.argv[2],"
-        "'endpoint':'https://k.example/query','expiresAt':'2999-01-01T00:00:00+00:00'})"
-    )
+STORE = (
+    "import sys;from sai_cli.core import storage;"
+    "storage.save_session({'token':sys.argv[1],'evmAddress':sys.argv[2],"
+    "'endpoint':'https://k.example/query','expiresAt':'2999-01-01T00:00:00+00:00'})"
+)
+
+
+def test_the_writer_redacts_a_token_another_process_stored(home):
+    """This process never signed in. The writer thread reads the session
+    store before it writes, so the token still goes."""
     env = {**os.environ, "SAI_HOME": str(home), "SAI_LOG": "0"}
     subprocess.run(
-        [sys.executable, "-c", script, OPAQUE_TOKEN, ADDR], env=env, check=True
+        [sys.executable, "-c", STORE, OPAQUE_TOKEN, ADDR], env=env, check=True
     )
+    assert log.known_tokens() == ()
+    log.event("queued", error=f"failed with {OPAQUE_TOKEN}")
+    raw = raw_logs(home)
+    assert OPAQUE_TOKEN not in raw and raw.count(log.REDACTED) == 1
+    assert log.known_tokens() == (OPAQUE_TOKEN,)
+
+
+def test_making_an_event_never_reads_the_session_store(home, monkeypatch, keeper_stub):
+    """Event creation runs on the MCP event loop and between an intent's
+    reservation and its submission, so it must not wait on the session
+    file. Only the writer thread and explicit redaction read it."""
+    base, _state = keeper_stub
+    env = {**os.environ, "SAI_HOME": str(home), "SAI_LOG": "0"}
+    subprocess.run([sys.executable, "-c", STORE, jwt(), ADDR], env=env, check=True)
+    readers: list[str] = []
+    original = storage.load_accounts
+
+    def recording() -> dict[str, Any]:
+        readers.append(threading.current_thread().name)
+        return original()
+
+    monkeypatch.setattr(storage, "load_accounts", recording)
     with log._io_lock:
-        log.event("queued", error=f"failed with {OPAQUE_TOKEN}")
-        (home / "trader" / "sessions.json").unlink()
-    assert OPAQUE_TOKEN not in raw_logs(home)
-    other = OPAQUE_TOKEN + "-second"
-    subprocess.run([sys.executable, "-c", script, other, OTHER], env=env, check=True)
-    time.sleep(log.TOKEN_CHECK_SECONDS + 0.2)
+        for index in range(50):
+            log.event("probe", index=index, error="text with nothing in it")
+        with log.bind(surface="mcp", tool="market_prices"):
+            log.event("mcp.tool_call", arguments={"addr": ADDR})
+        assert keeper.request(base, keeper.PRICES) == {"oracle": {"tokenPricesUsd": []}}
+        assert readers == []
+    assert log.flush(60)
+    assert readers and set(readers) == {"sai-log"}
+    # The session file is not even looked at: an unreadable one changes nothing.
+    monkeypatch.setattr(storage, "home", lambda: 1 / 0)
+    log.event("still.fine")
+    assert log.flush(60)
+    monkeypatch.undo()
+    assert "still.fine" in raw_logs(home)
+
+
+def test_a_logs_section_that_is_not_a_table_only_turns_logging_off(
+    home, monkeypatch, keeper_stub
+):
+    base, _state = keeper_stub
+    for text in ('logs = "off"\n', "logs = 3\n", "logs = []\n"):
+        (home / "config.toml").write_text(text)
+        warnings: list[str] = []
+        resolved = settings.load({"keeper.endpoint": base}, warn=warnings.append)
+        assert resolved.logs_enabled is False and resolved.endpoint == base
+        assert resolved.sources["logs.enabled"] == "invalid"
+        assert len(warnings) == 1 and "must be a table" in warnings[0]
+        assert "logging is off" in warnings[0]
+        assert log.config()[0] is False
+        result = CliRunner().invoke(
+            main, ["--endpoint", base, "--json", "market", "prices"]
+        )
+        assert result.exit_code == 0 and "tokenPricesUsd" in result.stdout
+        assert "oracle" in call(server.create_server(resolved), "market_prices")
+    assert log.flush(60) and not (home / "logs").exists()
+    # Explicitly off in the environment: still no failure.
+    monkeypatch.setenv("SAI_LOG", "0")
+    assert run_cli("--endpoint", base, "market", "prices")[0] == 0
+    monkeypatch.delenv("SAI_LOG")
+    # A trading section that is not a table is still an error.
+    (home / "config.toml").write_text('keeper = "https://k.example/query"\n')
+    with pytest.raises(settings.SettingsError, match="must be a table"):
+        settings.load({})
+
+
+def test_every_value_counts_toward_an_events_budget(home):
+    """Numbers, flags, and containers are charged too, so a deep or wide
+    value of nothing but numbers cannot be copied whole."""
+    wide = [[index] * 60 for index in range(60)]
+    copy = log._snapshot(
+        {"values": wide}, budget := [log.EVENT_CHARS, log.EVENT_NODES], ()
+    )
+    kept = json.dumps(copy)
+    assert kept.count(",") < log.EVENT_NODES + 8 and log.CUT in kept
+    assert budget[1] <= 0
+    numbers = [log.EVENT_CHARS, log.EVENT_NODES]
+    log._snapshot(list(range(60)), numbers, ())
+    assert log.EVENT_CHARS - numbers[0] == 61 * log.NODE_CHARS
+    assert log._snapshot(10**400, [log.EVENT_CHARS, log.EVENT_NODES], ()) == log.CUT
+    assert log._snapshot(2**63, [log.EVENT_CHARS, log.EVENT_NODES], ()) == 2**63
     with log._io_lock:
-        log.event("queued", error=f"failed with {other}")
-        (home / "trader" / "sessions.json").unlink()
-    assert other not in raw_logs(home) and raw_logs(home).count(log.REDACTED) == 2
+        log.event("first")
+        for _ in range(log.QUEUE_SIZE - 10):
+            log.event("numbers", values=wide)
+        assert 0 < log._queued_chars <= log.QUEUE_CHARS
+        assert log._queue.qsize() < log.QUEUE_SIZE // 2
+    lines = read_logs(home)
+    assert sum(line["event"] == "log.dropped" for line in lines) == 1
+    assert all(len(json.dumps(line)) < log.MAX_LINE for line in lines)
+
+
+def test_a_container_in_place_of_a_scalar_argument_is_logged_by_type(home):
+    save_session(keeper.MAINNET_HTTP)
+    mcp = server.create_server(settings.load({}))
+    nested = [[index] * 500 for index in range(500)]
+    with pytest.raises(ToolError):
+        asyncio.run(mcp.call_tool("account_positions", {"addr": nested}))
+    with pytest.raises(ToolError):
+        asyncio.run(mcp.call_tool("trade_close", {"trade_id": {"a": {"b": 1}}}))
+    first, second = events(home, "mcp.tool_call")
+    assert first["arguments"] == {"addr": "[list of 500]"}
+    assert second["arguments"] == {"trade_id": "[dict of 1]"}
+    assert server.loggable_value(7) == 7 and server.loggable_value(None) is None
+    assert server.loggable_value("x") == "x"
+
+
+def test_a_redirected_logs_directory_is_refused_without_directory_descriptors(
+    home, monkeypatch
+):
+    """The Windows fallback works by path, so a junction or any other
+    reparse point at the logs directory must be refused."""
+    root = home / "logs"
+    root.mkdir(mode=0o700)
+    assert log.redirected(root) is False
+    monkeypatch.setattr(log, "_DIR_FD", False)
+    opened = log.LogDir.open(root)
+    assert opened is not None and opened.fd is None
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == root, raising=False)
+    assert log.redirected(root) is True and log.LogDir.open(root) is None
+    log.event("probe")
+    assert log.flush(60) and list(root.iterdir()) == []
+    assert log.tail(5) == [] and log.log_files(root) == []
+    monkeypatch.setattr(Path, "is_junction", lambda self: False, raising=False)
+
+    class Info:
+        st_file_attributes = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
+
+    monkeypatch.setattr(log.os, "lstat", lambda path: Info())
+    assert log.redirected(root) is True
+    Info.st_file_attributes = 0x10  # FILE_ATTRIBUTE_DIRECTORY
+    assert log.redirected(root) is False
+    # No attributes to read on Windows: it cannot be checked, so refuse.
+    monkeypatch.setattr(log.os, "lstat", lambda path: object())
+    monkeypatch.setattr(log.os, "name", "nt")
+    assert log.redirected(root) is True
 
 
 def test_a_stuck_writer_delays_exit_only_briefly_and_bounds_the_queue(home):
