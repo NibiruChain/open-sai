@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sai_cli.core import intents, keeper, storage
 
-ADDRESS = "0x" + "a" * 40
+ADDR = "0x" + "a" * 40
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +30,7 @@ def closed_endpoint() -> str:
 def session_for(endpoint: str) -> dict[str, str]:
     return {
         "token": "fake-token",
-        "evmAddress": ADDRESS,
+        "evmAddress": ADDR,
         "endpoint": endpoint,
         "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
     }
@@ -41,7 +41,7 @@ def test_connect_error_is_not_sent_and_does_not_block():
     active = session_for(endpoint)
     with pytest.raises(keeper.NotSent):
         intents.submit(endpoint, active, intents.close_intent(7))
-    assert storage.list_pending(endpoint, ADDRESS)[0]["status"] == "not_sent"
+    assert storage.list_pending(endpoint, ADDR)[0]["status"] == "not_sent"
     # A second attempt reaches the transport instead of the reconcile guard.
     with pytest.raises(keeper.NotSent):
         intents.submit(endpoint, active, intents.close_intent(7))
@@ -49,16 +49,14 @@ def test_connect_error_is_not_sent_and_does_not_block():
 
 def test_mark_absent_waits_for_admission_expiry():
     endpoint = keeper.MAINNET_HTTP
-    storage.pending("K1", endpoint, ADDRESS, "CLOSE_POSITION", "7")
+    storage.pending("K1", endpoint, ADDR, "CLOSE_POSITION", "7")
     after = keeper.ABSENT_AFTER_SECONDS
     now = time.time()
-    assert storage.mark_absent("K1", endpoint, ADDRESS, after, now) == "unknown"
-    assert (
-        storage.mark_absent("K1", endpoint, ADDRESS, after, now + after + 1) == "absent"
-    )
-    assert storage.mark_absent("missing", endpoint, ADDRESS, after) is None
+    assert storage.mark_absent("K1", endpoint, ADDR, after, now) == "unknown"
+    assert storage.mark_absent("K1", endpoint, ADDR, after, now + after + 1) == "absent"
+    assert storage.mark_absent("missing", endpoint, ADDR, after) is None
     # An absent key no longer blocks the same position.
-    storage.pending("K2", endpoint, ADDRESS, "CLOSE_POSITION", "7")
+    storage.pending("K2", endpoint, ADDR, "CLOSE_POSITION", "7")
 
 
 def test_unversioned_database_migrates_and_uses_key_time():
@@ -71,13 +69,13 @@ def test_unversioned_database_migrates_and_uses_key_time():
     key = f"{stamp}000Z_ABCDEFGHJKMNPQRS"
     old.execute(
         "INSERT INTO intents VALUES (?, ?, ?, 'CLOSE_POSITION', 'unknown', '7')",
-        (key, keeper.MAINNET_HTTP, ADDRESS),
+        (key, keeper.MAINNET_HTTP, ADDR),
     )
     old.commit()
     old.close()
 
     status = storage.mark_absent(
-        key, keeper.MAINNET_HTTP, ADDRESS, keeper.ABSENT_AFTER_SECONDS
+        key, keeper.MAINNET_HTTP, ADDR, keeper.ABSENT_AFTER_SECONDS
     )
     assert status == "absent"
     connection = sqlite3.connect(path)
@@ -88,4 +86,4 @@ def test_unversioned_database_migrates_and_uses_key_time():
     connection.commit()
     connection.close()
     with pytest.raises(ValueError, match="newer sai version"):
-        storage.list_pending(keeper.MAINNET_HTTP, ADDRESS)
+        storage.list_pending(keeper.MAINNET_HTTP, ADDR)

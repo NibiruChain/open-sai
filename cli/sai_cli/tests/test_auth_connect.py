@@ -27,20 +27,20 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sai_cli.core import keeper
 
-ADDRESS = "0x" + "b" * 40
+ADDR = "0x" + "b" * 40
 OTHER = "0x" + "c" * 40
 # Keeper sends the nonce as bare hex and the typed-data challenge with 0x.
 NONCE = "12" * 32
 SIGNATURE = "0x" + "1" * 130
 
 
-def make_token(address: str = ADDRESS, hours: int = 720) -> str:
+def make_token(addr: str = ADDR, hours: int = 720) -> str:
     def part(value: dict) -> str:
         raw = json.dumps(value).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
     exp = int((datetime.now(UTC) + timedelta(hours=hours)).timestamp())
-    claims = {"purpose": "user_intent", "sub": address, "exp": exp}
+    claims = {"purpose": "user_intent", "sub": addr, "exp": exp}
     return f"{part({'alg': 'HS256'})}.{part(claims)}.c2lnbmF0dXJl"
 
 
@@ -159,14 +159,14 @@ def env(tmp_path: Path) -> Env:
 def assert_connected(env: Env, token: str, result_stdout: str) -> None:
     output = json.loads(result_stdout)
     assert output == {
-        "address": ADDRESS,
+        "addr": ADDR,
         "expiresAt": output["expiresAt"],
         "endpoint": keeper.MAINNET_HTTP,
     }
     assert token.encode() not in env.stored_bytes()
     status = env.run("--json", "auth", "status")
     assert status.returncode == 0, status.stderr
-    assert json.loads(status.stdout)["address"] == ADDRESS
+    assert json.loads(status.stdout)["addr"] == ADDR
     assert token not in status.stdout + status.stderr
 
 
@@ -209,7 +209,7 @@ def test_agent_import_ignores_piped_stdin(env: Env) -> None:
     piped = make_token(OTHER)
     result = env.run("--json", "auth", "import", stdin=piped + "\n")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["address"] == ADDRESS
+    assert json.loads(result.stdout)["addr"] == ADDR
     assert piped not in result.stdout + result.stderr
 
 
@@ -305,7 +305,7 @@ def test_terminal_import_enter_reads_clipboard(env: Env) -> None:
 def session_for(token: str) -> dict[str, str]:
     return {
         "token": token,
-        "evmAddress": ADDRESS,
+        "evmAddress": ADDR,
         "expiresAt": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         "endpoint": keeper.MAINNET_HTTP,
     }
@@ -385,20 +385,20 @@ def test_single_session_from_before_accounts_migrates(env: Env) -> None:
     write_v2_session(env.home, session_for(make_token()))
     status = env.run("--json", "auth", "status")
     assert status.returncode == 0, status.stderr
-    assert json.loads(status.stdout)["address"] == ADDRESS
+    assert json.loads(status.stdout)["addr"] == ADDR
     # The next sign-in rewrites it as version 3 and keeps the old account.
     other = "0x" + "ab" * 20
     env.clipboard()
-    env.clip.write_text(make_token(address=other))
+    env.clip.write_text(make_token(addr=other))
     assert env.run("auth", "import").returncode == 0
     trader = env.home / "trader"
     assert not (trader / "session.json").exists()
     rows = json.loads(env.run("--json", "auth", "list").stdout)["accounts"]
-    assert {r["address"] for r in rows} == {ADDRESS, other}
+    assert {r["addr"] for r in rows} == {ADDR, other}
 
 
-def import_as(env: Env, address: str) -> str:
-    token = make_token(address=address)
+def import_as(env: Env, addr: str) -> str:
+    token = make_token(addr=addr)
     env.clipboard()
     env.clip.write_text(token)
     result = env.run("--json", "auth", "import")
@@ -407,28 +407,26 @@ def import_as(env: Env, address: str) -> str:
 
 
 def test_accounts_connect_switch_and_disconnect(env: Env) -> None:
-    first, second = ADDRESS, "0x" + "ab" * 20
+    first, second = ADDR, "0x" + "ab" * 20
     tokens = [import_as(env, first), import_as(env, second)]
 
     def rows() -> dict[str, bool]:
         result = env.run("--json", "auth", "list")
         assert result.returncode == 0, result.stderr
         assert not any(t in result.stdout for t in tokens)
-        return {
-            r["address"]: r["active"] for r in json.loads(result.stdout)["accounts"]
-        }
+        return {r["addr"]: r["active"] for r in json.loads(result.stdout)["accounts"]}
 
     # Signing in adds an account and makes it active.
     assert rows() == {first: False, second: True}
     status = env.run("--json", "auth", "status")
-    assert json.loads(status.stdout)["address"] == second
+    assert json.loads(status.stdout)["addr"] == second
 
     # --as acts as another connected account for one command.
     status = env.run(
         "--json", "--as", first.upper().replace("0X", "0x"), "auth", "status"
     )
     assert status.returncode == 0, status.stderr
-    assert json.loads(status.stdout)["address"] == first
+    assert json.loads(status.stdout)["addr"] == first
     assert rows() == {first: False, second: True}
 
     used = env.run("--json", "auth", "use", first)
@@ -444,7 +442,7 @@ def test_accounts_connect_switch_and_disconnect(env: Env) -> None:
     out = env.run("--json", "auth", "logout", second)
     assert json.loads(out.stdout) | {"note": ""} == {
         "removed": True,
-        "address": second,
+        "addr": second,
         "note": "",
     }
     assert rows() == {first: True}
@@ -491,7 +489,7 @@ def typed_data(**overrides) -> dict:
         "primaryType": "UserTradingSession",
         "domain": {"name": "Sai", "version": "1", "chainId": 6900},
         "message": {
-            "account": ADDRESS,
+            "account": ADDR,
             "challenge": "0x" + NONCE,
             "action": "Enable Sai trading",
             "expiresAt": "2026-11-17T00:05:00Z",
@@ -519,11 +517,11 @@ def typed_data(**overrides) -> dict:
 )
 def test_check_session_typed_data_rejects_other_requests(overrides) -> None:
     with pytest.raises(keeper.KeeperError, match="not a Sai trading session"):
-        keeper.check_session_typed_data(typed_data(**overrides), ADDRESS, NONCE)
+        keeper.check_session_typed_data(typed_data(**overrides), ADDR, NONCE)
 
 
 def test_check_session_typed_data_accepts_keeper_challenge() -> None:
-    keeper.check_session_typed_data(typed_data(), ADDRESS.upper(), NONCE.upper())
+    keeper.check_session_typed_data(typed_data(), ADDR.upper(), NONCE.upper())
 
 
 @pytest.fixture
@@ -553,7 +551,7 @@ def keeper_auth():
                 data = {
                     "createUserIntentSession": {
                         "token": state["token"],
-                        "evmAddress": ADDRESS,
+                        "evmAddress": ADDR,
                         "expiresAt": "2026-12-17T00:00:00+00:00",
                     }
                 }
@@ -583,7 +581,7 @@ def fake_cast(env: Env) -> None:
         "import json\n"
         "args = sys.argv[1:]\n"
         "if args[:2] == ['wallet', 'address']:\n"
-        f"    print({ADDRESS!r})\n"
+        f"    print({ADDR!r})\n"
         "elif args[:2] == ['wallet', 'sign']:\n"
         "    data = json.load(open(args[-1]))\n"
         "    assert data['primaryType'] == 'UserTradingSession'\n"
@@ -593,7 +591,7 @@ def fake_cast(env: Env) -> None:
     )
 
 
-def test_cast_login_derives_address_and_signs(env: Env, keeper_auth) -> None:
+def test_cast_login_derives_addr_and_signs(env: Env, keeper_auth) -> None:
     fake_cast(env)
     result = env.run(
         "--json",
@@ -605,7 +603,7 @@ def test_cast_login_derives_address_and_signs(env: Env, keeper_auth) -> None:
         "dev",
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["address"] == ADDRESS
+    assert json.loads(result.stdout)["addr"] == ADDR
     assert keeper_auth["token"] not in result.stdout + result.stderr
     calls = env.log.read_text().splitlines()
     assert calls[0].endswith("cast wallet address --account dev")
@@ -625,8 +623,8 @@ def test_cast_login_refuses_foreign_typed_data(env: Env, keeper_auth) -> None:
         "login",
         "--account",
         "dev",
-        "--address",
-        ADDRESS,
+        "--addr",
+        ADDR,
     )
     assert result.returncode != 0
     assert "not a Sai trading session request" in result.stderr
@@ -655,11 +653,11 @@ def fake_ud(env: Env, known: str = "dev", state: str = "matching") -> None:
     """
     shown = {
         "name": known,
-        "address": ADDRESS.upper().replace("0X", "0x"),
+        "address": ADDR.upper().replace("0X", "0x"),
         "notes": "",
         "cast": {
             "name": known,
-            "address": ADDRESS.upper().replace("0X", "0x"),
+            "address": ADDR.upper().replace("0X", "0x"),
             "state": state,
             "keystorePath": f"/keystores/{known}",
             "duplicateNames": [],
@@ -692,11 +690,11 @@ def login(env: Env, keeper_auth, *args: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def test_wallet_login_reads_address_from_ud(env: Env, keeper_auth) -> None:
+def test_wallet_login_reads_addr_from_ud(env: Env, keeper_auth) -> None:
     fake_ud(env)
     result = login(env, keeper_auth, "--wallet", "dev")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["address"] == ADDRESS
+    assert json.loads(result.stdout)["addr"] == ADDR
     assert UD_SECRET not in result.stdout + result.stderr
     assert keeper_auth["token"] not in result.stdout + result.stderr
     calls = env.log.read_text().splitlines()
@@ -707,16 +705,14 @@ def test_wallet_login_reads_address_from_ud(env: Env, keeper_auth) -> None:
     assert status.returncode == 0, status.stderr
 
 
-def test_wallet_login_cross_checks_address(env: Env, keeper_auth) -> None:
+def test_wallet_login_cross_checks_addr(env: Env, keeper_auth) -> None:
     fake_ud(env)
-    same = login(
-        env, keeper_auth, "--wallet", "dev", "--address", "0x" + ADDRESS[2:].upper()
-    )
+    same = login(env, keeper_auth, "--wallet", "dev", "--addr", "0x" + ADDR[2:].upper())
     assert same.returncode == 0, same.stderr
     env.log.write_text("")
-    other = login(env, keeper_auth, "--wallet", "dev", "--address", OTHER)
+    other = login(env, keeper_auth, "--wallet", "dev", "--addr", OTHER)
     assert other.returncode != 0
-    assert "does not match the wallet address" in other.stderr
+    assert "does not match the wallet addr" in other.stderr
     assert "wallet run" not in env.log.read_text()
     assert len(keeper_auth["signatures"]) == 1
 
@@ -790,24 +786,24 @@ def test_ud_login_refuses_foreign_typed_data(env: Env, keeper_auth) -> None:
     assert keeper_auth["signatures"] == []
 
 
-def ud_show(address: object, state: object = "matching") -> str:
-    return json.dumps({"name": "a", "address": address, "cast": {"state": state}})
+def ud_show(addr: object, state: object = "matching") -> str:
+    return json.dumps({"name": "a", "address": addr, "cast": {"state": state}})
 
 
 @pytest.mark.parametrize(
     "output, expected",
     [
-        (ud_show(ADDRESS), keeper.UdWallet(ADDRESS, "matching")),
-        (ud_show(ADDRESS, "name-conflict"), keeper.UdWallet(ADDRESS, "name-conflict")),
-        (json.dumps({"address": ADDRESS}), keeper.UdWallet(ADDRESS, None)),
-        (ud_show(ADDRESS, 3), keeper.UdWallet(ADDRESS, None)),
+        (ud_show(ADDR), keeper.UdWallet(ADDR, "matching")),
+        (ud_show(ADDR, "name-conflict"), keeper.UdWallet(ADDR, "name-conflict")),
+        (json.dumps({"address": ADDR}), keeper.UdWallet(ADDR, None)),
+        (ud_show(ADDR, 3), keeper.UdWallet(ADDR, None)),
         (
             "note {not json}\n" + json.dumps({"x": {"address": 1}, "address": OTHER}),
             keeper.UdWallet(OTHER, None),
         ),
         (
-            'log line\n{"name": "a"}\n' + ud_show(ADDRESS),
-            keeper.UdWallet(ADDRESS, "matching"),
+            'log line\n{"name": "a"}\n' + ud_show(ADDR),
+            keeper.UdWallet(ADDR, "matching"),
         ),
         (ud_show("0x123"), None),
         (ud_show("0x" + "g" * 40), None),
@@ -818,10 +814,10 @@ def test_parse_wallet(output: str, expected: keeper.UdWallet | None) -> None:
     assert keeper.parse_wallet(output) == expected
 
 
-def test_login_rejects_malformed_address_before_signing(env: Env, keeper_auth) -> None:
+def test_login_rejects_malformed_addr_before_signing(env: Env, keeper_auth) -> None:
     fake_cast(env)
-    result = login(env, keeper_auth, "--account", "dev", "--address", "0xTYPO")
+    result = login(env, keeper_auth, "--account", "dev", "--addr", "0xTYPO")
     assert result.returncode != 0
-    assert "Not an EVM address: 0xTYPO" in result.stderr
+    assert "Not an EVM addr: 0xTYPO" in result.stderr
     assert "cast" not in env.log.read_text()
     assert keeper_auth["signatures"] == []

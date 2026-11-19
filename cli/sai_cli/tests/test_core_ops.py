@@ -15,7 +15,7 @@ from sai_cli.core import keeper, margin, reconcile, session, storage, stream, tr
 from websockets.sync.server import ServerConnection, serve
 from websockets.typing import Subprotocol
 
-ADDRESS = "0x" + "a" * 40
+ADDR = "0x" + "a" * 40
 ENDPOINT = keeper.MAINNET_HTTP
 
 
@@ -27,7 +27,7 @@ def isolated_home(tmp_path, monkeypatch):
 def session_for(endpoint: str = ENDPOINT, hours: float = 1) -> dict[str, str]:
     return {
         "token": "fake-token",
-        "evmAddress": ADDRESS,
+        "evmAddress": ADDR,
         "endpoint": endpoint,
         "expiresAt": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(),
     }
@@ -66,18 +66,18 @@ def test_passphrase_session_is_refused_without_a_prompt():
 
 def test_import_session_and_summary_hide_the_token():
     expires = int((datetime.now(UTC) + timedelta(hours=1)).timestamp())
-    token = jwt({"sub": ADDRESS, "exp": expires, "purpose": "user_intent"})
+    token = jwt({"sub": ADDR, "exp": expires, "purpose": "user_intent"})
     result = session.import_session(token, ENDPOINT)
     assert result["token"] == token
     assert session.summary(result) == {
-        "address": ADDRESS,
+        "addr": ADDR,
         "expiresAt": datetime.fromtimestamp(expires, UTC).isoformat(),
         "endpoint": ENDPOINT,
     }
     for bad in (
         "not-a-jwt",
-        jwt({"sub": ADDRESS, "exp": expires, "purpose": "login"}),
-        jwt({"sub": ADDRESS, "exp": 1, "purpose": "user_intent"}),
+        jwt({"sub": ADDR, "exp": expires, "purpose": "login"}),
+        jwt({"sub": ADDR, "exp": 1, "purpose": "user_intent"}),
         jwt({"sub": "0x1", "exp": expires, "purpose": "user_intent"}),
     ):
         with pytest.raises(ValueError, match="Invalid or expired Sai session token"):
@@ -111,7 +111,7 @@ class FakeKeeper:
                     "intentKey": envelope["intentKey"],
                     "lifecycleStep": "jwt_pass",
                     "execActor": "server",
-                    "evmAddress": ADDRESS,
+                    "evmAddress": ADDR,
                 }
             }
         return json.loads(json.dumps(self.answers[query]))
@@ -150,29 +150,29 @@ def intent_row(key: str, step: str) -> dict[str, Any]:
                 "intentKey": key,
                 "lifecycleStep": step,
                 "execActor": "server",
-                "evmAddress": ADDRESS.upper().replace("0X", "0x"),
+                "evmAddress": ADDR.upper().replace("0X", "0x"),
             }
         ]
     }
 
 
 def status_of(key: str) -> str:
-    rows = storage.list_pending(ENDPOINT, ADDRESS)
+    rows = storage.list_pending(ENDPOINT, ADDR)
     return next(row["status"] for row in rows if row["intentKey"] == key)
 
 
 def test_reconcile_marks_server_failure_terminal(monkeypatch):
-    storage.pending("k1", ENDPOINT, ADDRESS, "CLOSE_TRADE", "1")
+    storage.pending("k1", ENDPOINT, ADDR, "CLOSE_TRADE", "1")
     monkeypatch.setattr(
         keeper, "request", FakeKeeper({keeper.INTENTS: intent_row("k1", "exec_fail")})
     )
-    data = reconcile.reconcile(ENDPOINT, ADDRESS, "k1")
+    data = reconcile.reconcile(ENDPOINT, ADDR, "k1")
     assert data == intent_row("k1", "exec_fail")
     assert status_of("k1") == "terminal"
 
 
 def test_reconcile_matches_executed_trade_history(monkeypatch):
-    storage.pending("k2", ENDPOINT, ADDRESS, "CLOSE_TRADE", "1")
+    storage.pending("k2", ENDPOINT, ADDR, "CLOSE_TRADE", "1")
     row = {"intentKey": "k2", "trade": {"id": 1}}
     fake = FakeKeeper(
         {
@@ -181,13 +181,13 @@ def test_reconcile_matches_executed_trade_history(monkeypatch):
         }
     )
     monkeypatch.setattr(keeper, "request", fake)
-    data = reconcile.reconcile(ENDPOINT, ADDRESS, "k2")
+    data = reconcile.reconcile(ENDPOINT, ADDR, "k2")
     assert data["matchedTradeHistory"] == [row]
     assert status_of("k2") == "terminal"
 
 
 def test_reconcile_releases_an_expired_unrecorded_key(monkeypatch):
-    storage.pending("k3", ENDPOINT, ADDRESS, "CLOSE_TRADE", "1")
+    storage.pending("k3", ENDPOINT, ADDR, "CLOSE_TRADE", "1")
     with storage.db() as connection:
         connection.execute(
             "UPDATE intents SET created_at=? WHERE id='k3'",
@@ -196,11 +196,11 @@ def test_reconcile_releases_an_expired_unrecorded_key(monkeypatch):
     monkeypatch.setattr(
         keeper, "request", FakeKeeper({keeper.INTENTS: {"userIntents": []}})
     )
-    assert reconcile.reconcile(ENDPOINT, ADDRESS, "k3") == {
+    assert reconcile.reconcile(ENDPOINT, ADDR, "k3") == {
         "userIntents": [],
         "localStatus": "absent",
     }
-    assert reconcile.reconcile(ENDPOINT, ADDRESS) == {"userIntents": []}
+    assert reconcile.reconcile(ENDPOINT, ADDR) == {"userIntents": []}
 
 
 # Trading
@@ -334,7 +334,7 @@ def test_before_submit_sees_the_submitted_intent_and_can_refuse(monkeypatch):
             ENDPOINT, session_for, **open_args(dry_run=False), before_submit=refuse
         )
     assert len(fake.submitted) == 1
-    assert storage.list_pending(ENDPOINT, ADDRESS)[0]["status"] == "accepted"
+    assert storage.list_pending(ENDPOINT, ADDR)[0]["status"] == "accepted"
 
 
 def snapshots(
@@ -472,7 +472,7 @@ def test_snapshot_answers_ping_and_returns_the_first_payload():
     notices: list[str] = []
     try:
         result = stream.snapshot(
-            url, stream.BALANCES, {"user": ADDRESS}, notify=notices.append
+            url, stream.BALANCES, {"user": ADDR}, notify=notices.append
         )
     finally:
         stop()
@@ -480,7 +480,7 @@ def test_snapshot_answers_ping_and_returns_the_first_payload():
     assert notices == [stream.CONNECTED]
     assert received[1]["payload"] == {
         "query": stream.BALANCES,
-        "variables": {"user": ADDRESS},
+        "variables": {"user": ADDR},
     }
 
 
@@ -488,7 +488,7 @@ def test_snapshot_reports_an_ended_subscription():
     url, stop, _ = ws_server([{"id": "1", "type": "complete"}])
     try:
         with pytest.raises(stream.StreamError, match="subscription ended"):
-            stream.snapshot(url, stream.BALANCES, {"user": ADDRESS})
+            stream.snapshot(url, stream.BALANCES, {"user": ADDR})
     finally:
         stop()
 
@@ -497,7 +497,7 @@ def test_snapshot_reports_an_unreachable_endpoint():
     url, stop, _ = ws_server([])
     stop()
     with pytest.raises(stream.StreamError, match="Could not read balance snapshot"):
-        stream.snapshot(url, stream.BALANCES, {"user": ADDRESS})
+        stream.snapshot(url, stream.BALANCES, {"user": ADDR})
 
 
 @pytest.mark.parametrize(
@@ -515,6 +515,6 @@ def test_snapshot_reports_a_bad_handshake_or_message_as_a_stream_error(
     url, stop, _ = ws_server(replies, ack=ack)
     try:
         with pytest.raises(stream.StreamError):
-            stream.snapshot(url, stream.BALANCES, {"user": ADDRESS})
+            stream.snapshot(url, stream.BALANCES, {"user": ADDR})
     finally:
         stop()

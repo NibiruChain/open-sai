@@ -100,7 +100,7 @@ def keeper_url(ctx: click.Context) -> str:
 
 
 def session(ctx: click.Context) -> dict[str, str]:
-    return sessions.load_active_session(keeper_url(ctx), ctx.obj["as_address"])
+    return sessions.load_active_session(keeper_url(ctx), ctx.obj["as_addr"])
 
 
 @click.group(invoke_without_command=True)
@@ -132,8 +132,8 @@ def session(ctx: click.Context) -> dict[str, str]:
 )
 @click.option(
     "--as",
-    "as_address",
-    metavar="ADDRESS",
+    "as_addr",
+    metavar="ADDR",
     help="Run this command as another connected account instead of the"
     " active one. See `sai auth list`.",
 )
@@ -144,7 +144,7 @@ def main(
     ws_endpoint: str | None,
     lcd_endpoint: str | None,
     json_output: bool,
-    as_address: str | None,
+    as_addr: str | None,
 ) -> None:
     """Inspect Sai markets and account data, and submit trading intents.
 
@@ -154,7 +154,7 @@ def main(
     ctx.ensure_object(dict)
     passed = (endpoint, ws_endpoint, lcd_endpoint)
     flags = {key: value for (_, key), value in zip(GLOBAL_FLAGS, passed, strict=True)}
-    ctx.obj.update(flags=flags, settings=None, json=json_output, as_address=as_address)
+    ctx.obj.update(flags=flags, settings=None, json=json_output, as_addr=as_addr)
     if ctx.invoked_subcommand is None:
         repl(ctx)
 
@@ -169,8 +169,8 @@ def forwarded_flags(obj: dict[str, Any]) -> list[str]:
             args += [option, value]
     if obj["json"]:
         args.append("--json")
-    if obj.get("as_address"):
-        args += ["--as", obj["as_address"]]
+    if obj.get("as_addr"):
+        args += ["--as", obj["as_addr"]]
     return args
 
 
@@ -238,26 +238,27 @@ def auth() -> None:
     " through `ud evm wallet run` without a prompt.",
 )
 @click.option(
-    "--address",
-    help="EVM address to sign in as. With --account it skips `cast wallet"
-    " address`; with --wallet it must match the ud wallet's address.",
+    "--addr",
+    metavar="ADDR",
+    help="EVM addr to sign in as. With --account it skips `cast wallet"
+    " address`; with --wallet it must match the ud wallet's addr.",
 )
 @click.pass_context
 def login(
-    ctx: click.Context, account: str | None, address: str | None, wallet: str | None
+    ctx: click.Context, account: str | None, addr: str | None, wallet: str | None
 ) -> None:
     """Sign Keeper's trading-session challenge with a local key.
 
     Use --account for a Foundry keystore: sai runs `cast wallet address` and
     `cast wallet sign`, and cast may prompt for the keystore password. If you
     use the `ud` tool, --wallet signs with a ud wallet instead. The CLI checks
-    that the challenge is a Sai `UserTradingSession` for this address before
+    that the challenge is a Sai `UserTradingSession` for this addr before
     anything signs it.
     """
     if bool(account) == bool(wallet):
         raise click.UsageError("Pass exactly one of --account or --wallet")
     try:
-        result = signed_login(keeper_url(ctx), account, wallet, address)
+        result = signed_login(keeper_url(ctx), account, wallet, addr)
         result["endpoint"] = keeper_url(ctx)
         storage.save_session(result)
         emit(ctx, sessions.summary(result))
@@ -266,11 +267,9 @@ def login(
 
 
 def checked_address(found: str, expected: str | None) -> str:
-    """Return FOUND, or fail when the --address cross-check disagrees."""
+    """Return FOUND, or fail when the --addr cross-check disagrees."""
     if expected is not None and expected.lower() != found.lower():
-        raise ValueError(
-            f"--address {expected} does not match the wallet address {found}"
-        )
+        raise ValueError(f"--addr {expected} does not match the wallet addr {found}")
     return found
 
 
@@ -288,19 +287,19 @@ def ud_state_hint(wallet: str, state: str | None) -> str:
 
 
 def signed_login(
-    endpoint: str, account: str | None, wallet: str | None, address: str | None
+    endpoint: str, account: str | None, wallet: str | None, addr: str | None
 ) -> dict[str, str]:
     """Sign in with a Foundry keystore (--account) or a ud wallet (--wallet).
 
     --account never looks for ud: it signs with cast even when ud is
     installed and knows a wallet by the same name.
     """
-    if address is not None and not keeper.is_address(address):
-        raise ValueError(f"Not an EVM address: {address}")
+    if addr is not None and not keeper.is_address(addr):
+        raise ValueError(f"Not an EVM addr: {addr}")
     if account:
-        if address is None:
-            address = keeper.cast_address(account)
-        return keeper.cast_session(endpoint, address, account)
+        if addr is None:
+            addr = keeper.cast_address(account)
+        return keeper.cast_session(endpoint, addr, account)
     assert wallet
     if shutil.which("ud") is None:
         raise ValueError(
@@ -310,13 +309,13 @@ def signed_login(
     found = keeper.ud_wallet(wallet)
     if found is None:
         raise ValueError(
-            f"`ud evm wallet show {wallet}` failed or printed no address;"
+            f"`ud evm wallet show {wallet}` failed or printed no addr;"
             " check that ud knows this wallet"
         )
     if not found.can_sign:
         raise ValueError(ud_state_hint(wallet, found.cast_state))
-    address = checked_address(found.address, address)
-    return keeper.wallet_session(endpoint, address, wallet)
+    addr = checked_address(found.addr, addr)
+    return keeper.wallet_session(endpoint, addr, wallet)
 
 
 NO_CLIPBOARD = (
@@ -358,7 +357,7 @@ def import_token(ctx: click.Context) -> None:
     In a terminal, paste the token at the hidden prompt or press Enter to read
     the clipboard. Without a terminal, as when an agent runs this, read the
     clipboard. After storing the token, clear the clipboard if it still holds
-    the token. Prints the address, expiry, and endpoint, never the token.
+    the token. Prints the addr, expiry, and endpoint, never the token.
     """
     try:
         token = read_token()
@@ -375,10 +374,10 @@ def import_token(ctx: click.Context) -> None:
 
 
 @auth.command("logout")
-@click.argument("address", required=False)
+@click.argument("addr", required=False)
 @click.pass_context
-def logout(ctx: click.Context, address: str | None) -> None:
-    """Remove ADDRESS, or the active account, from this machine.
+def logout(ctx: click.Context, addr: str | None) -> None:
+    """Remove ADDR, or the active account, from this machine.
 
     Other connected accounts stay connected; when the active one is removed,
     none is active until `sai auth use`. Makes no network call. Keeper cannot
@@ -386,14 +385,14 @@ def logout(ctx: click.Context, address: str | None) -> None:
     it expires.
     """
     try:
-        removed = storage.delete_session(address or ctx.obj["as_address"])
+        removed = storage.delete_session(addr or ctx.obj["as_addr"])
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     emit(
         ctx,
         {
             "removed": removed is not None,
-            "address": None if removed == storage.UNREADABLE_REMOVED else removed,
+            "addr": None if removed == storage.UNREADABLE_REMOVED else removed,
             "note": "Keeper cannot revoke session tokens yet; the token stays"
             " valid until it expires.",
         },
@@ -426,16 +425,16 @@ def auth_list(ctx: click.Context) -> None:
 
 
 @auth.command("use")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def auth_use(ctx: click.Context, address: str) -> None:
-    """Make the connected ADDRESS the active account.
+def auth_use(ctx: click.Context, addr: str) -> None:
+    """Make the connected ADDR the active account.
 
     Commands without `--as` act on the active account. Sign in again to
     connect a new one: `sai auth login` and `sai auth import` add accounts.
     """
     try:
-        emit(ctx, {**sessions.summary(storage.use_session(address)), "active": True})
+        emit(ctx, {**sessions.summary(storage.use_session(addr)), "active": True})
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -486,26 +485,26 @@ def perform_query(
 
 
 @account.command("positions")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def positions(ctx: click.Context, address: str) -> None:
-    """List positions and pending orders for ADDRESS."""
-    perform_query(ctx, keeper.POSITIONS, {"trader": address})
+def positions(ctx: click.Context, addr: str) -> None:
+    """List positions and pending orders for ADDR."""
+    perform_query(ctx, keeper.POSITIONS, {"trader": addr})
 
 
 @account.command("history")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def history(ctx: click.Context, address: str) -> None:
-    """Read trade history for ADDRESS."""
-    perform_query(ctx, keeper.HISTORY, {"trader": address})
+def history(ctx: click.Context, addr: str) -> None:
+    """Read trade history for ADDR."""
+    perform_query(ctx, keeper.HISTORY, {"trader": addr})
 
 
 @account.command("balances")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--ws-endpoint", help="Override the keeper.ws_endpoint setting.")
 @click.pass_context
-def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
+def balances(ctx: click.Context, addr: str, ws_endpoint: str | None) -> None:
     """Read one account balance snapshot from Keeper's subscription."""
     try:
         emit(
@@ -513,7 +512,7 @@ def balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
             stream.snapshot(
                 ws_url(ctx, ws_endpoint),
                 stream.BALANCES,
-                {"user": address},
+                {"user": addr},
                 notify=warn,
             ),
         )
@@ -527,23 +526,23 @@ def intent() -> None:
 
 
 @intent.command("status")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--key", help="Specific intent key.")
 @click.pass_context
-def intent_status(ctx: click.Context, address: str, key: str | None) -> None:
+def intent_status(ctx: click.Context, addr: str, key: str | None) -> None:
     """Read Keeper's latest intent records; reconcile a known key."""
     try:
-        emit(ctx, reconcile.reconcile(keeper_url(ctx), address, key))
+        emit(ctx, reconcile.reconcile(keeper_url(ctx), addr, key))
     except keeper.KeeperError as exc:
         raise click.ClickException(str(exc)) from exc
 
 
 @intent.command("local")
-@click.argument("address")
+@click.argument("addr")
 @click.pass_context
-def intent_local(ctx: click.Context, address: str) -> None:
-    """List locally recorded intent identities for ADDRESS."""
-    emit(ctx, storage.list_pending(keeper_url(ctx), address))
+def intent_local(ctx: click.Context, addr: str) -> None:
+    """List locally recorded intent identities for ADDR."""
+    emit(ctx, storage.list_pending(keeper_url(ctx), addr))
 
 
 @main.group()
@@ -552,22 +551,22 @@ def trade() -> None:
 
 
 class PinnedSession:
-    """Load the --as account, or the active one, and keep using that address.
+    """Load the --as account, or the active one, and keep using that addr.
 
-    The first load fixes the address, so the output names the account that
+    The first load fixes the addr, so the output names the account that
     submitted even if another process switches accounts meanwhile.
     """
 
     def __init__(self, ctx: click.Context) -> None:
         self.ctx = ctx
-        self.address: str | None = None
+        self.addr: str | None = None
 
     def __call__(self) -> dict[str, str]:
-        if self.address is None:
+        if self.addr is None:
             result = session(self.ctx)
         else:
-            result = sessions.load_active_session(keeper_url(self.ctx), self.address)
-        self.address = result["evmAddress"]
+            result = sessions.load_active_session(keeper_url(self.ctx), self.addr)
+        self.addr = result["evmAddress"]
         return result
 
 
@@ -583,16 +582,16 @@ def emit_trade(ctx: click.Context, result: dict[str, Any]) -> None:
     for one, which then must be connected.
     """
     load = loader(ctx)
-    account = load.address
+    account = load.addr
     if account is None:
         try:
             account = load()["evmAddress"]
         except ValueError:
             # A dry run needs no session, but a requested account must exist.
-            if ctx.obj["as_address"]:
+            if ctx.obj["as_addr"]:
                 raise
             account = None
-    emit(ctx, {"account": account, **result})
+    emit(ctx, {"addr": account, **result})
 
 
 def warn(message: str) -> None:
@@ -875,28 +874,28 @@ def watch() -> None:
 
 
 @watch.command("positions")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--ws-endpoint")
 @click.pass_context
-def watch_positions(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
-    """Follow position snapshots for ADDRESS until interrupted."""
+def watch_positions(ctx: click.Context, addr: str, ws_endpoint: str | None) -> None:
+    """Follow position snapshots for ADDR until interrupted."""
     watch_stream(
         ws_url(ctx, ws_endpoint),
         stream.POSITIONS,
-        {"user": address},
+        {"user": addr},
     )
 
 
 @watch.command("balances")
-@click.argument("address")
+@click.argument("addr")
 @click.option("--ws-endpoint")
 @click.pass_context
-def watch_balances(ctx: click.Context, address: str, ws_endpoint: str | None) -> None:
+def watch_balances(ctx: click.Context, addr: str, ws_endpoint: str | None) -> None:
     """Follow balances, preserving Sai deposit and credit labels."""
     watch_stream(
         ws_url(ctx, ws_endpoint),
         stream.BALANCES,
-        {"user": address},
+        {"user": addr},
     )
 
 
