@@ -318,15 +318,40 @@ def wheel_cache() -> Path:
     return Path(os.path.abspath(home)) / "cache" / "wheels"
 
 
+def private_dir(path: Path, exact: bool) -> None:
+    """Make sure directory PATH is the current user's and that no one else
+    can write to it, creating it if needed.
+
+    A directory another user can write to would let them swap the verified
+    wheel before uv opens it. One of ours with loose modes is tightened to
+    0700; EXACT makes it 0700 in any case. One that is a symlink, belongs to
+    someone else, or cannot be tightened is refused.
+    """
+    if path.is_symlink():
+        raise LookupFailed(f"{path} is a symlink; not keeping a wheel under it")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    status = path.stat()
+    if hasattr(os, "getuid") and status.st_uid != os.getuid():
+        raise LookupFailed(f"{path} belongs to another user; not keeping a wheel there")
+    if os.name == "nt":
+        return
+    mode = status.st_mode & 0o777
+    if mode & 0o022 or (exact and mode != 0o700):
+        try:
+            path.chmod(0o700)
+        except OSError as error:
+            raise LookupFailed(
+                f"{path} is writable by other users and could not be made private"
+            ) from error
+
+
 def private_cache() -> Path:
-    """Create the wheel cache, private to the user, and return it. A
-    symlinked cache directory is refused: the wheel would land elsewhere."""
+    """Return the wheel cache after making $SAI_HOME, `cache`, and
+    `cache/wheels` private to the current user."""
     cache = wheel_cache()
-    cache.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for directory in (cache.parent, cache):
-        if directory.is_symlink():
-            raise LookupFailed(f"{directory} is a symlink; not keeping a wheel there")
-        directory.mkdir(mode=0o700, exist_ok=True)
+    private_dir(cache.parent.parent, exact=False)
+    private_dir(cache.parent, exact=True)
+    private_dir(cache, exact=True)
     return cache
 
 
@@ -450,6 +475,14 @@ def main(argv: list[str]) -> int:
         except LookupFailed as error:
             return give_up(error)
         print(f"Verified {wheel.name} against the release's SHA256SUMS.")
+        # Hash the kept file once more, right before uv opens it.
+        try:
+            private_cache()
+            intact = hashlib.sha256(wheel.read_bytes()).hexdigest() == digest
+        except (OSError, LookupFailed):
+            intact = False
+        if not intact:
+            return give_up(LookupFailed(f"{wheel} changed after it was verified"))
         code = uv_tool_install(uv, str(wheel), str(wheel), False)
         if code == 0 and uv is not None:
             problem = write_record(uv, tag, digest, wheel)
