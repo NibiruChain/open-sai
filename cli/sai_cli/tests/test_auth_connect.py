@@ -706,13 +706,17 @@ def fake_ud(
     state: str = "matching",
     addr: str = ADDR,
     locked: bool = False,
+    down: bool = False,
+    rotate: bool = False,
 ) -> None:
     """A ud that knows wallet KNOWN as ADDR, whose Cast keystore is in STATE.
 
     `show` prints ud's real JSON shape, plus a log line and a secret on
     stderr, as a noisy real tool might. Like real ud, `run` signs only when
     the state is `matching`. With LOCKED, its password does not open the
-    keystore, so `run` fails even then.
+    keystore, so `run` fails even then; with ROTATE, the keystore file is
+    also replaced by OTHER's while `run` is busy. With DOWN, `show` fails
+    the way a credential store that will not open does.
     """
     shown = {
         "name": known,
@@ -730,7 +734,9 @@ def fake_ud(
         "ud",
         "import json\n"
         "args = sys.argv[1:]\n"
-        f"if args[:3] == ['evm', 'wallet', 'show'] and args[3] == {known!r}:\n"
+        f"if args[:3] == ['evm', 'wallet', 'show'] and {down!r}:\n"
+        "    sys.exit('Error: gpg: decryption failed: No secret key')\n"
+        f"elif args[:3] == ['evm', 'wallet', 'show'] and args[3] == {known!r}:\n"
         f"    sys.stderr.write({UD_SECRET!r} + '\\n')\n"
         "    print('Reading wallet document')\n"
         f"    print(json.dumps({shown!r}))\n"
@@ -738,12 +744,17 @@ def fake_ud(
         "['--', 'wallet', 'sign']:\n"
         f"    if {state!r} != 'matching':\n"
         "        sys.exit('wallet is not synchronized with Cast')\n"
+        f"    if {rotate!r}:\n"
+        f"        open({str(env.home / '.foundry' / 'keystores' / known)!r}, 'w')"
+        f".write(json.dumps({{'address': {OTHER[2:]!r}, 'crypto': {{}}}}))\n"
         f"    if {locked!r}:\n"
         "        sys.exit('cast could not decrypt the keystore')\n"
         "    assert args[7:9] == ['--data', '--from-file']\n"
         "    data = json.load(open(args[-1]))\n"
         "    assert data['primaryType'] == 'UserTradingSession'\n"
         f"    print({SIGNATURE!r})\n"
+        "elif args[:3] == ['evm', 'wallet', 'show']:\n"
+        "    sys.exit(f'Error: wallet {args[3]} is not in pass entry evm/wallets')\n"
         "else:\n"
         "    sys.exit(1)\n",
     )
@@ -955,9 +966,13 @@ def test_ud_signing_failure_without_a_terminal_says_to_use_one(
     fake_ud(env, locked=True)
     fake_cast(env)
     keystore(env, addr=ADDR)
-    result = login(env, keeper_auth, "dev")
+    result = login(env, keeper_auth, "dev", "--addr", ADDR)
     assert result.returncode != 0
-    assert "run `sai auth login dev` in a terminal" in result.stderr
+    # The whole command, so a retry keeps the endpoint and --addr.
+    command = (
+        f"sai --endpoint {keeper_auth['endpoint']} --json auth login dev --addr {ADDR}"
+    )
+    assert f"Run `{command}` in a terminal." in result.stderr
     assert "/cast " not in env.log.read_text()
     assert keeper_auth["signatures"] == []
 
@@ -971,3 +986,72 @@ def test_ud_signing_failure_without_a_keystore_file_fails(
     assert result.returncode != 0
     assert "Wallet signing failed" in result.stderr
     assert "/cast " not in env.log.read_text()
+
+
+def test_cast_does_not_sign_when_the_keystore_changed_under_the_name(
+    env: Env, keeper_auth
+) -> None:
+    # ud looks up `dev` as ADDR, then the file is replaced by OTHER's key
+    # before ud's signing fails. cast finds keystores by name.
+    fake_ud(env, locked=True, rotate=True)
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    args = ("--json", "--endpoint", keeper_auth["endpoint"], "auth", "login", "dev")
+    code, _, err = env.run_tty(*args, "--addr", ADDR, typed=[])
+    assert code != 0
+    assert f"now holds {OTHER}, not " in err
+    assert "nothing was signed" in err
+    assert "/cast " not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+    assert ADDR not in env.run("--json", "auth", "list").stdout
+
+
+def test_a_session_for_another_account_than_the_challenge_is_not_stored(
+    env: Env, keeper_auth
+) -> None:
+    # Keeper's fixture issues its session for ADDR whoever signed, as it
+    # would if cast signed with a key other than the keystore file records.
+    fake_cast(env)
+    keystore(env, addr=OTHER)
+    challenge = typed_data()
+    challenge["message"]["account"] = OTHER
+    keeper_auth["typed"] = challenge
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode != 0
+    assert len(keeper_auth["signatures"]) == 1
+    assert "Session addr does not match the requested account" in result.stderr
+    listed = env.run("--json", "auth", "list").stdout
+    assert ADDR not in listed and OTHER not in listed
+
+
+def test_login_stops_when_ud_cannot_say_whether_it_knows_the_name(
+    env: Env, keeper_auth
+) -> None:
+    # ud may hold another account as `dev`; its lookup fails, so sai cannot
+    # rule out a conflict with the keystore.
+    fake_ud(env, addr=OTHER, down=True)
+    fake_cast(env)
+    keystore(env, addr=ADDR)
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode != 0
+    assert "`ud evm wallet show dev` failed" in result.stderr
+    assert f"`--addr {ADDR}`" in result.stderr
+    assert "gpg" not in result.stderr
+    wrong = login(env, keeper_auth, "dev", "--addr", OTHER)
+    assert wrong.returncode != 0
+    assert "/cast " not in env.log.read_text()
+    assert keeper_auth["signatures"] == []
+
+    picked = login(env, keeper_auth, "dev", "--addr", ADDR)
+    assert picked.returncode == 0, picked.stderr
+    assert json.loads(picked.stdout)["addr"] == ADDR
+
+
+def test_login_stops_when_ud_fails_and_there_is_no_keystore(
+    env: Env, keeper_auth
+) -> None:
+    fake_ud(env, down=True)
+    result = login(env, keeper_auth, "dev")
+    assert result.returncode != 0
+    assert "check that ud works" in result.stderr
+    assert keeper_auth["signatures"] == []

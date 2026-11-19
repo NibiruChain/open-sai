@@ -93,6 +93,9 @@ challenge nonce.
   before signing and names both. `--addr` with the keystore's addr signs in
   as that account. ud cannot sign with its own until the keystore is renamed
   and `ud evm wallet sync NAME` has run.
+- If `ud` is installed but its lookup fails, the CLI cannot tell whether ud
+  holds another account under `NAME`, so it stops. `--addr` with the
+  keystore's addr signs in as that account.
 - With neither, it stops and names where it looked.
 
 `--addr ADDR` is optional. The CLI refuses to sign when ud or the keystore

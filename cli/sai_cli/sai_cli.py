@@ -265,8 +265,18 @@ def login(ctx: click.Context, name: str, addr: str | None) -> None:
         result["endpoint"] = keeper_url(ctx)
         storage.save_session(result)
         emit(ctx, sessions.summary(result))
+    except NeedsTerminal as exc:
+        # The same command, so the endpoint and --addr stay in force.
+        flags = forwarded_flags(ctx.find_root().obj)
+        chosen = ["--addr", addr] if addr else []
+        command = shlex.join(["sai", *flags, "auth", "login", name, *chosen])
+        raise click.ClickException(f"{exc} Run `{command}` in a terminal.") from exc
     except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+class NeedsTerminal(ValueError):
+    """Sign-in can continue only where cast can prompt for a password."""
 
 
 def keystore_path(name: str) -> Path:
@@ -321,12 +331,26 @@ def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
     ud wallet that can sign, the Foundry keystore NAME signs through cast.
 
     When ud and the keystore hold different accounts under NAME, nothing
-    signs unless --addr picks the keystore's account.
+    signs unless --addr picks the keystore's account. The same holds when ud
+    is installed but its lookup fails, since it may hold another account.
     """
     if addr is not None and not keeper.is_address(addr):
         raise ValueError(f"Not an EVM addr: {addr}")
-    found = keeper.ud_wallet(name)
     has_keystore = keystore_path(name).is_file()
+    try:
+        found = keeper.ud_wallet(name)
+    except keeper.UdUnavailable as exc:
+        if not has_keystore:
+            raise ValueError(f"{exc}; check that ud works, then retry") from exc
+        found_addr = keystore_addr(name) or keeper.cast_address(name)
+        if addr is None or addr.lower() != found_addr.lower():
+            raise ValueError(
+                f"{exc}, so sai cannot tell whether ud holds another account"
+                f" named {name}. Check that ud works, then retry. To sign in"
+                f" as the Foundry keystore's account {found_addr}, pass"
+                f" `--addr {found_addr}`."
+            ) from exc
+        return keeper.cast_session(endpoint, addr, name)
     if found is not None and found.can_sign:
         addr = checked_address(found.addr, addr)
         try:
@@ -335,11 +359,18 @@ def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
             if not has_keystore:
                 raise
             if not sys.stdin.isatty():
-                raise ValueError(
+                raise NeedsTerminal(
                     f"ud could not sign with {name}. The Foundry keystore"
-                    f" ~/.foundry/keystores/{name} may have another password:"
-                    f" run `sai auth login {name}` in a terminal so cast can"
-                    " ask for it."
+                    f" ~/.foundry/keystores/{name} may have another password,"
+                    " which cast can ask for."
+                ) from exc
+            # The keystore may have changed since ud looked it up. cast finds
+            # it by name, so read it again and sign only as the same account.
+            current = keystore_addr(name) or keeper.cast_address(name)
+            if current.lower() != addr.lower():
+                raise ValueError(
+                    f"The Foundry keystore ~/.foundry/keystores/{name} now"
+                    f" holds {current}, not {addr}; nothing was signed with it."
                 ) from exc
             warn(
                 f"ud could not sign with {name}; signing with the Foundry"
