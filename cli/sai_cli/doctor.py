@@ -46,7 +46,7 @@ NETWORK_TIMEOUT = 5.0
 NETWORK_DEADLINE = NETWORK_TIMEOUT + 2
 EXPIRY_WARNING = timedelta(hours=24)
 STATUSES = ("pass", "fixed", "warn", "fail", "skipped")
-SIGN_IN = "sai auth login --account NAME, or sai auth import"
+SIGN_IN = "sai auth login NAME, or sai auth import"
 REINSTALL = "uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai"
 DIR_MODE, FILE_MODE = 0o700, 0o600
 
@@ -357,7 +357,7 @@ def check_session(ctx: Context) -> Check:
             "fail",
             f"Session for {short(addr)} belongs to {state['endpoint']}, not"
             f" {public_url(ctx.config.endpoint)}",
-            f"sai {endpoint_flag(ctx.config)}auth login --account NAME, or run"
+            f"sai {endpoint_flag(ctx.config)}auth login NAME, or run"
             f" sai with --endpoint {state['endpoint']}",
             details,
         )

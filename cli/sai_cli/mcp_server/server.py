@@ -39,7 +39,7 @@ signed in for this server's endpoint.
 - Every tool is always listed. Reads and previews work signed out. A \
 trade_* call while signed out returns SIGNED_OUT (or SESSION_EXPIRED, or \
 SESSION_UNAVAILABLE for another endpoint) and submits nothing: ask the user \
-to run `sai auth login` or `sai auth import` in a terminal, then retry.
+to run `sai auth login NAME` or `sai auth import` in a terminal, then retry.
 - Before any trade, call the matching preview_* tool, show the user the \
 preview and the account it names, and get their explicit confirmation. Only then call the trade_* \
 tool with the same arguments plus the preview's previewDigest, and for a \
@@ -65,7 +65,7 @@ active account for the user's terminal too.
 "session", the addr came from the active account; say so to the user, \
 and pass addr explicitly to read any other account.
 - Never ask the user for a session token. They sign in \
-themselves by running `sai auth login` or `sai auth import` in a terminal.
+themselves by running `sai auth login NAME` or `sai auth import` in a terminal.
 - Never read MCP client config files to learn about this server; call \
 mcp_info instead.
 """
@@ -124,7 +124,7 @@ async def call(action: Callable[..., Any], /, *args: Any, **kwargs: Any) -> str:
 async def auth_status(addr: str | None = None) -> str:
     """Show the active account and its session expiry, never the token.
 
-    Sessions come from `sai auth login` or `sai auth import`, run by the
+    Sessions come from `sai auth login NAME` or `sai auth import`, run by the
     user in a terminal.
 
     Args:

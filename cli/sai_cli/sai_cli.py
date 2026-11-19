@@ -6,7 +6,6 @@ import dataclasses
 import json
 import os
 import shlex
-import shutil
 import sys
 import time
 from dataclasses import asdict
@@ -203,43 +202,79 @@ def auth() -> None:
 
 
 @auth.command("login")
-@click.option(
-    "--account",
-    help="Foundry keystore name (~/.foundry/keystores). cast may prompt for"
-    " the keystore password.",
-)
-@click.option(
-    "--wallet",
-    help="Wallet name for people who use the `ud` tool. Requires `ud`; signs"
-    " through `ud evm wallet run` without a prompt.",
-)
+@click.argument("name")
 @click.option(
     "--addr",
     metavar="ADDR",
-    help="EVM addr to sign in as. With --account it skips `cast wallet"
-    " address`; with --wallet it must match the ud wallet's addr.",
+    help="EVM addr you expect NAME to hold. Sign-in stops before signing if"
+    " ud or the keystore file reports another addr.",
 )
 @click.pass_context
-def login(
-    ctx: click.Context, account: str | None, addr: str | None, wallet: str | None
-) -> None:
-    """Sign Keeper's trading-session challenge with a local key.
+def login(ctx: click.Context, name: str, addr: str | None) -> None:
+    """Connect the account whose key is NAME by signing Keeper's challenge.
 
-    Use --account for a Foundry keystore: sai runs `cast wallet address` and
-    `cast wallet sign`, and cast may prompt for the keystore password. If you
-    use the `ud` tool, --wallet signs with a ud wallet instead. The CLI checks
-    that the challenge is a Sai `UserTradingSession` for this addr before
-    anything signs it.
+    NAME is a Foundry keystore in ~/.foundry/keystores (see `cast wallet
+    list`). sai fetches Keeper's sign-in challenge, checks that it is a Sai
+    `UserTradingSession` for that account, has the key sign it, and stores
+    the session Keeper returns. The session lasts as long as Keeper issues
+    it, 30 days in production, and lets sai trade for that account.
+
+    If the `ud` tool is on PATH and has a wallet named NAME, sai signs
+    through `ud evm wallet run`, which supplies the keystore password.
+    Otherwise `cast wallet sign` asks for it.
+
+    To connect without a local key, copy a token from Sai Web and run `sai
+    auth import`.
+
+    \b
+    Examples:
+      sai auth login trading-bot
+          Sign with ~/.foundry/keystores/trading-bot; cast asks for its
+          password.
+      sai auth login trading-bot --addr 0xYOUR_ADDR
+          Same, but stop if the keystore records another addr.
+      sai auth import
+          Use a session token copied from Sai Web instead of a key.
     """
-    if bool(account) == bool(wallet):
-        raise click.UsageError("Pass exactly one of --account or --wallet")
     try:
-        result = signed_login(keeper_url(ctx), account, wallet, addr)
+        result = signed_login(keeper_url(ctx), name, addr)
         result["endpoint"] = keeper_url(ctx)
         storage.save_session(result)
         emit(ctx, sessions.summary(result))
+    except NeedsTerminal as exc:
+        # The same command, so the endpoint and --addr stay in force.
+        flags = forwarded_flags(ctx.find_root().obj)
+        chosen = ["--addr", addr] if addr else []
+        command = shlex.join(["sai", *flags, "auth", "login", name, *chosen])
+        raise click.ClickException(f"{exc} Run `{command}` in a terminal.") from exc
     except (ValueError, keeper.KeeperError) as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+class NeedsTerminal(ValueError):
+    """Sign-in can continue only where cast can prompt for a password."""
+
+
+def keystore_path(name: str) -> Path:
+    return Path.home() / ".foundry" / "keystores" / name
+
+
+def keystore_addr(name: str) -> str | None:
+    """Read the plaintext `address` a Foundry keystore records, if any.
+
+    Reading it needs no password. The field is not bound to the encrypted
+    key, so an edited file can pass the --addr check; Keeper then rejects
+    the signature, and no session is stored.
+    """
+    try:
+        value = json.loads(keystore_path(name).read_text(encoding="utf-8"))
+        raw = value["address"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(raw, str):
+        return None
+    addr = raw if raw.lower().startswith("0x") else "0x" + raw
+    return addr if keeper.is_address(addr) else None
 
 
 def checked_address(found: str, expected: str | None) -> str:
@@ -262,36 +297,104 @@ def ud_state_hint(wallet: str, state: str | None) -> str:
     return f"{prefix}; check `ud evm wallet show {wallet}`"
 
 
-def signed_login(
-    endpoint: str, account: str | None, wallet: str | None, addr: str | None
-) -> dict[str, str]:
-    """Sign in with a Foundry keystore (--account) or a ud wallet (--wallet).
+def signed_login(endpoint: str, name: str, addr: str | None) -> dict[str, str]:
+    """Sign in with the key named NAME.
 
-    --account never looks for ud: it signs with cast even when ud is
-    installed and knows a wallet by the same name.
+    A ud wallet that can sign goes first, because ud keeps the password for
+    the keystore of the same name and signs without a prompt. If ud then
+    fails to sign, for example because the keystore has another password,
+    cast signs with the same keystore and asks for the password. Without a
+    ud wallet that can sign, the Foundry keystore NAME signs through cast.
+
+    When ud and the keystore hold different accounts under NAME, nothing
+    signs unless --addr picks the keystore's account. The same holds when ud
+    is installed but its lookup fails, since it may hold another account.
     """
     if addr is not None and not keeper.is_address(addr):
         raise ValueError(f"Not an EVM addr: {addr}")
-    if account:
-        if addr is None:
-            addr = keeper.cast_address(account)
-        return keeper.cast_session(endpoint, addr, account)
-    assert wallet
-    if shutil.which("ud") is None:
+    has_keystore = keystore_path(name).is_file()
+    try:
+        found = keeper.ud_wallet(name)
+    except keeper.UdUnavailable as exc:
+        if not has_keystore:
+            raise ValueError(f"{exc}; check that ud works, then retry") from exc
+        found_addr = keystore_addr(name) or keeper.cast_address(name)
+        if addr is None or addr.lower() != found_addr.lower():
+            raise ValueError(
+                f"{exc}, so sai cannot tell whether ud holds another account"
+                f" named {name}. Check that ud works, then retry. To sign in"
+                f" as the Foundry keystore's account {found_addr}, pass"
+                f" `--addr {found_addr}`."
+            ) from exc
+        return keeper.cast_session(endpoint, addr, name)
+    if found is not None and found.can_sign:
+        addr = checked_address(found.addr, addr)
+        try:
+            return keeper.wallet_session(endpoint, addr, name)
+        except keeper.SigningFailed as exc:
+            if not has_keystore:
+                raise
+            if not sys.stdin.isatty():
+                raise NeedsTerminal(
+                    f"ud could not sign with {name}. The Foundry keystore"
+                    f" ~/.foundry/keystores/{name} may have another password,"
+                    " which cast can ask for."
+                ) from exc
+            # The keystore may have changed since ud looked it up. cast finds
+            # it by name, so read it again and sign only as the same account.
+            current = keystore_addr(name) or keeper.cast_address(name)
+            if current.lower() != addr.lower():
+                raise ValueError(
+                    f"The Foundry keystore ~/.foundry/keystores/{name} now"
+                    f" holds {current}, not {addr}; nothing was signed with it."
+                ) from exc
+            warn(
+                f"ud could not sign with {name}; signing with the Foundry"
+                f" keystore ~/.foundry/keystores/{name} instead."
+            )
+            return keeper.cast_session(endpoint, addr, name)
+    if has_keystore:
+        # Check --addr before anything signs: from the keystore file when it
+        # records the addr, otherwise from cast, which may ask for the
+        # password.
+        found_addr = keystore_addr(name) or keeper.cast_address(name)
+        if found is not None and found.addr.lower() != found_addr.lower():
+            addr = chosen_keystore_addr(name, found, found_addr, addr)
+        addr = checked_address(found_addr, addr)
+        return keeper.cast_session(endpoint, addr, name)
+    if found is not None:
+        raise ValueError(ud_state_hint(name, found.cast_state))
+    raise ValueError(
+        f"No key named {name}: there is no Foundry keystore"
+        f" ~/.foundry/keystores/{name}. Run `cast wallet list` to see"
+        " keystores, or connect with `sai auth import`."
+    )
+
+
+def chosen_keystore_addr(
+    name: str, ud: keeper.UdWallet, keystore: str, addr: str | None
+) -> str:
+    """Return ADDR when it picks the keystore's account, or fail.
+
+    ud and the Foundry keystore hold different accounts under NAME, and ud
+    cannot sign with its own until the names stop colliding. sai never picks
+    one for the person.
+    """
+    both = (
+        f"{name} names two accounts: ud's wallet holds {ud.addr} and the"
+        f" Foundry keystore ~/.foundry/keystores/{name} holds {keystore}."
+    )
+    if addr is None:
         raise ValueError(
-            "--wallet needs the `ud` tool on PATH; use --account NAME with a"
-            " Foundry keystore, or `sai auth import`"
+            f"{both} To sign in as the keystore's account, run `sai auth login"
+            f" {name} --addr {keystore}`. To sign in as ud's account,"
+            f" rename the keystore, then run `ud evm wallet sync {name}`."
         )
-    found = keeper.ud_wallet(wallet)
-    if found is None:
-        raise ValueError(
-            f"`ud evm wallet show {wallet}` failed or printed no addr;"
-            " check that ud knows this wallet"
-        )
-    if not found.can_sign:
-        raise ValueError(ud_state_hint(wallet, found.cast_state))
-    addr = checked_address(found.addr, addr)
-    return keeper.wallet_session(endpoint, addr, wallet)
+    if addr.lower() == ud.addr.lower():
+        raise ValueError(f"{both} {ud_state_hint(name, ud.cast_state)}")
+    if addr.lower() != keystore.lower():
+        raise ValueError(f"{both} --addr {addr} matches neither.")
+    return addr
 
 
 NO_CLIPBOARD = (
@@ -407,7 +510,7 @@ def auth_use(ctx: click.Context, addr: str) -> None:
     """Make the connected ADDR the active account.
 
     Commands without `--as` act on the active account. Sign in again to
-    connect a new one: `sai auth login` and `sai auth import` add accounts.
+    connect a new one: `sai auth login NAME` and `sai auth import` add accounts.
     """
     try:
         emit(ctx, {**sessions.summary(storage.use_session(addr)), "active": True})
@@ -1090,7 +1193,7 @@ def mcp_serve(
     """Serve Sai tools to an agent client over stdio.
 
     Stdout carries only MCP protocol messages. Every tool is listed; trade
-    tools submit only while an account is signed in with `sai auth login`
+    tools submit only while an account is signed in with `sai auth login NAME`
     or `sai auth import`. Endpoints resolve once, at start, like the CLI's:
     these flags, then SAI_* variables, then $SAI_HOME/config.toml.
     """

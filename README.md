@@ -72,14 +72,13 @@ Trading needs a Sai session. There are two ways to get one:
   token at the hidden prompt or press Enter to read the clipboard. You can
   also tell your agent "connect Sai"; it runs `sai auth import`, which reads
   the clipboard when there is no terminal.
-- **With a Foundry keystore.** This works today. Run
-  `sai auth login --account NAME`, where `NAME` is a keystore in
-  `~/.foundry/keystores`. The CLI fetches Keeper's sign-in challenge, checks
-  that it is a Sai trading-session request for your addr, and only then
-  runs `cast wallet sign`, which asks for the keystore password.
-
-If you use the `ud` tool, `sai auth login --wallet NAME` signs with a ud
-wallet instead, without a prompt.
+- **With a Foundry keystore.** This works today. Run `sai auth login NAME`,
+  where `NAME` is a keystore in `~/.foundry/keystores`. The CLI fetches
+  Keeper's sign-in challenge, checks that it is a Sai trading-session
+  request for that account, and only then has the key sign it. Keeper
+  returns a session that lets `sai` trade for the account. `cast wallet
+  sign` asks for the keystore password, unless the `ud` tool is on your
+  `PATH` with a wallet of the same name, which signs without a prompt.
 
 You can connect several accounts. Each sign-in adds an account and makes it
 active. `sai auth list` shows them, `sai auth use ADDR` switches the active
@@ -139,14 +138,14 @@ sai mcp install claude -- uv run --directory /path/to/open-sai sai mcp serve
 ```
 
 The server lists every tool, trades included, whether or not you are signed in.
-Trading follows sign-in on each call. Sign in with `sai auth login` or `sai
+Trading follows sign-in on each call. Sign in with `sai auth login NAME` or `sai
 auth import` in a terminal, and the agent can submit trades; sign out with `sai
 auth logout`, and every `trade_*` call returns `SIGNED_OUT` without touching
 Keeper. An expired session returns `SESSION_EXPIRED`. The server reads the
 stored session without a prompt, never asks for the token, and never returns
 it.
 
-Each preview names the signed-in `account`, and each trade must carry the
+Each preview names the signed-in account in `addr`, and each trade must carry the
 `previewDigest` from a preview the user confirmed. Before submitting, the
 server rebuilds the trade and refuses it with a fresh preview when it no
 longer matches:
