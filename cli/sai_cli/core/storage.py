@@ -224,7 +224,7 @@ def save_session(session: dict[str, str]) -> None:
         "session.saved",
         addr=session["evmAddress"],
         expiresAt=session["expiresAt"],
-        endpoint=log.url(session.get("endpoint")),
+        endpoint=log.endpoint(session.get("endpoint")),
         connectedAccounts=len(accounts["sessions"]),
     )
 
@@ -377,7 +377,7 @@ def pending(key: str, endpoint: str, account: str, kind: str, entity: str) -> No
         status="unknown",
         addr=account,
         tradeId=entity or None,
-        endpoint=log.url(endpoint),
+        endpoint=log.endpoint(endpoint),
     )
 
 
@@ -406,7 +406,7 @@ def _log_status(
         previous=previous,
         status=status,
         addr=account,
-        endpoint=log.url(endpoint),
+        endpoint=log.endpoint(endpoint),
     )
 
 

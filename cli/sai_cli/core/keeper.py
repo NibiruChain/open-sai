@@ -106,8 +106,8 @@ def request(
 ) -> dict[str, Any]:
     """Send one GraphQL request; TIMEOUT applies to each phase in seconds.
 
-    Logs one `keeper.request` event with the operation, the endpoint without
-    credentials, the outcome, and the duration. The variables, the token,
+    Logs one `keeper.request` event with the operation, the endpoint's
+    origin, the outcome, and the duration. The variables, the token,
     and the response data are never logged.
     """
     started = time.monotonic()
@@ -126,6 +126,21 @@ def request(
         outcome["error"] = str(exc)
         raise
     finally:
+        _log_request(endpoint, query, variables, token, started, outcome)
+
+
+def _log_request(
+    endpoint: str,
+    query: str,
+    variables: dict[str, Any] | None,
+    token: str | None,
+    started: float,
+    outcome: dict[str, Any],
+) -> None:
+    """Log one request. Never raises, so it cannot replace the request's
+    own error, and parses nothing: the log writer reduces the endpoint to
+    its origin later."""
+    try:
         account = next(
             (
                 value
@@ -136,25 +151,37 @@ def request(
         )
         log.event(
             "keeper.request",
-            "info" if outcome["status"] == "ok" else "warn",
+            "info" if outcome.get("status") == "ok" else "warn",
             operation=OPERATIONS.get(query, "custom"),
-            endpoint=log.url(endpoint),
+            endpoint=log.endpoint(endpoint),
             addr=account,
             authenticated=bool(token),
             durationMs=round((time.monotonic() - started) * 1000),
             **outcome,
         )
+    except Exception:  # noqa: BLE001, S110 - logging must not change the outcome
+        pass
 
 
 def _graphql_errors(errors: Any) -> list[dict[str, Any]]:
-    """The code and message of the first few GraphQL errors, for the log."""
+    """The code and message of the first few GraphQL errors, for the log.
+
+    Keeper's message can echo input, such as the signature sent to the
+    session mutation, so it is marked untrusted: the log writer cuts it
+    short and removes long hex strings and tokens.
+    """
     found: list[dict[str, Any]] = []
     for item in errors[:3] if isinstance(errors, list) else []:
         if not isinstance(item, dict):
             continue
         extensions = item.get("extensions")
         code = extensions.get("code") if isinstance(extensions, dict) else None
-        found.append({"code": code, "message": str(item.get("message", ""))[:300]})
+        found.append(
+            {
+                "code": log.untrusted(str(code)) if code is not None else None,
+                "message": log.untrusted(str(item.get("message", ""))),
+            }
+        )
     return found
 
 

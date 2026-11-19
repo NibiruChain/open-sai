@@ -282,8 +282,8 @@ prices`. Lines written during an MCP tool call carry `tool` and `callId`.
 | `command.start`    | A CLI command starts                    | `command`, `argv`                                                                                    |
 | `command.end`      | It ends                                 | `exitCode`, `durationMs`, `error`                                                                    |
 | `mcp.server_start` | `sai mcp serve` starts                  | `keeper`, `websocket`, `lcd`                                                                         |
-| `mcp.tool_call`    | An agent calls a tool                   | `tool`, `callId`, `arguments`                                                                        |
-| `mcp.tool_result`  | The tool returns                        | `ok`, `code`, `error`, `account`, `status`, `intentKey`, `previewDigest`, `durationMs`               |
+| `mcp.tool_call`    | An agent calls a tool                   | `tool`, `callId`, `arguments`, `unknownArguments`                                                    |
+| `mcp.tool_result`  | The tool returns                        | `ok`, `code`, `error`, `errorType`, `account`, `status`, `intentKey`, `previewDigest`, `durationMs`  |
 | `keeper.request`   | Each Keeper GraphQL request             | `operation`, `endpoint`, `status`, `httpStatus`, `keeperErrors`, `error`, `addr`, `authenticated`, `durationMs` |
 | `intent.reserved`  | A trade intent gets its key             | `intentKey`, `kind`, `status`, `addr`, `tradeId`, `endpoint`                                         |
 | `intent.status`    | Its local status changes                | `intentKey`, `kind`, `previous`, `status`, `addr`, `endpoint`                                        |
@@ -294,6 +294,7 @@ prices`. Lines written during an MCP tool call carry `tool` and `callId`.
 | `session.expired`  | A command finds the session expired     | `addr`, `expiresAt`                                                                                  |
 | `doctor.result`    | `sai doctor` finishes                   | `overall`, `fix`, `offline`, `checks`                                                                |
 | `update.check`     | `sai update --check` finishes           | `ok`, `installed`, `latest`, `updateAvailable`, `installKind`, `error`                               |
+| `log.dropped`      | Events were lost because the disk was slow | `count`                                                                                           |
 
 A `keeper.request` has `status` `ok`, `error`, `rejected` (Keeper refused
 admission), or `not_sent` (the connection failed first). Its `operation` is
@@ -305,20 +306,49 @@ or `absent`, with `intent.keeper` lines for each time `intent status` asked
 Keeper.
 
 The logs never hold the session token, a signature, clipboard text, request
-variables, or response data. URLs lose their user info, query, and fragment,
-so an API key in an endpoint URL is not written. As a second guard, every
-string loses any stored session token and anything shaped like a JWT. Strings
-over 2000 characters are cut.
+variables, or response data. sai passes none of these to the logger, and the
+logger also treats every string as untrusted:
 
-Files older than `logs.keep_days` days, counting today, are deleted. That
-check runs at most once a day, on the first event a process writes. `sai
-config set logs.enabled false` or `SAI_LOG=0` turns logging off; nothing is
-then written or created. `sai logs`, `sai doctor --no-fix`, `--help`,
-`--version`, and `--skill` never write log lines. A logs directory that
-cannot be written never fails a command: sai skips logging for that run.
+- A URL anywhere, including in `argv` and `endpoint`, is cut to its scheme,
+  host, and port, so an API key in a path or query is not written.
+- Stored session tokens, anything shaped like a JWT, and hex strings of 100
+  digits or more, such as a signature, are replaced.
+- Text Keeper or a tool returned (`keeperErrors`, `errorMsg`, `error`) is
+  cut to 300 characters and also loses hex strings of 64 digits or more.
+- `mcp.tool_call` logs only the parameters the tool defines.
+  `unknownArguments` counts the rest, and a call to a tool the server does
+  not have is logged as tool `unknown` with no arguments.
+- Other strings are cut at 2000 characters.
+
+Logging never slows a command or a trade. Events go on an in-memory queue of
+2048, and one background thread redacts and writes them, so a slow disk
+cannot delay an MCP reply or the step between reserving an intent and
+submitting it. If the queue fills, sai drops events and later writes one
+`log.dropped` line with the count. At exit sai waits up to two seconds for
+the queue to empty.
+
+sai writes only inside a real `$SAI_HOME/logs` directory that you own. It
+does not follow a symlink at that path, and it does not append to a symlink,
+a FIFO, a file with other hard links, or a file someone else owns. It
+removes group and other access from the directory and from a log file before
+appending. A logs directory that cannot be written never fails a command;
+the lines are lost. `sai doctor` reports a symlink or a file at the logs
+path.
+
+Files older than `logs.keep_days` days, counting today, are deleted once per
+UTC day. A long-running MCP server checks again when the day changes. Only
+files named `cli-`, `mcp-`, or `update-YYYY-MM-DD.jsonl` are deleted; other
+files in the directory are left alone.
+
+`sai config set logs.enabled false` or `SAI_LOG=0` turns logging off;
+nothing is then written or created. A logs setting sai cannot read, such as
+`SAI_LOG_KEEP_DAYS=two`, or a config file that does not parse, also turns
+logging off. `sai logs`, `sai doctor --no-fix`, `--help`, `--version`, and
+`--skill` never write log lines.
 
 Each line is appended with a single write, so concurrent `sai` processes and
-MCP servers never interleave within a line.
+MCP servers never interleave within a line. `sai logs tail` reads each file
+from its end, so it stays fast on a large file.
 
 Run `sai` with no arguments for an interactive shell. `help` or `help COMMAND`
 prints usage, Ctrl-C cancels the running command, and Ctrl-D or `exit` leaves.

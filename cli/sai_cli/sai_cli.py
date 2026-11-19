@@ -161,9 +161,15 @@ class LoggedGroup(click.Group):
     runs: ClassVar[list[dict[str, Any]]] = []
 
     def main(self, args: Any = None, *rest: Any, **extra: Any) -> Any:
-        argv = [str(a) for a in (sys.argv[1:] if args is None else args)]
-        names = command_path(self, argv)
-        if unlogged(names, argv):
+        # Nothing here may fail the command: argv is logged as given, and
+        # the log writer removes credentials later.
+        try:
+            argv = [str(a) for a in (sys.argv[1:] if args is None else args)]
+            names = command_path(self, argv)
+            quiet = unlogged(names, argv)
+        except Exception:  # noqa: BLE001 - logging must not fail a command
+            argv, names, quiet = [], [], True
+        if quiet:
             with log.silenced():
                 return super().main(args, *rest, **extra)
         command = " ".join(names) or ("repl" if not argv else None)
@@ -171,7 +177,7 @@ class LoggedGroup(click.Group):
         run: dict[str, Any] = {"exitCode": 0}
         started = time.monotonic()
         with log.bind(surface=surface, command=command):
-            log.event("command.start", argv=[log.argument(a) for a in argv])
+            log.event("command.start", argv=argv)
             self.runs.append(run)
             try:
                 return super().main(args, *rest, **extra)
@@ -1512,6 +1518,7 @@ def logs_path(ctx: click.Context) -> None:
     if not ctx.obj["json"]:
         click.echo(root)
         return
+    log.flush(1.0)
     on, keep_days = log.config()
     emit(
         ctx,
@@ -1624,7 +1631,7 @@ def update_command(
     try:
         latest = update.fetch_latest(api_base=api_base, web_base=web_base)
     except update.UpdateError as exc:
-        log.event("update.check", "warn", ok=False, error=str(exc))
+        log.event("update.check", "warn", ok=False, error=log.untrusted(str(exc)))
         raise click.ClickException(f"update check failed: {exc}") from exc
     try:
         update.write_cache(update.Cache(latest, update.now()))

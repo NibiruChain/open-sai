@@ -675,17 +675,26 @@ class SaiMCP(FastMCP):
         `mcp.tool_result` after. Events the tool writes meanwhile, such as
         Keeper requests, carry the same `tool` and `callId`."""
         started = time.monotonic()
-        with sai_log.bind(surface="mcp", tool=name, callId=uuid.uuid4().hex[:12]):
-            sai_log.event("mcp.tool_call", arguments=arguments)
+        known, unknown = self.loggable(name, arguments)
+        tool = name if known is not None else "unknown"
+        with sai_log.bind(surface="mcp", tool=tool, callId=uuid.uuid4().hex[:12]):
+            sai_log.event(
+                "mcp.tool_call", arguments=known or {}, unknownArguments=unknown or None
+            )
             try:
                 result = await self.checked_call(name, arguments)
             except Exception as exc:
+                # The message can quote the rejected input, so only its
+                # first line is kept, as untrusted text, and nothing for an
+                # unknown tool, whose message is the name the client sent.
+                first = str(exc).partition("\n")[0] if known is not None else None
                 sai_log.event(
                     "mcp.tool_result",
                     "error",
                     ok=False,
                     code="TOOL_ERROR",
-                    error=str(exc),
+                    errorType=type(exc).__name__,
+                    error=sai_log.untrusted(first),
                     durationMs=round((time.monotonic() - started) * 1000),
                 )
                 raise
@@ -697,6 +706,24 @@ class SaiMCP(FastMCP):
                 **summary,
             )
             return result
+
+    def loggable(self, name: str, arguments: Any) -> tuple[dict[str, Any] | None, int]:
+        """The arguments to log for tool NAME, and how many were left out.
+
+        Arguments are logged before the tool validates them, so only the
+        parameters the tool defines are kept, and a call to a tool this
+        server does not have logs none (the first value is then None).
+        """
+        try:
+            tool = self._tool_manager.get_tool(name)
+            given = arguments if isinstance(arguments, dict) else {}
+            if tool is None:
+                return None, len(given)
+            names = tool.parameters.get("properties", {})
+            known = {key: value for key, value in given.items() if key in names}
+            return known, len(given) - len(known)
+        except Exception:  # noqa: BLE001 - logging must not fail a call
+            return None, 0
 
     async def checked_call(
         self, name: str, arguments: dict[str, Any]
@@ -742,6 +769,8 @@ def result_summary(result: Any) -> dict[str, Any]:
         return {"ok": True}
     summary: dict[str, Any] = {"ok": "error" not in value}
     summary.update({k: value[k] for k in RESULT_FIELDS if k in value})
+    if isinstance(summary.get("error"), str):
+        summary["error"] = sai_log.untrusted(summary["error"])
     account = value.get("account", value.get("address"))
     if isinstance(account, str):
         summary["account"] = account
@@ -837,8 +866,8 @@ def serve(flags: Mapping[str, str | None] | None = None) -> None:
     with sai_log.bind(surface="mcp"):
         sai_log.event(
             "mcp.server_start",
-            keeper=sai_log.url(settings.endpoint),
-            websocket=sai_log.url(settings.ws_endpoint),
-            lcd=sai_log.url(settings.lcd_endpoint),
+            keeper=sai_log.endpoint(settings.endpoint),
+            websocket=sai_log.endpoint(settings.ws_endpoint),
+            lcd=sai_log.endpoint(settings.lcd_endpoint),
         )
         create_server(settings).run()

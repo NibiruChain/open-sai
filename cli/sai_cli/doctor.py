@@ -334,6 +334,7 @@ def check_home(ctx: Context) -> Check:
 
 def check_logs(ctx: Context) -> Check:
     """Only the owner can read `$SAI_HOME/logs` and the log files in it."""
+    log.flush(1.0)
     root = log.directory()
     on, keep_days = log.config()
     names = [path.name for _day, _surface, path in log.log_files(root)]
@@ -355,6 +356,14 @@ def check_logs(ctx: Context) -> Check:
             {**details, "symlinks": [str(path) for path in links]},
         )
     off = "" if on else "; logging is off (logs.enabled)"
+    if root.exists() and not root.is_dir():
+        return Check(
+            "logs",
+            "fail",
+            f"{root} is not a directory, so sai cannot write logs",
+            f"Move or remove {root}; sai creates the directory on its next run",
+            details,
+        )
     if not root.is_dir():
         return Check("logs", "pass", f"No logs yet at {root}{off}", None, details)
     loose = loose_modes([root, *(root / name for name in names)])
