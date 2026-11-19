@@ -1,7 +1,7 @@
 """Read-only update support: release tags, the latest release, install kind,
 and the cached check result.
 
-Nothing here installs anything. Release tags are `sai-cli/vMAJOR.MINOR.PATCH`,
+Nothing here installs anything; `updater` does. Release tags are `sai-cli/vMAJOR.MINOR.PATCH`,
 so other components of the repository can release under their own prefixes.
 Pre-release tags such as `sai-cli/v0.2.0-rc.1` never count as the latest
 version.
@@ -122,6 +122,16 @@ def wheel_name(version: str) -> str:
     """The wheel file a release of VERSION attaches. sai-cli is pure Python,
     so every platform shares one wheel."""
     return f"sai_cli-{version}-py3-none-any.whl"
+
+
+_WHEEL_NAME = re.compile(
+    rf"^sai_cli-{_NUMBER}\.{_NUMBER}\.{_NUMBER}-py3-none-any\.whl$"
+)
+
+
+def is_wheel_name(name: str) -> bool:
+    """True for exactly the file name of a sai-cli release wheel."""
+    return _WHEEL_NAME.match(name) is not None
 
 
 def release_for(tag: str, web_base: str = WEB_BASE, repo: str = REPO) -> Release:
@@ -346,9 +356,9 @@ OTHER = "other"
 class Install:
     """How this copy of sai-cli was installed.
 
-    Only an official install can be updated in place by a later release of
-    `sai update`: a `uv tool install` of a release wheel (UV_TOOL_RELEASE) or
-    of this repository's Git source (UV_TOOL_GIT).
+    `sai update` only changes an official install: a `uv tool install` of a
+    release wheel (UV_TOOL_RELEASE) or of this repository's Git source
+    (UV_TOOL_GIT).
     """
 
     kind: str
@@ -591,7 +601,7 @@ def guidance(install: Install) -> Guidance:
     if install.kind == CHECKOUT:
         return Guidance("This is a source checkout; pull, then run `uv sync`.")
     if install.official:
-        return Guidance("Install the latest release with:", INSTALL_COMMAND)
+        return Guidance("Run `sai update` to install it.")
     return Guidance(
         f"Only uv tool installs from {REPO} are supported. To switch to one, run:",
         INSTALL_COMMAND,

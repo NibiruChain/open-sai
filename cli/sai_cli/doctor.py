@@ -35,7 +35,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from .core import keeper, margin, reconcile, storage, stream
+from .core import keeper, margin, reconcile, storage, stream, update, updater
 from .core.settings import Settings, public_url
 from .mcp_server import info, tools
 
@@ -47,7 +47,7 @@ NETWORK_DEADLINE = NETWORK_TIMEOUT + 2
 EXPIRY_WARNING = timedelta(hours=24)
 STATUSES = ("pass", "fixed", "warn", "fail", "skipped")
 SIGN_IN = "sai auth login NAME, or sai auth import"
-REINSTALL = "uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai"
+REINSTALL = update.INSTALL_COMMAND
 DIR_MODE, FILE_MODE = 0o700, 0o600
 
 
@@ -84,6 +84,8 @@ class Context:
     path_env: str = ""
     fix: bool = True
     offline: bool = False
+    # How this copy was installed; None detects it from the running prefix.
+    install: update.Install | None = None
 
 
 CheckFn = Callable[[Context], "Check | Sequence[Check]"]
@@ -144,15 +146,91 @@ def check_install(ctx: Context) -> Check:
             "Keep one; `which -a sai` lists them",
             details,
         )
-    if provenance["kind"] == "source-checkout":
+    install = ctx.install or update.install_kind()
+    details["kind"] = install.kind
+    if install.kind == update.UVX:
         return Check(
             "install",
             "warn",
-            f"sai {version} runs from a source checkout at {provenance['path']}",
+            f"sai {version} runs from a uvx cache, which has no stable path"
+            " and does not update",
+            f"Install it: {REINSTALL}",
+            details,
+        )
+    source = provenance["kind"] == "source-checkout"
+    if install.kind == update.CHECKOUT or (source and install.official):
+        at = f" at {provenance['path']}" if source else ""
+        return Check(
+            "install",
+            "warn",
+            f"sai {version} runs from a source checkout{at}",
             f"For a regular install: {REINSTALL}",
             details,
         )
+    if not install.official:
+        return Check(
+            "install",
+            "warn",
+            f"sai {version} is not a uv tool install from {update.REPO};"
+            " `sai update` does not update it",
+            f"Switch to one: {REINSTALL}",
+            details,
+        )
     return Check("install", "pass", f"sai {version} installed", None, details)
+
+
+def check_version(ctx: Context) -> Check:
+    """Compare the installed version with the last update check, and report
+    an update that failed. It reads $SAI_HOME/update.json; no network."""
+    installed = info.version()
+    state = updater.read_state()
+    latest = state.get("latest")
+    result = state.get("result")
+    details = {
+        "installed": installed,
+        "latest": update.tag_version(latest) if isinstance(latest, str) else None,
+        "checkedAt": state.get("checkedAt"),
+        "lastUpdate": result if isinstance(result, dict) else None,
+    }
+    install = ctx.install or update.install_kind()
+    how = "`sai update`" if install.official else REINSTALL
+    behind = isinstance(latest, str) and update.is_newer(latest, installed)
+    if isinstance(result, dict) and result.get("status") == updater.FAILED:
+        target = result.get("to")
+        still = isinstance(target, str) and update.is_newer(
+            update.tag_for(target), installed
+        )
+        if still:
+            return Check(
+                "version",
+                "warn",
+                f"The last update failed: {result.get('error')}",
+                f"Retry: {how}",
+                details,
+            )
+    if behind:
+        return Check(
+            "version",
+            "warn",
+            f"sai {installed} is behind the latest release {details['latest']}",
+            f"Update: {how}",
+            details,
+        )
+    if details["latest"] is None:
+        return Check(
+            "version",
+            "pass",
+            f"sai {installed}; no release check is recorded yet",
+            None,
+            details,
+        )
+    return Check(
+        "version",
+        "pass",
+        f"sai {installed} is up to date with the latest release",
+        None,
+        details,
+    )
 
 
 # Files sai writes under $SAI_HOME/trader; doctor changes no others.
@@ -862,6 +940,7 @@ def cross_check_network(checks: list[Check]) -> None:
 
 LOCAL_CHECKS: list[tuple[str, CheckFn]] = [
     ("install", check_install),
+    ("version", check_version),
     ("home", check_home),
     ("session", check_session),
     ("intents", check_intents),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -19,7 +20,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 from sai_cli import doctor
-from sai_cli.core import keeper, margin, settings, storage, stream
+from sai_cli.core import keeper, margin, settings, storage, stream, update, updater
 from sai_cli.sai_cli import main
 from websockets.sync.server import ServerConnection, serve
 from websockets.typing import Subprotocol
@@ -594,6 +595,84 @@ def test_install_reports_package_version():
     assert check.status in ("pass", "warn")
 
 
+def with_install(kind: str) -> doctor.Context:
+    return dataclasses.replace(ctx(), install=update.Install(kind, "/prefix"))
+
+
+@pytest.mark.parametrize(
+    ("kind", "text"),
+    [
+        (update.UVX, "runs from a uvx cache"),
+        (update.UV_TOOL_OTHER, "is not a uv tool install from SaiDotFun/open-sai"),
+        (update.OTHER, "is not a uv tool install from SaiDotFun/open-sai"),
+        (update.CHECKOUT, "runs from a source checkout"),
+    ],
+)
+def test_install_warns_for_installs_sai_update_cannot_change(kind, text):
+    check = one(doctor.check_install, with_install(kind))
+    assert check.status == "warn"
+    assert text in check.summary
+    assert check.details["kind"] == kind
+    assert check.fix is not None and update.INSTALL_COMMAND in check.fix
+
+
+def test_install_reports_the_detected_kind():
+    check = one(doctor.check_install, ctx())
+    assert check.details["kind"] == update.install_kind().kind
+
+
+def version_check(kind: str = update.UV_TOOL_RELEASE) -> doctor.Check:
+    return one(doctor.check_version, with_install(kind))
+
+
+def test_version_passes_without_a_recorded_check():
+    check = version_check()
+    assert check.status == "pass"
+    assert "no release check is recorded yet" in check.summary
+    assert check.details["latest"] is None
+
+
+def test_version_passes_when_up_to_date():
+    current = update.tag_for(doctor.info.version())
+    updater.write_state({"latest": current, "checkedAt": update.now()})
+    check = version_check()
+    assert check.status == "pass"
+    assert "up to date" in check.summary
+
+
+def test_version_warns_when_behind():
+    updater.write_state({"latest": "sai-cli/v99.0.0", "checkedAt": update.now()})
+    check = version_check()
+    assert check.status == "warn"
+    assert "is behind the latest release 99.0.0" in check.summary
+    assert check.fix == "Update: `sai update`"
+    unofficial = version_check(update.CHECKOUT)
+    assert unofficial.fix == f"Update: {update.INSTALL_COMMAND}"
+
+
+def test_version_warns_when_the_last_update_failed():
+    result = {
+        "status": updater.FAILED,
+        "to": "99.0.0",
+        "error": "Could not update to 99.0.0: the package does not import.",
+    }
+    updater.write_state(
+        {"latest": "sai-cli/v99.0.0", "checkedAt": update.now(), "result": result}
+    )
+    check = version_check()
+    assert check.status == "warn"
+    assert "The last update failed" in check.summary
+    assert "does not import" in check.summary
+    assert check.fix == "Retry: `sai update`"
+    assert check.details["lastUpdate"] == result
+
+
+def test_version_ignores_a_failure_the_install_has_moved_past():
+    result = {"status": updater.FAILED, "to": "0.0.1", "error": "old"}
+    updater.write_state({"result": result})
+    assert version_check().status == "pass"
+
+
 # Network stubs
 
 
@@ -718,6 +797,7 @@ def test_network_checks_pass_against_stubs(http_stub):
     by_id = {check.id: check for check in checks}
     assert [check.id for check in checks] == [
         "install",
+        "version",
         "home",
         "session",
         "intents",

@@ -13,9 +13,12 @@ from sai_cli.core import update
 from test_update import API_PATH, Routes, listing
 
 
-def build_wheel(version: str, server_body: str = "") -> bytes:
-    """Build a dependency-free sai-cli wheel whose `sai --version` prints
-    VERSION. SERVER_BODY is the source of sai_cli.mcp_server.server."""
+def build_wheel(
+    version: str, server_body: str = "", requires: Sequence[str] = ()
+) -> bytes:
+    """Build a sai-cli wheel whose `sai --version` prints VERSION.
+    SERVER_BODY is the source of sai_cli.mcp_server.server and REQUIRES its
+    dependencies; without them the wheel installs offline."""
     info = f"sai_cli-{version}.dist-info"
     files = {
         "sai_cli/__init__.py": "",
@@ -24,6 +27,7 @@ def build_wheel(version: str, server_body: str = "") -> bytes:
         "sai_cli/mcp_server/server.py": server_body,
         f"{info}/METADATA": (
             f"Metadata-Version: 2.1\nName: sai-cli\nVersion: {version}\n"
+            + "".join(f"Requires-Dist: {name}\n" for name in requires)
         ),
         f"{info}/WHEEL": (
             "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\n"
